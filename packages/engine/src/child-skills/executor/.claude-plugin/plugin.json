@@ -1,0 +1,5 @@
+{
+  "name": "plc",
+  "version": "0.1.0",
+  "description": "PLC 给执行 agent 内置的 skill。PLC 启动 Claude Code 时用 --plugin-dir 加载，不装进用户的系统。"
+}

@@ -1,0 +1,391 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Paimon · Lead Companion concept</title>
+  <style>
+    :root {
+      --ink: #17202d;
+      --muted: #738095;
+      --faint: #a8b1bf;
+      --line: #e4e8ee;
+      --panel: #ffffff;
+      --canvas: #f2f4f7;
+      --blue: #2869ed;
+      --blue-soft: #eaf1ff;
+      --green: #0e9f6e;
+      --green-soft: #e9f8f1;
+      --amber: #b66a06;
+      --amber-soft: #fff5df;
+      --red: #d6403a;
+      --red-soft: #fff0ef;
+      --navy: #101722;
+      --shadow: 0 10px 32px rgba(22, 32, 45, .07);
+      --font: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; min-height: 100%; overflow-x: clip; background: var(--canvas); color: var(--ink); font-family: var(--font); }
+    button { font: inherit; cursor: pointer; }
+    .app { min-height: 100vh; display: grid; grid-template-columns: 260px minmax(420px, 1fr) 470px; }
+    .rail, .main, .detail { min-width: 0; }
+    .rail { background: #f9fafb; border-right: 1px solid var(--line); padding: 22px 16px; display: flex; flex-direction: column; gap: 22px; }
+    .brand { display: flex; align-items: center; gap: 11px; padding: 2px 8px 8px; }
+    .mark { width: 34px; height: 34px; display: grid; place-items: center; border-radius: 11px; background: var(--navy); color: white; font-weight: 800; }
+    .brand strong { font-size: 15px; letter-spacing: -.02em; }
+    .brand small { display: block; margin-top: 2px; color: var(--muted); font-size: 11px; }
+    .nav { display: grid; gap: 4px; }
+    .nav button, .rail-section button { border: 0; background: transparent; color: var(--muted); text-align: left; padding: 10px 12px; border-radius: 8px; }
+    .nav button.active, .nav button:hover, .rail-section button:hover { background: #eef1f5; color: var(--ink); }
+    .nav button { display: flex; justify-content: space-between; }
+    .count { color: var(--faint); font-size: 12px; }
+    .rail-section { border-top: 1px solid var(--line); padding-top: 18px; }
+    .section-label { padding: 0 12px 8px; color: var(--faint); font-size: 11px; font-weight: 750; text-transform: uppercase; letter-spacing: .08em; }
+    .mini-ticket { display: grid; grid-template-columns: 9px 1fr; gap: 9px; width: 100%; }
+    .mini-ticket i { width: 8px; height: 8px; margin-top: 5px; border-radius: 50%; background: var(--red); }
+    .mini-ticket b { display: block; font-size: 12px; }
+    .mini-ticket span { display: block; margin-top: 3px; color: var(--muted); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .schedule { margin-top: auto; border: 1px solid var(--line); border-radius: 12px; background: white; padding: 14px; }
+    .schedule h3 { margin: 0; font-size: 12px; }
+    .schedule p { margin: 6px 0 0; color: var(--muted); font-size: 11px; line-height: 1.45; }
+    .schedule-row { display: flex; gap: 9px; margin-top: 12px; align-items: center; font-size: 11px; }
+    .time { color: var(--muted); font-family: var(--mono); font-size: 10px; }
+    .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--blue); }
+
+    .main { background: var(--canvas); display: flex; flex-direction: column; min-height: 100vh; }
+    .topbar { min-height: 76px; display: flex; align-items: center; gap: 18px; padding: 16px 26px; background: var(--panel); border-bottom: 1px solid var(--line); }
+    .identity { display: flex; align-items: center; gap: 10px; min-width: 150px; }
+    .avatar { width: 40px; height: 40px; border-radius: 13px; display: grid; place-items: center; background: var(--navy); color: white; font-weight: 800; font-size: 18px; }
+    .identity strong { display: block; font-size: 15px; }
+    .presence { display: flex; align-items: center; gap: 6px; margin-top: 3px; color: var(--green); font-size: 11px; }
+    .presence i { width: 7px; height: 7px; border-radius: 50%; background: var(--green); box-shadow: 0 0 0 5px rgba(14,159,110,.12); }
+    .mode { border-left: 1px solid var(--line); padding-left: 18px; color: var(--muted); font-size: 12px; }
+    .mode b { color: var(--ink); display: block; margin-top: 3px; font-size: 13px; }
+    .top-actions { margin-left: auto; display: flex; gap: 8px; }
+    .icon-button, .ghost, .primary { border: 1px solid var(--line); border-radius: 8px; background: white; color: var(--ink); padding: 9px 12px; }
+    .icon-button { width: 36px; padding: 0; height: 36px; }
+    .primary { border-color: var(--blue); background: var(--blue); color: white; }
+    .workspace { flex: 1; display: flex; flex-direction: column; padding: 28px 32px 24px; }
+    .context-strip { display: flex; align-items: center; gap: 9px; margin-bottom: 24px; color: var(--muted); font-size: 12px; }
+    .context-strip button { border: 0; background: transparent; color: var(--blue); padding: 0; font-weight: 700; }
+    .lead-intro { max-width: 720px; }
+    .eyebrow { color: var(--blue); font-size: 11px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
+    h1 { margin: 8px 0 10px; font-size: clamp(28px, 4vw, 46px); line-height: 1.03; letter-spacing: -.055em; }
+    .lead-view-title { margin: 4px 0 4px; font-size: 22px; line-height: 1.15; letter-spacing: -.035em; }
+    .lead-view-copy { max-width: 650px; margin: 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
+    .lead-view .eyebrow { margin-top: 0; }
+    .lead-view .composer { margin-top: 15px; }
+    .lead-view .active-strip { margin-top: 20px; padding-top: 0; }
+    .lead-intro p { max-width: 620px; margin: 0; color: var(--muted); font-size: 15px; line-height: 1.6; }
+    .composer { display: flex; align-items: flex-end; gap: 10px; margin-top: 28px; padding: 12px; border: 1px solid #dfe5ed; border-radius: 13px; background: white; box-shadow: var(--shadow); }
+    .composer textarea { flex: 1; min-height: 46px; resize: vertical; border: 0; outline: 0; color: var(--ink); font: inherit; line-height: 1.45; }
+    .composer textarea::placeholder { color: var(--faint); }
+    .composer button { flex: 0 0 auto; }
+    .active-strip { display: flex; gap: 8px; margin-top: auto; padding-top: 36px; overflow-x: auto; }
+    .active-card { min-width: 190px; border: 1px solid var(--line); border-radius: 10px; background: white; padding: 12px; text-align: left; }
+    .active-card:hover { border-color: #b9c8e9; box-shadow: var(--shadow); }
+    .active-card .line { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+    .active-card b { font-size: 12px; }
+    .active-card p { margin: 8px 0 0; color: var(--muted); font-size: 11px; }
+    .pill { display: inline-flex; align-items: center; gap: 5px; border-radius: 999px; padding: 4px 8px; font-size: 10px; font-weight: 750; white-space: nowrap; }
+    .pill.red { color: var(--red); background: var(--red-soft); }
+    .pill.green { color: var(--green); background: var(--green-soft); }
+    .pill.amber { color: var(--amber); background: var(--amber-soft); }
+    .pill.blue { color: var(--blue); background: var(--blue-soft); }
+
+    .detail { background: white; border-left: 1px solid var(--line); display: flex; flex-direction: column; min-height: 100vh; }
+    .detail-head { padding: 24px 24px 18px; border-bottom: 1px solid var(--line); }
+    .detail-kicker { display: flex; align-items: center; justify-content: space-between; color: var(--muted); font-size: 11px; }
+    .detail h2 { margin: 12px 0 7px; font-size: 22px; line-height: 1.15; letter-spacing: -.035em; }
+    .detail-sub { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
+    .detail-tabs { display: flex; gap: 18px; margin-top: 20px; }
+    .detail-tabs button { border: 0; border-bottom: 2px solid transparent; background: transparent; color: var(--muted); padding: 0 0 9px; font-size: 12px; }
+    .detail-tabs button.active { border-color: var(--blue); color: var(--ink); font-weight: 750; }
+    .detail-scroll { flex: 1; overflow: auto; padding: 18px 24px 26px; }
+    .attention { display: grid; grid-template-columns: 8px 1fr auto; gap: 10px; align-items: start; padding: 12px; border-radius: 9px; background: var(--amber-soft); }
+    .attention > i { width: 4px; height: 100%; min-height: 30px; border-radius: 4px; background: var(--amber); }
+    .attention b { font-size: 12px; }
+    .attention p { margin: 4px 0 0; color: #89601d; font-size: 11px; line-height: 1.45; }
+    .attention button { border: 0; background: transparent; color: var(--amber); font-size: 11px; font-weight: 750; white-space: nowrap; }
+    .section { margin-top: 22px; }
+    .section-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
+    .section-head h3 { margin: 0; font-size: 12px; }
+    .section-head span { color: var(--faint); font-size: 10px; }
+    .flow { position: relative; display: grid; gap: 0; }
+    .flow:before { content: ""; position: absolute; left: 12px; top: 14px; bottom: 14px; width: 1px; background: var(--line); }
+    .step { position: relative; display: grid; grid-template-columns: 26px 1fr; gap: 9px; padding: 9px 0; }
+    .step-mark { z-index: 1; width: 25px; height: 25px; display: grid; place-items: center; border: 1px solid var(--line); border-radius: 50%; background: white; color: var(--muted); font-size: 10px; font-weight: 800; }
+    .step.done .step-mark { border-color: var(--green); background: var(--green-soft); color: var(--green); }
+    .step.current .step-mark { border-color: var(--blue); background: var(--blue); color: white; }
+    .step h4 { margin: 2px 0 3px; font-size: 12px; }
+    .step p { margin: 0; color: var(--muted); font-size: 11px; line-height: 1.45; }
+    .subtasks { display: grid; gap: 6px; }
+    .subtask { display: flex; align-items: center; gap: 8px; padding: 9px 10px; border: 1px solid var(--line); border-radius: 8px; font-size: 11px; }
+    .subtask i { width: 7px; height: 7px; border-radius: 50%; background: var(--green); }
+    .subtask.pending i { background: var(--amber); }
+    .subtask span { margin-left: auto; color: var(--faint); font-family: var(--mono); font-size: 10px; }
+    .evidence { display: grid; gap: 7px; }
+    .evidence button { display: flex; align-items: center; justify-content: space-between; border: 1px solid var(--line); border-radius: 8px; background: white; padding: 10px; color: var(--ink); text-align: left; font-size: 11px; }
+    .evidence button:hover { border-color: #b9c8e9; }
+    .evidence small { color: var(--muted); }
+    .evidence-detail { margin-top: 10px; padding: 13px; border: 1px solid #c8d6f8; border-radius: 9px; background: var(--blue-soft); }
+    .evidence-detail h4 { margin: 0; font-size: 12px; }
+    .evidence-detail p { margin: 6px 0 0; color: var(--muted); font-size: 11px; line-height: 1.55; }
+    .evidence-detail code { display: block; margin-top: 9px; padding: 9px; overflow: auto; border-radius: 7px; background: var(--navy); color: #dce7ff; font: 10px/1.55 var(--mono); }
+    .detail-copy { color: var(--muted); font-size: 12px; line-height: 1.6; }
+    .log-list { display: grid; gap: 0; }
+    .log-row { display: grid; grid-template-columns: 72px 1fr; gap: 12px; padding: 12px 0; border-bottom: 1px solid var(--line); }
+    .log-row time { color: var(--faint); font: 10px var(--mono); }
+    .log-row b { display: block; font-size: 11px; }
+    .log-row p { margin: 4px 0 0; color: var(--muted); font-size: 11px; }
+    .detail-actions { display: flex; gap: 8px; padding: 16px 24px; border-top: 1px solid var(--line); }
+    .detail-actions[hidden] { display: none; }
+    .detail-actions button { flex: 1; }
+    .right-context { flex: 1; overflow: auto; padding: 24px; background: #fbfcfe; }
+    .right-context[hidden] { display: none; }
+    .context-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; margin-bottom: 18px; }
+    .context-head h2 { margin: 0; font-size: 20px; line-height: 1.2; letter-spacing: -.035em; }
+    .context-head p { margin: 6px 0 0; color: var(--muted); font-size: 11px; line-height: 1.5; }
+    .context-head button { flex: 0 0 auto; }
+    .right-context .view { display: block; }
+    .right-context .view-title { display: block; margin-bottom: 16px; }
+    .right-context .view-title .eyebrow,
+    .right-context .view-title h1 { display: none; }
+    .right-context .view-title h1 { font-size: 24px; }
+    .right-context .view-title p { max-width: 280px; }
+    .right-context .view-actions { margin-top: 12px; }
+    .right-context .queue, .right-context .calendar, .right-context .map { display: grid; gap: 8px; }
+    .right-context .queue-row { width: 100%; }
+    .right-context .project { background: white; }
+    .right-context .calendar-row { display: block; }
+    .right-context .calendar-time { margin-bottom: 8px; }
+    .jump { border-color: #c8d6f8; background: var(--blue-soft); color: var(--blue); }
+    .toast { position: fixed; right: 24px; bottom: 24px; max-width: 330px; padding: 12px 14px; border: 1px solid #cfe8dc; border-radius: 10px; background: white; box-shadow: var(--shadow); color: var(--green); font-size: 12px; opacity: 0; transform: translateY(8px); pointer-events: none; transition: .2s ease; }
+    .toast.show { opacity: 1; transform: translateY(0); }
+    .view { display: none; }
+    .view.active { display: block; }
+    .lead-view { display: block; }
+    .module-view { display: none !important; }
+    .view-title { display: flex; align-items: end; justify-content: space-between; gap: 18px; margin-bottom: 22px; }
+    .view-title h1 { margin: 0; font-size: 32px; }
+    .view-title p { margin: 5px 0 0; color: var(--muted); font-size: 12px; }
+    .view-actions { display: flex; gap: 8px; }
+    .message-list { display: grid; gap: 14px; max-width: 780px; }
+    .message { border-bottom: 1px solid var(--line); padding: 0 0 14px; }
+    .message-meta { display: flex; justify-content: space-between; color: var(--faint); font-size: 10px; margin-bottom: 7px; }
+    .message-body { color: var(--ink); font-size: 13px; line-height: 1.6; }
+    .message-body strong { font-weight: 800; }
+    .message-body code { padding: 2px 4px; border-radius: 4px; background: #eef1f5; color: #53627a; font-family: var(--mono); font-size: 11px; }
+    .message.system .message-body { color: var(--muted); }
+    .message-card { margin-top: 10px; border: 1px solid var(--line); border-radius: 10px; background: white; padding: 13px; }
+    .message-card.approval { border-color: #f2c986; background: #fffaf0; }
+    .message-card.failure { border-color: #f2b4ae; background: var(--red-soft); }
+    .message-card.blocked { border-left: 4px solid var(--red); background: #fff8f7; }
+    .message-card h4 { margin: 0; font-size: 12px; }
+    .message-card p { margin: 5px 0 0; color: var(--muted); font-size: 11px; line-height: 1.5; }
+    .message-card .card-actions { display: flex; gap: 7px; margin-top: 10px; }
+    .message-card button { border: 1px solid var(--line); border-radius: 7px; background: white; padding: 7px 10px; color: var(--ink); font-size: 11px; }
+    .message-card button.primary-action { border-color: var(--blue); background: var(--blue); color: white; }
+    .message-card button.danger-action { border-color: #efb2ad; color: var(--red); }
+    .status-line { display: flex; align-items: center; gap: 7px; margin-top: 9px; color: var(--green); font-size: 11px; font-weight: 750; }
+    .status-line i { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+    .status-line.waiting { color: var(--amber); }
+    .status-line.failed { color: var(--red); }
+    .queue { display: grid; gap: 9px; }
+    .queue-row { display: grid; grid-template-columns: 62px 1fr auto; gap: 12px; align-items: center; padding: 13px; border: 1px solid var(--line); border-radius: 10px; background: white; }
+    .queue-row:hover { border-color: #b9c8e9; box-shadow: var(--shadow); }
+    .queue-row b { font-size: 12px; }
+    .queue-row p { margin: 4px 0 0; color: var(--muted); font-size: 11px; }
+    .calendar { display: grid; grid-template-columns: 110px 1fr; border-top: 1px solid var(--line); }
+    .calendar-row { display: contents; }
+    .calendar-row > * { padding: 17px 12px; border-bottom: 1px solid var(--line); }
+    .calendar-time { color: var(--muted); font-family: var(--mono); font-size: 11px; }
+    .calendar-event b { font-size: 12px; }
+    .calendar-event p { margin: 4px 0 0; color: var(--muted); font-size: 11px; }
+    .map { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+    .project { min-height: 150px; border: 1px solid var(--line); border-radius: 10px; background: white; padding: 15px; }
+    .project h3 { margin: 0; font-size: 13px; }
+    .project p { margin: 7px 0 0; color: var(--muted); font-size: 11px; line-height: 1.5; }
+    .project .project-meta { display: flex; gap: 6px; margin-top: 18px; }
+    @media (max-width: 1120px) { .app { grid-template-columns: 220px minmax(0, 1fr); } .detail { grid-column: 1 / -1; min-height: auto; border-top: 1px solid var(--line); border-left: 0; } .detail-scroll { max-height: 720px; } }
+    @media (max-width: 760px) { .app { display: block; } .rail { display: none; } .topbar { padding: 14px 16px; } .workspace { padding: 24px 16px; min-height: 650px; } .mode { display: none; } .top-actions { gap: 4px; } .detail-head, .detail-scroll, .detail-actions { padding-left: 16px; padding-right: 16px; } h1 { font-size: 34px; } .active-strip { margin-top: 30px; } }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <aside class="rail">
+      <div class="brand"><div class="mark">π</div><div><strong>Paimon Companion</strong><small>常驻 Lead 工作台</small></div></div>
+      <nav class="nav" aria-label="主导航">
+        <button class="active" data-view="lead-view">Lead 会话 <span class="count">1</span></button>
+        <button data-view="queue-view">工单队列 <span class="count">6</span></button>
+        <button data-view="schedule-view">日程与例行 <span class="count">3</span></button>
+        <button data-view="projects-view">项目地图 <span class="count">4</span></button>
+      </nav>
+      <div class="rail-section">
+        <div class="section-label">需要你介入</div>
+        <button class="mini-ticket" data-ticket="38"><i></i><span><b>#38 daemon 启动权限</b><span>等待授权 · 需要你的决定</span></span></button>
+        <button class="mini-ticket" data-ticket="42"><i></i><span><b>#42 控制面协议审计</b><span>review hold · 等待验收</span></span></button>
+      </div>
+      <div class="rail-section">
+        <div class="section-label">稍后查看</div>
+        <button class="mini-ticket" data-ticket="41"><i style="background:var(--amber)"></i><span><b>#41 M9 launchd 真机验收</b><span>child 已完成 · 等待你验收</span></span></button>
+      </div>
+      <div class="schedule">
+        <h3>接下来 24 小时</h3>
+        <p>日程只负责提醒节奏，不抢占 Lead 的主会话。</p>
+        <div class="schedule-row"><span class="time">09:30</span><i class="dot"></i><span>周报数据汇总</span></div>
+        <div class="schedule-row"><span class="time">14:00</span><i class="dot" style="background:var(--amber)"></i><span>检查 M9 验收窗口</span></div>
+      </div>
+    </aside>
+
+    <main class="main">
+      <header class="topbar">
+        <div class="identity"><div class="avatar">P</div><div><strong>Paimon</strong><div class="presence"><i></i>在线 · standby</div></div></div>
+        <div class="mode"><span>当前焦点</span><b id="focusLabel">Lead 主会话</b></div>
+        <div class="top-actions"><button class="icon-button" title="查看通知">⌁</button><button class="icon-button" title="打开日程">◷</button></div>
+      </header>
+      <section class="workspace">
+        <div class="view active lead-view" id="lead-view">
+        <div class="context-strip"><span>Lead 主会话</span><span>/</span><span>所有任务的调度入口</span><button id="clearFocus">清除焦点</button></div>
+        <div class="lead-intro">
+          <div class="eyebrow">Lead is always here</div>
+          <h1 class="lead-view-title">Paimon 长驻前台</h1>
+          <p class="lead-view-copy">所有任务从这条会话进入，也从这条会话汇报。工单、日程和项目地图只在右侧展开，不会替换你的 Lead。</p>
+          <div class="composer"><textarea placeholder="告诉 Paimon 你现在想推进什么……"></textarea><button class="primary" id="sendBtn">发送给 Lead</button></div>
+        </div>
+        <div class="active-strip">
+          <button class="active-card" data-ticket="42"><div class="line"><b>#42 协议审计</b><span class="pill red">需介入</span></div><p>child 等待 reviewer pre/post hash 对比</p></button>
+          <button class="active-card" data-ticket="41"><div class="line"><b>#41 M9 真机验收</b><span class="pill amber">待验收</span></div><p>3 项证据已就绪，等待用户判断</p></button>
+          <button class="active-card" data-ticket="55"><div class="line"><b>#55 周报汇总</b><span class="pill green">运行中</span></div><p>后台执行 · 当前进度 28%</p></button>
+        </div>
+        <div class="message-list" style="margin-top:28px">
+          <article class="message"><div class="message-meta"><span>Paimon · 刚刚</span><span>进度汇报</span></div><div class="message-body">#42 已完成协议层审计，发现 3 个需要在验收前确认的边界。我把任务放入 <strong>review hold</strong>，不会自行合并。</div></article>
+          <article class="message"><div class="message-meta"><span>Paimon · 2 分钟前</span><span>需要你的决定</span></div><div class="message-body">child 在 #38 执行安装时遇到系统权限限制，需要你批准一次性授权。</div><div class="message-card approval"><h4>授权请求 · 安装 launchd 服务</h4><p>目标：工单 #38 · 执行环境：isolated workspace · 风险：修改系统 LaunchDaemon</p><div class="card-actions"><button class="primary-action" id="approveMessage">批准并继续</button><button class="danger-action">拒绝</button><button>查看工单</button></div></div></article>
+          <article class="message system"><div class="message-meta"><span>系统消息 · 1 分钟前</span><span>#38</span></div><div class="message-card approval" id="approvedMessage"><h4>授权已记录，等待执行状态确认</h4><p>你的授权已经写入本次操作，但工单仍处于阻塞。child / Lead 需要重新上报执行结果。</p><div class="status-line waiting"><i></i>当前状态：等待 child 恢复执行</div></div></article>
+          <article class="message"><div class="message-meta"><span>Paimon · 5 分钟前</span><span>执行失败</span></div><div class="message-body">#41 的验收脚本已执行，但真机连接在启动阶段失败。</div><div class="message-card failure"><h4>执行失败 · 不会自动伪装成已完成</h4><p><code>device handshake timeout</code> · 已保留失败证据、日志和 workspace，不会自动合并。</p><div class="status-line failed"><i></i>工单状态：失败 · 等待你决定重试或结束</div><div class="card-actions"><button class="primary-action">查看失败证据</button><button>重新执行</button><button>取消工单</button></div></div></article>
+          <article class="message"><div class="message-meta"><span>Paimon · 8 分钟前</span><span>阻塞</span></div><div class="message-card blocked"><h4>#45 被阻塞：run-start:78 冲突</h4><p>系统没有继续派发第二个 child。你可以跳入工单上下文检查冲突，也可以让 Lead 重新规划。</p><div class="status-line failed"><i></i>需要介入 · 工单仍未完成</div></div></article>
+        </div>
+        </div>
+        <div class="view module-view" id="queue-view"><div class="view-title"><div><div class="eyebrow">Context panel</div><h1>工单队列</h1><p>Lead 仍留在左侧；这里仅提供可跳入的任务上下文。</p></div><div class="view-actions"><button class="ghost">筛选</button><button class="primary">新建工单</button></div></div><div class="queue"><button class="queue-row" data-ticket="38"><span class="pill red">需介入</span><span><b>#38 迁移 daemon 到常开机器</b><p>child 等待系统权限授权 · workspace 可恢复</p></span><span>›</span></button><button class="queue-row" data-ticket="42"><span class="pill red">review</span><span><b>#42 移动控制面协议缺口审计</b><p>2/3 子任务完成 · review hold</p></span><span>›</span></button><button class="queue-row" data-ticket="41"><span class="pill amber">待验收</span><span><b>#41 M9 launchd 真机验收</b><p>证据已就绪 · 等待用户确认</p></span><span>›</span></button><button class="queue-row" data-ticket="55"><span class="pill green">运行中</span><span><b>#55 周报自动化汇总</b><p>后台例行执行 · 28%</p></span><span>›</span></button></div></div>
+        <div class="view module-view" id="schedule-view"><div class="view-title"><div><div class="eyebrow">Context panel</div><h1>日程与例行</h1><p>日程只触发 Lead 的工作，不生成第二个聊天入口。</p></div><button class="primary">添加例行</button></div><div class="calendar"><div class="calendar-row"><div class="calendar-time">今天 · 09:30</div><div class="calendar-event"><b>周报数据汇总</b><p>触发 #55，Lead 收集项目进度后汇报结果。</p></div></div><div class="calendar-row"><div class="calendar-time">今天 · 14:00</div><div class="calendar-event"><b>M9 验收窗口</b><p>提醒你查看 #41 的证据，不自动批准。</p></div></div><div class="calendar-row"><div class="calendar-time">明天 · 10:00</div><div class="calendar-event"><b>项目风险巡检</b><p>Lead 汇总所有 blocked / stale 工单，形成一条会话消息。</p></div></div></div></div>
+        <div class="view module-view" id="projects-view"><div class="view-title"><div><div class="eyebrow">Context panel</div><h1>项目地图</h1><p>项目是工单的长期上下文，Lead 仍是唯一的交互入口。</p></div><button class="ghost">管理项目</button></div><div class="map"><div class="project"><h3>移动控制面 GA</h3><p>控制面协议、授权边界、Companion 真实验收。</p><div class="project-meta"><span class="pill red">2 需介入</span><span class="pill amber">1 待验收</span></div></div><div class="project"><h3>常开机器迁移</h3><p>launchd、workspace 生命周期和 daemon 启动修复。</p><div class="project-meta"><span class="pill red">1 阻塞</span></div></div><div class="project"><h3>个人运营例行</h3><p>周报、资料调研、提醒和周期性检查。</p><div class="project-meta"><span class="pill green">3 个例行</span></div></div><div class="project"><h3>待规划</h3><p>暂存想法，由 Lead 在对话中进一步澄清。</p><div class="project-meta"><span class="pill blue">2 个想法</span></div></div></div></div>
+      </section>
+    </main>
+
+    <aside class="detail" aria-label="工单详情">
+      <div class="detail-head" id="ticketHead">
+        <div class="detail-kicker"><span id="ticketKicker">工单 #42 · 独立上下文</span><span class="pill red">需要介入</span></div>
+        <h2 id="ticketTitle">移动控制面协议缺口审计</h2>
+        <p class="detail-sub" id="ticketSummary">child 已完成协议层审计，正在等待你确认是否进入验收。</p>
+        <div class="detail-tabs"><button class="active" data-tab="overview">现在</button><button data-tab="conversation">任务对话</button><button data-tab="evidence">证据</button><button data-tab="log">日志</button></div>
+      </div>
+      <div class="detail-scroll" id="detailBody">
+        <div class="attention"><i></i><div><b>这里需要你的一个决定</b><p>review hold 已打开。你可以批准继续、要求补证据，或直接跳入任务上下文和 child 对话。</p></div><button id="jumpBtn">跳入</button></div>
+        <section class="section"><div class="section-head"><h3>工单现在处于什么阶段</h3><span>权威状态 · stage</span></div><div class="flow">
+          <div class="step done"><div class="step-mark">✓</div><div><h4>目标与拆解</h4><p>Lead 已将目标拆成 3 个可验收子任务。</p></div></div>
+          <div class="step done"><div class="step-mark">✓</div><div><h4>child 执行</h4><p>在 isolated workspace 完成协议审计。</p></div></div>
+          <div class="step current"><div class="step-mark">3</div><div><h4>review hold</h4><p>等待你确认验收范围，不代表工单已完成。</p></div></div>
+          <div class="step"><div class="step-mark">4</div><div><h4>合并与释放</h4><p>通过验收后才会进入下一阶段。</p></div></div>
+        </div></section>
+        <section class="section"><div class="section-head"><h3>子任务</h3><span>3 项 · 2 已完成</span></div><div class="subtasks"><div class="subtask"><i></i>枚举控制面能力 <span>#43</span></div><div class="subtask"><i></i>对比 paired API <span>#44</span></div><div class="subtask pending"><i></i>验证授权边界 <span>#45</span></div></div></section>
+        <section class="section"><div class="section-head"><h3>验收证据</h3><span>点击查看，不离开工单</span></div><div class="evidence"><button><span>reviewer pre hash</span><small>已生成 · 14:32 ›</small></button><button><span>reviewer post hash</span><small>等待执行 ›</small></button><button><span>child 执行摘要</span><small>3 条关键发现 ›</small></button></div></section>
+      </div>
+      <div class="detail-actions"><button class="ghost" id="holdBtn">继续保持 Hold</button><button class="primary" id="approveBtn">批准继续</button></div>
+      <div class="right-context" id="rightContext" hidden>
+        <div class="context-head"><div><div class="eyebrow">Lead context</div><h2 id="contextTitle">工单队列</h2><p id="contextSummary">Lead 保持在线，右侧仅展开你当前查看的工作上下文。</p></div><button class="ghost" id="backToTicket">返回工单</button></div>
+        <div id="contextBody"></div>
+      </div>
+    </aside>
+  </div>
+  <div class="toast" id="toast"></div>
+  <script>
+    const toast = (text) => { const el = document.querySelector('#toast'); el.textContent = text; el.classList.add('show'); setTimeout(() => el.classList.remove('show'), 2400); };
+    const title = document.querySelector('#ticketTitle');
+    const summary = document.querySelector('#ticketSummary');
+    const kicker = document.querySelector('#ticketKicker');
+    const focus = document.querySelector('#focusLabel');
+    const detailBody = document.querySelector('#detailBody');
+    const ticketHead = document.querySelector('#ticketHead');
+    const detailActions = document.querySelector('.detail-actions');
+    const rightContext = document.querySelector('#rightContext');
+    const contextBody = document.querySelector('#contextBody');
+    const contextTitle = document.querySelector('#contextTitle');
+    const contextSummary = document.querySelector('#contextSummary');
+    const overviewMarkup = detailBody.innerHTML;
+    const detailTabs = {
+      overview: overviewMarkup,
+      conversation: `<section class="section"><div class="section-head"><h3>任务对话</h3><span>child · isolated workspace</span></div><p class="detail-copy">这是 #42 的独立上下文。你在这里发送的消息只会进入该工单，不会打断 Lead 主会话。</p><div class="message-list"><article class="message"><div class="message-meta"><span>child · 14:28</span><span>进度</span></div><div class="message-body">我已完成 paired API 对比，发现授权边界需要补一条拒绝路径。</div></article><article class="message"><div class="message-meta"><span>你 · 14:31</span><span>直接介入</span></div><div class="message-body">先补拒绝路径，再给我 pre/post hash。</div></article><article class="message"><div class="message-meta"><span>child · 14:32</span><span>等待</span></div><div class="message-card blocked"><h4>等待 reviewer pre/post hash</h4><p>当前 workspace 保持不释放，Lead 仍可继续响应其他事情。</p></div></article></div></section>`,
+      evidence: `<section class="section"><div class="section-head"><h3>验收证据</h3><span>在工单内查看</span></div><p class="detail-copy">证据是验收输入，不等于工单状态。每条证据都显示来源、生成时间和当前可用性。</p><div class="evidence"><button data-evidence="pre"><span>reviewer pre hash</span><small>已生成 · 14:32 ›</small></button><button data-evidence="post"><span>reviewer post hash</span><small>等待执行 ›</small></button><button data-evidence="summary"><span>child 执行摘要</span><small>3 条关键发现 ›</small></button></div><div id="evidenceDetail"></div></section>`,
+      log: `<section class="section"><div class="section-head"><h3>事件日志</h3><span>按时间排序</span></div><div class="log-list"><div class="log-row"><time>14:32:08</time><div><b>review hold opened</b><p>Lead 暂停合并，等待用户验收决定。</p></div></div><div class="log-row"><time>14:29:41</time><div><b>workspace checkpoint</b><p>isolated workspace 已保存，可从当前状态继续。</p></div></div><div class="log-row"><time>14:24:16</time><div><b>child completed</b><p>子任务 #43、#44 完成，#45 仍待执行。</p></div></div><div class="log-row"><time>14:18:02</time><div><b>run started</b><p>使用 reviewer runtime 启动验收。</p></div></div></div></section>`
+    };
+    const data = {
+      38: ['迁移 daemon 到常开机器', 'child 卡在 sudo 权限，等待你的授权决定。', '需要介入'],
+      41: ['M9 launchd 真机验收', 'child 已完成执行，3 项验收证据可供你确认。', '待验收'],
+      42: ['移动控制面协议缺口审计', 'child 已完成协议层审计，正在等待你确认是否进入验收。', '需要介入'],
+      55: ['周报自动化汇总', '后台例行任务正在运行，当前进度 28%。', '运行中']
+    };
+    const moduleViews = { 'queue-view': ['工单队列', '按状态查看 Lead 当前派发和等待中的工作。'], 'schedule-view': ['日程与例行', '时间触发工作，但不会生成第二个聊天入口。'], 'projects-view': ['项目地图', '项目提供长期上下文，Lead 仍是唯一的交互入口。'] };
+    function showTicketDetail() {
+      ticketHead.hidden = false;
+      detailBody.hidden = false;
+      detailActions.hidden = false;
+      rightContext.hidden = true;
+      focus.textContent = 'Lead 主会话';
+    }
+    function selectTicket(id) { const item = data[id] || data[42]; showTicketDetail(); title.textContent = item[0]; summary.textContent = item[1]; kicker.textContent = `工单 #${id} · 独立上下文`; focus.textContent = `Lead 主会话 · 工单 #${id}`; toast(`已打开工单 #${id} 的独立上下文`); }
+    document.querySelectorAll('[data-ticket]').forEach((el) => el.addEventListener('click', () => selectTicket(el.dataset.ticket)));
+    function showContext(viewId) {
+      const source = document.querySelector(`#${viewId}`);
+      const meta = moduleViews[viewId];
+      if (!source || !meta) return;
+      ticketHead.hidden = true;
+      detailBody.hidden = true;
+      detailActions.hidden = true;
+      rightContext.hidden = false;
+      contextTitle.textContent = meta[0];
+      contextSummary.textContent = meta[1];
+      contextBody.innerHTML = source.innerHTML;
+      contextBody.querySelectorAll('[data-ticket]').forEach((el) => el.addEventListener('click', () => selectTicket(el.dataset.ticket)));
+      focus.textContent = `Lead 主会话 · ${meta[0]}`;
+      toast(`${meta[0]}已在右侧展开，Lead 仍保持前台`);
+    }
+    document.querySelectorAll('[data-view]').forEach((button) => button.addEventListener('click', () => {
+      document.querySelectorAll('[data-view]').forEach((item) => item.classList.toggle('active', item === button));
+      if (button.dataset.view === 'lead-view') showTicketDetail();
+      else showContext(button.dataset.view);
+    }));
+    document.querySelector('#clearFocus').addEventListener('click', () => { showTicketDetail(); toast('已回到 Lead standby，会话焦点已清除'); });
+    document.querySelector('#backToTicket').addEventListener('click', () => { showTicketDetail(); toast('已返回当前工单详情'); });
+    document.querySelector('#jumpBtn').addEventListener('click', () => toast('已跳入任务对话：Lead 继续 standby，当前输入将发送给 child'));
+    document.querySelector('#approveBtn').addEventListener('click', () => { toast('已批准继续，review hold 将在 child 回报后重新打开'); document.querySelector('#approveBtn').textContent = '已批准'; });
+    document.querySelector('#holdBtn').addEventListener('click', () => toast('继续保持 Hold，Lead 不会擅自推进此工单'));
+    document.querySelector('#sendBtn').addEventListener('click', () => toast('演示模式：消息会进入 Lead 主会话'));
+    document.querySelector('#approveMessage').addEventListener('click', () => {
+      const card = document.querySelector('#approvedMessage');
+      card.querySelector('h4').textContent = '授权已记录，等待执行状态确认';
+      card.querySelector('p').textContent = '你的授权已经写入本次操作，但工单仍处于阻塞。child / Lead 需要重新上报执行结果。';
+      toast('授权已记录：Lead 不会把它误报为已完成');
+    });
+    function showEvidence(kind) {
+      const detail = document.querySelector('#evidenceDetail');
+      const content = {
+        pre: ['reviewer pre hash', '执行前工作区快照，用于和 post hash 做确定性比较。', 'workspace=ws_42_review\ncommit=8e7a3d1\nfiles=128\nsha256=pre:7d4a…91c2'],
+        post: ['reviewer post hash', '当前还没有 post hash。必须等 child 完成验证后才能判断是否可合并。', 'status=pending\nreason=child has not reported post-state'],
+        summary: ['child 执行摘要', 'child 汇报了 3 条关键发现，其中 1 条仍然阻塞验收。', '1. paired API scope mismatch\n2. approval boundary missing\n3. post hash pending']
+      }[kind];
+      detail.innerHTML = `<div class="evidence-detail"><h4>${content[0]}</h4><p>${content[1]}</p><code>${content[2]}</code></div>`;
+    }
+    document.querySelectorAll('.detail-tabs button').forEach((button) => button.addEventListener('click', () => {
+      document.querySelectorAll('.detail-tabs button').forEach((b) => b.classList.remove('active'));
+      button.classList.add('active');
+      detailBody.innerHTML = detailTabs[button.dataset.tab];
+      toast(`${button.textContent}视图已切换`);
+    }));
+    detailBody.addEventListener('click', (event) => {
+      const target = event.target.closest('[data-evidence]');
+      if (target) showEvidence(target.dataset.evidence);
+    });
+  </script>
+</body>
+</html>

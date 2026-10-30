@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>mobile side-by-side</title>
+  <style>
+    * { box-sizing: border-box; }
+    html, body { margin: 0; min-height: 100%; background: #181818; color: #f5f5f5; font: 14px/1.4 system-ui, sans-serif; }
+    header { position: sticky; top: 0; z-index: 2; padding: 10px 16px; background: #111; border-bottom: 1px solid #444; }
+    main { padding: 16px; }
+    img { display: block; max-width: 100%; height: auto; }
+    .side-by-side { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; align-items: start; }
+    figure { margin: 0; min-width: 0; }
+    figcaption { margin-bottom: 8px; color: #ccc; }
+    .overlay { position: relative; width: max-content; max-width: 100%; }
+    .overlay img + img { position: absolute; inset: 0; opacity: .5; }
+    
+  </style>
+</head>
+<body>
+  <header>mobile side-by-side</header>
+  <main><div class="side-by-side">
+  <figure><figcaption>Implementation</figcaption><img src="mobile-implementation.png" alt="Implementation"></figure>
+  <figure><figcaption>Reference</figcaption><img src="mobile-reference.png" alt="Reference"></figure>
+</div></main>
+</body>
+</html>

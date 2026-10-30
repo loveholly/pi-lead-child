@@ -1,0 +1,19 @@
+{
+  // 后端各包（Node 端）放在一个程序里检查。components 和 apps/companion 是 React Native 代码，各自有 tsconfig。
+  "extends": "./tsconfig.base.json",
+  "include": [
+    "packages/protocol",
+    "packages/client",
+    "packages/core",
+    "packages/runtime",
+    "packages/store",
+    "packages/connections",
+    "packages/engine",
+    "packages/supervisor",
+    "packages/gateway",
+    "packages/lead",
+    "apps/daemon",
+    "apps/cli"
+  ],
+  "exclude": ["**/node_modules", "**/dist"]
+}

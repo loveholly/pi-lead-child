@@ -1,0 +1,51 @@
+{
+  "scenario": "ticket #72 acceptance: delegated grant + rework, second reviewer FAIL",
+  "pairedBase": "http://127.0.0.1:53929",
+  "ticketId": 1,
+  "runs": {
+    "firstExecutorRunId": 1,
+    "reworkRunId": 2,
+    "reviewerRunId": 3
+  },
+  "GET /v1/notifications": {
+    "status": 200,
+    "reworkExhausted": {
+      "id": 3,
+      "ticketId": 1,
+      "kind": "rework_exhausted",
+      "dedupKey": "rework-exhausted:item:1:reviewer-run:3",
+      "urgency": "immediate",
+      "title": "工单 #1 返工次数已用尽（1/1），自动化已停止",
+      "body": "已用返工次数：1/1\n当前验证状态：FAIL（reviewer Run #3）\n各轮失败原因：\n  1. [用户授权返工] 用户授权 Paimon 自动返工并启动本次修复\n本轮 reviewer Run #3：第二轮独立核查 FAIL：返工没有修好原始验收范围内的回归。\n授权来源：delegation policy #1 v1 (created 2026-10-30 09:56:55 via control-plane, scope=technical_acceptance_rework_delivery)\n下一步：自动派发已停止。请决定放宽返工额度、改变方案、亲自验收，还是取消这张工单——系统不会再自行返工。",
+      "state": "pending",
+      "createdAt": "2026-10-30T09:56:55.104Z",
+      "deliveredAt": null,
+      "deliveredVia": null,
+      "ackedAt": null
+    }
+  },
+  "GET /v1/tickets": {
+    "status": 200,
+    "stage": "review",
+    "reviewState": {
+      "state": "rework_exhausted",
+      "label": "返工已用尽，自动化已停止",
+      "reviewerAttemptId": 3,
+      "verdict": "fail",
+      "reason": "返工 1/1 已用尽；独立核查 FAIL（Run #3）",
+      "reworkCyclesUsed": 1,
+      "maxReworkCycles": 1,
+      "reviewerPreHash": null,
+      "reviewerPostHash": null,
+      "reviewerHashState": "missing",
+      "deliveryRunId": 2,
+      "canRequestReview": false,
+      "supersededReview": null,
+      "reviewProgress": null
+    },
+    "attention": {
+      "pendingApprovalCount": 0,
+      "blockerCount": 1
+    }
+  }
+}

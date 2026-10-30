@@ -1,0 +1,26 @@
+{
+  "name": "@pi-lead-child/daemon",
+  "version": "0.1.0",
+  "private": true,
+  "description": "The daemon service: the coordinatord entry and the composition root that wires the kernel, gateway, lead and supervisor together.",
+  "type": "module",
+  "scripts": {
+    "build": "tsx scripts/build.ts",
+    "build:web": "tsx scripts/build-web.ts",
+    "test": "cd ../.. && vitest run apps/daemon"
+  },
+  "dependencies": {
+    "@pi-lead-child/connections": "*",
+    "@pi-lead-child/core": "*",
+    "@pi-lead-child/engine": "*",
+    "@pi-lead-child/gateway": "*",
+    "@pi-lead-child/lead": "*",
+    "@pi-lead-child/protocol": "*",
+    "@pi-lead-child/runtime": "*",
+    "@pi-lead-child/store": "*",
+    "@pi-lead-child/supervisor": "*"
+  },
+  "devDependencies": {
+    "@pi-lead-child/client": "*"
+  }
+}

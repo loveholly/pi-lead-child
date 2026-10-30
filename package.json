@@ -1,0 +1,48 @@
+{
+  "name": "pi-lead-child",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "test": "vitest run",
+    "test:core-invariants": "vitest run apps/daemon/test/core-lifecycle-invariants.test.ts apps/daemon/test/outcome-recovery.test.ts packages/gateway/test/control-plane.test.ts packages/engine/test/kernel-schema-migration.test.ts packages/store/test/trigger-migration.test.ts packages/store/test/event-log-migration.test.ts packages/store/test/standing-orders-migration.test.ts packages/store/test/triage-shadow-migration.test.ts packages/store/test/channels-migration.test.ts packages/store/test/channel-lookups-migration.test.ts packages/store/test/delivery-snapshots-migration.test.ts packages/store/test/execution-plan-migration.test.ts packages/store/test/acceptance-criteria-migration.test.ts packages/store/test/reviewer-settings-migration.test.ts packages/store/test/review-packets-migration.test.ts packages/store/test/delegation-accept-without-review-migration.test.ts packages/store/test/memory-sync-migration.test.ts packages/store/test/widgets-migration.test.ts packages/store/test/run-grants.test.ts packages/engine/test/event-log-invariants.test.ts apps/daemon/test/event-log-daemon.test.ts && npm -w @pi-lead-child/companion test -- src/features/workspace/statusConsistency.test.ts",
+    "test:components": "npm -w @pi-lead-child/components test",
+    "test:companion": "npm -w @pi-lead-child/companion test",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "typecheck:components": "npm -w @pi-lead-child/components run typecheck",
+    "typecheck:companion": "npm -w @pi-lead-child/companion run typecheck",
+    "acceptance:item-model": "node --import tsx apps/daemon/scripts/acceptance-item-model.ts",
+    "acceptance:runtime-reliability": "node --import tsx apps/daemon/scripts/acceptance-runtime-reliability.ts",
+    "verify": "npm run typecheck && npm run typecheck:components && npm run typecheck:companion && npm run test:core-invariants && npm run test && npm run test:components && npm run test:companion && npm run acceptance:item-model && npm run acceptance:runtime-reliability && npm run build && npm run build:web",
+    "build": "npm -w @pi-lead-child/daemon run build && npm -w @pi-lead-child/cli run build",
+    "build:web": "npm -w @pi-lead-child/daemon run build:web",
+    "smoke:daemon": "tsx apps/daemon/scripts/smoke-daemon.ts",
+    "smoke:runtime": "tsx packages/runtime/scripts/smoke-runtime.ts",
+    "acceptance:seed:fidelity": "tsx apps/daemon/scripts/seed-companion-fidelity.ts",
+    "acceptance:prototype": "node apps/daemon/scripts/serve-companion-prototype.mjs",
+    "acceptance:run:fidelity": "node apps/daemon/scripts/run-companion-fidelity-acceptance.mjs",
+    "web": "npm -w @pi-lead-child/companion run web",
+    "plc": "PLC_DEV=1 tsx apps/cli/src/cli.ts"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^26.1.1",
+    "@types/qrcode": "^1.5.6",
+    "@types/qrcode-terminal": "^0.12.2",
+    "@types/ws": "^8.18.1",
+    "esbuild": "^0.28.1",
+    "tsx": "^4.23.1",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.10"
+  },
+  "packageManager": "npm@11.19.0",
+  "allowScripts": {
+    "better-sqlite3@12.11.1": true,
+    "esbuild@0.28.2": true,
+    "fsevents@2.3.3": true
+  }
+}

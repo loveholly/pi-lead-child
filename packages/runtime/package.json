@@ -1,0 +1,18 @@
+{
+  "name": "@pi-lead-child/runtime",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Agent runtime adapters (pi, Codex, Claude), the runtime registry, typed failure classification, the process launcher and child JSONL/RPC I/O.",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./testing": "./testing/index.ts"
+  },
+  "scripts": {
+    "test": "cd ../.. && vitest run packages/runtime"
+  },
+  "dependencies": {
+    "@earendil-works/pi-coding-agent": "^1.1.0",
+    "@pi-lead-child/core": "*"
+  }
+}

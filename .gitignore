@@ -1,0 +1,11 @@
+node_modules
+dist/
+.superpowers/
+*.db
+*.db-wal
+*.db-shm
+.vitest-report.json
+.claude/worktrees/
+
+# 本机的方案和需求记录：里面有真实对话和名字，不进 git（2026-10-30，仓库公开）。
+.scratch/

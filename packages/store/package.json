@@ -1,0 +1,21 @@
+{
+  "name": "@pi-lead-child/store",
+  "version": "0.1.0",
+  "private": true,
+  "description": "SQLite persistence: schema, migrations and repositories for items, runs, triggers, notifications and the rest of the kernel state.",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./testing": "./testing/index.ts"
+  },
+  "scripts": {
+    "test": "cd ../.. && vitest run packages/store"
+  },
+  "dependencies": {
+    "@pi-lead-child/core": "*",
+    "@pi-lead-child/protocol": "*",
+    "@pi-lead-child/runtime": "*",
+    "better-sqlite3": "^12.11.1",
+    "cron-parser": "^5.6.2"
+  }
+}

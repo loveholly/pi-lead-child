@@ -1,0 +1,867 @@
+{
+  "description": "Failed child runs from the live plc database, 2026-07-29 to 2026-10-08. Events are as the adapter of that time normalized them, trimmed to evidence: session, start, stderr (first and last four), last cumulative usage, last assistant message (full when the run completed, otherwise only when short), and the first terminal event. runId, seq and occurredAt are rewritten at replay. Home paths and the internal proxy host are redacted. attemptInItem is the 1-based order of the run among the failed runs of its item.",
+  "runs": [
+    {
+      "historicalRunId": 12,
+      "historicalItemId": 38,
+      "itemTitle": "Phase -1：复核审计计划与当前 HEAD 的执行就绪状态",
+      "role": "executor",
+      "purpose": "execution",
+      "runtime": "codex",
+      "model": "openai/gpt-5.6-sol",
+      "startedAt": "2026-07-29 08:11:01",
+      "recordedState": "failed",
+      "recordedErrorCode": "codex_error",
+      "droppedEvents": 0,
+      "events": [
+        {
+          "type": "run.started",
+          "runtime": "codex",
+          "model": "openai/gpt-5.6-sol"
+        },
+        {
+          "type": "session.updated",
+          "externalSessionId": "019faced-539d-7fc0-bbe6-ef0edb267051"
+        },
+        {
+          "type": "runtime.stderr",
+          "text": "Reading additional input from stdin...\n"
+        },
+        {
+          "type": "run.failed",
+          "exitCode": null,
+          "errorCode": "codex_error",
+          "error": "{\"type\":\"error\",\"status\":400,\"error\":{\"type\":\"invalid_request_error\",\"message\":\"The 'openai/gpt-5.6-sol' model is not supported when using Codex with a ChatGPT account.\"}}"
+        }
+      ],
+      "attemptInItem": 1
+    },
+    {
+      "historicalRunId": 13,
+      "historicalItemId": 38,
+      "itemTitle": "Phase -1：复核审计计划与当前 HEAD 的执行就绪状态",
+      "role": "executor",
+      "purpose": "execution",
+      "runtime": "codex",
+      "model": "openai/gpt-5.6-sol",
+      "startedAt": "2026-07-29 08:12:04",
+      "recordedState": "failed",
+      "recordedErrorCode": "codex_error",
+      "droppedEvents": 0,
+      "events": [
+        {
+          "type": "run.started",
+          "runtime": "codex",
+          "model": "openai/gpt-5.6-sol"
+        },
+        {
+          "type": "session.updated",
+          "externalSessionId": "019facee-46e6-7c22-91e7-f0007e4eb7ee"
+        },
+        {
+          "type": "runtime.stderr",
+          "text": "Reading additional input from stdin...\n"
+        },
+        {
+          "type": "run.failed",
+          "exitCode": null,
+          "errorCode": "codex_error",
+          "error": "{\"type\":\"error\",\"status\":400,\"error\":{\"type\":\"invalid_request_error\",\"message\":\"The 'openai/gpt-5.6-sol' model is not supported when using Codex with a ChatGPT account.\"}}"
+        }
+      ],
+      "attemptInItem": 2
+    },
+    {
+      "historicalRunId": 14,
+      "historicalItemId": 38,
+      "itemTitle": "Phase -1：复核审计计划与当前 HEAD 的执行就绪状态",
+      "role": "executor",
+      "purpose": "execution",
+      "runtime": "pi",
+      "model": "openai/gpt-5.6-sol",
+      "startedAt": "2026-07-29 08:12:50",
+      "recordedState": "failed",
+      "recordedErrorCode": "process_exit",
+      "droppedEvents": 0,
+      "events": [
+        {
+          "type": "runtime.stderr",
+          "text": "Error: Failed to load extension \"/Users/<user>/Workspace/AI/pi-lead-child/src/extension/item-tools.ts\": Extension path does not exist: /Users/<user>/Workspace/AI/pi-lead-child/src/extension/item-tools.ts\n"
+        },
+        {
+          "type": "run.failed",
+          "exitCode": 1,
+          "errorCode": "process_exit",
+          "error": "Pi process exited before agent_end (1)"
+        }
+      ],
+      "attemptInItem": 3
+    },
+    {
+      "historicalRunId": 15,
+      "historicalItemId": 40,
+      "itemTitle": "Phase -1：复核审计计划与当前 HEAD 的执行就绪状态",
+      "role": "executor",
+      "purpose": "execution",
+      "runtime": "pi",
+      "model": "openai/gpt-5.6-sol",
+      "startedAt": "2026-07-29 08:14:26",
+      "recordedState": "failed",
+      "recordedErrorCode": "process_exit",
+      "droppedEvents": 0,
+      "events": [
+        {
+          "type": "runtime.stderr",
+          "text": "Error: Failed to load extension \"/Users/<user>/Workspace/AI/pi-lead-child/src/extension/item-tools.ts\": Extension path does not exist: /Users/<user>/Workspace/AI/pi-lead-child/src/extension/item-tools.ts\n"
+        },
+        {
+          "type": "run.failed",
+          "exitCode": 1,
+          "errorCode": "process_exit",
+          "error": "Pi process exited before agent_end (1)"
+        }
+      ],
+      "attemptInItem": 1
+    },
+    {
+      "historicalRunId": 16,
+      "historicalItemId": 44,
+      "itemTitle": "完善工单详情页的生命周期与执行历史展示",
+      "role": "executor",
+      "purpose": "execution",
+      "runtime": "codex",
+      "model": "openai/gpt-5.6-sol",
+      "startedAt": "2026-08-11 02:27:45",
+      "recordedState": "failed",
+      "recordedErrorCode": "codex_error",
+      "droppedEvents": 0,
+      "events": [
+        {
+          "type": "run.started",
+          "runtime": "codex",
+          "model": "openai/gpt-5.6-sol"
+        },
+        {
+          "type": "session.updated",
+          "externalSessionId": "019feea5-c50e-78f0-8bd0-823f3edecf27"
+        },
+        {
+          "type": "runtime.stderr",
+          "text": "Reading additional input from stdin...\n"
+        },
+        {
+          "type": "runtime.stderr",
+          "text": "2026-08-11T02:27:46.714454Z ERROR codex_models_manager::cache: failed to load models cache: missing field `base_instructions` at line 81 column 5\n"
+        },
+        {
+          "type": "run.failed",
+          "exitCode": null,
+          "errorCode": "codex_error",
+          "error": "{\"type\":\"error\",\"status\":400,\"error\":{\"type\":\"invalid_request_error\",\"message\":\"The 'openai/gpt-5.6-sol' model is not supported when using Codex with a ChatGPT account.\"}}"
+        }
+      ],
+      "attemptInItem": 1
+    },
+    {
+      "historicalRunId": 23,
+      "historicalItemId": 45,
+      "itemTitle": "补齐任务完成协议中的成果快照与登记步骤",
+      "role": "executor",
+      "purpose": "execution",
+      "runtime": "pi",
+      "model": "openai/gpt-5.6-sol",
+      "startedAt": "2026-08-12 11:11:15",
+      "recordedState": "failed",
+      "recordedErrorCode": "process_exit",
+      "droppedEvents": 0,
+      "events": [
+        {
+          "type": "runtime.stderr",
+          "text": "Error: Failed to load extension \"/Users/<user>/Workspace/AI/pi-lead-child/src/extension/item-tools.ts\": Extension path does not exist: /Users/<user>/Workspace/AI/pi-lead-child/src/extension/item-tools.ts\n"
+        },
+        {
+          "type": "run.failed",
+          "exitCode": 1,
+          "errorCode": "process_exit",
+          "error": "Pi process exited before agent_end (1)"
+        }
+      ],
+      "attemptInItem": 1
+    },
+    {
+      "historicalRunId": 55,
+      "historicalItemId": 47,
+      "itemTitle": "为 coding 工单设计 Ticket 级 Worktree 编排方案",
+      "role": "executor",
+      "purpose": "execution",
+      "runtime": "codex",
+      "model": "gpt-5.5",
+      "startedAt": "2026-09-04 09:07:51",
+      "recordedState": "failed",
+      "recordedErrorCode": "codex_error",
+      "droppedEvents": 51,
+      "events": [
+        {
+          "type": "run.started",
+          "runtime": "codex",
+          "model": "gpt-5.5"
+        },
+        {
+          "type": "session.updated",
+          "externalSessionId": "01a06bac-af30-7580-9ff6-39927d6a0722"
+        },
+        {
+          "type": "runtime.stderr",
+          "text": "Reading additional input from stdin...\n"
+        },
+        {
+          "type": "runtime.stderr",
+          "text": "2026-09-04T09:07:53.439510Z ERROR codex_login::auth::manager: Failed to refresh token: 401 Unauthorized: {\n  \"error\": {\n    \"message\": \"Your refresh token has been invalidated. Please try signing in again.\",\n    \"type\": \"invalid_request_error\",\n    \"param\": null,\n    \"code\": \"refresh_token_invalidated\"\n  }\n}\n"
+        },
+        {
+          "type": "runtime.stderr",
+          "text": "2026-09-04T09:07:53.441330Z ERROR codex_login::auth::manager: Failed to refresh token: Your access token could not be refreshed because your refresh token was revoked. Please log out and sign in again.\n2026-09-04T09:07:53.443327Z ERROR codex_login::auth::manager: Failed to refresh token: Your access token could not be refreshed because your refresh token was revoked. Please log out and sign in again.\n2026-09-04T09:07:53.446570Z ERROR codex_login::auth::manager: Failed to refresh token: Your access token could not be refreshed because your refresh token was revoked. Please log out and sign in again.\n"
+        },
+        {
+          "type": "runtime.stderr",
+          "text": "2026-09-04T09:07:53.455405Z ERROR codex_login::auth::manager: Failed to refresh token: Your access token could not be refreshed because your refresh token was revoked. Please log out and sign in again.\n"
+        },
+        {
+          "type": "runtime.stderr",
+          "text": "2026-09-04T09:08:49.027740Z ERROR codex_login::auth::manager: Failed to refresh token: Your access token could not be refreshed because your refresh token was revoked. Please log out and sign in again.\n"
+        },
+        {
+          "type": "runtime.stderr",
+          "text": "2026-09-04T09:08:49.567816Z ERROR codex_login::auth::manager: Failed to refresh token: Your access token could not be refreshed because your refresh token was revoked. Please log out and sign in again.\n"
+        },
+        {
+          "type": "runtime.stderr",
+          "text": "2026-09-04T09:08:50.082053Z ERROR codex_login::auth::manager: Failed to refresh token: Your access token could not be refreshed because your refresh token was revoked. Please log out and sign in again.\n"
+        },
+        {
+          "type": "runtime.stderr",
+          "text": "2026-09-04T09:08:50.496616Z ERROR codex_login::auth::manager: Failed to refresh token: Your access token could not be refreshed because your refresh token was revoked. Please log out and sign in again.\n"
+        },
+        {
+          "type": "message.completed",
+          "messageId": "item_4",
+          "role": "assistant",
+          "text": "我已经看到仓库里有现成的 `workspace`、`run`、`ticket relation`、`lead` 和 `review` 相关模块，说明这不是新概念，要对齐已有数据模型来写方案。现在在收敛这些命名和边界。"
+        },
+        {
+          "type": "run.failed",
+          "exitCode": null,
+          "errorCode": "codex_error",
+          "error": "Selected model is at capacity. Please try a different model."
+        }
+      ],
+      "attemptInItem": 1
+    },
+    {
+      "historicalRunId": 34,
+      "historicalItemId": 49,
+      "itemTitle": "实现 Lead 无人值守委托、自动返工与可靠续作闭环",
+      "role": "reviewer",
+      "purpose": "review",
+      "runtime": "codex",
+      "model": "gpt-5.5",
+      "startedAt": "2026-08-14 08:02:28",
+      "recordedState": "failed",
+      "recordedErrorCode": "codex_error",
+      "droppedEvents": 0,
+      "events": [
+        {
+          "type": "run.started",
+          "runtime": "codex",
+          "model": "gpt-5.5"
+        },
+        {
+          "type": "session.updated",
+          "externalSessionId": "019fff4b-413c-7200-bc63-8c270bc79f3b"
+        },
+        {
+          "type": "runtime.stderr",
+          "text": "Reading additional input from stdin...\n"
+        },
+        {
+          "type": "runtime.stderr",
+          "text": "2026-08-14T08:02:28.582045Z ERROR codex_models_manager::cache: failed to load models cache: missing field `base_instructions` at line 81 column 5\n"
+        },
+        {
+          "type": "run.failed",
+          "exitCode": null,
+          "errorCode": "codex_error",
+          "error": "Your workspace is out of credits. Ask your workspace owner to refill in order to continue."
+        }
+      ],
+      "attemptInItem": 1
+    },
+    {
+      "historicalRunId": 35,
+      "historicalItemId": 51,
+      "itemTitle": "部署并执行 #48 工单关系能力的真实运行态 E2E 验收",
+      "role": "executor",
+      "purpose": "execution",
+      "runtime": "codex",
+      "model": "gpt-5.5",
+      "startedAt": "2026-08-14 10:41:53",
+      "recordedState": "failed",
+      "recordedErrorCode": "codex_error",
+      "droppedEvents": 0,
+      "events": [
+        {
+          "type": "run.started",
+          "runtime": "codex",
+          "model": "gpt-5.5"
+        },
+        {
+          "type": "session.updated",
+          "externalSessionId": "019ffec8-443c-7921-bb99-4b100e8e0983"
+        },
+        {
+          "type": "runtime.stderr",
+          "text": "2026-08-14T10:41:54.770218Z ERROR codex_models_manager::cache: failed to load models cache: missing field `base_instructions` at line 81 column 5\n"
+        },
+        {
+          "type": "run.failed",
+          "exitCode": null,
+          "errorCode": "codex_error",
+          "error": "Your workspace is out of credits. Ask your workspace owner to refill in order to continue."
+        }
+      ],
+      "attemptInItem": 1
+    },
+    {
+      "historicalRunId": 36,
+      "historicalItemId": 51,
+      "itemTitle": "部署并执行 #48 工单关系能力的真实运行态 E2E 验收",
+      "role": "executor",
+      "purpose": "execution",
+      "runtime": "codex",
+      "model": "gpt-5.5",
+      "startedAt": "2026-08-14 10:51:02",
+      "recordedState": "failed",
+      "recordedErrorCode": "codex_error",
+      "droppedEvents": 0,
+      "events": [
+        {
+          "type": "run.started",
+          "runtime": "codex",
+          "model": "gpt-5.5"
+        },
+        {
+          "type": "session.updated",
+          "externalSessionId": "019ffec8-443c-7921-bb99-4b100e8e0983"
+        },
+        {
+          "type": "runtime.stderr",
+          "text": "2026-08-14T10:51:03.206720Z ERROR codex_models_manager::cache: failed to load models cache: missing field `base_instructions` at line 81 column 5\n"
+        },
+        {
+          "type": "run.failed",
+          "exitCode": null,
+          "errorCode": "codex_error",
+          "error": "Your workspace is out of credits. Ask your workspace owner to refill in order to continue."
+        }
+      ],
+      "attemptInItem": 2
+    },
+    {
+      "historicalRunId": 39,
+      "historicalItemId": 51,
+      "itemTitle": "部署并执行 #48 工单关系能力的真实运行态 E2E 验收",
+      "role": "executor",
+      "purpose": "execution",
+      "runtime": "codex",
+      "model": "gpt-5.5",
+      "startedAt": "2026-08-17 05:48:09",
+      "recordedState": "failed",
+      "recordedErrorCode": "spawn_error",
+      "droppedEvents": 0,
+      "events": [
+        {
+          "type": "run.started",
+          "runtime": "codex",
+          "model": "gpt-5.5"
+        },
+        {
+          "type": "run.failed",
+          "exitCode": null,
+          "errorCode": "spawn_error",
+          "error": "spawn codex ENOENT"
+        }
+      ],
+      "attemptInItem": 3
+    },
+    {
+      "historicalRunId": 44,
+      "historicalItemId": 66,
+      "itemTitle": "[E2E #51 T48-E2E-51-20260817061106] FINAL #45 implementation - outcome snapshot and registry mechanism",
+      "role": "executor",
+      "purpose": "execution",
+      "runtime": "codex",
+      "model": "gpt-5.5",
+      "startedAt": "2026-08-19 09:41:46",
+      "recordedState": "failed",
+      "recordedErrorCode": "codex_error",
+      "droppedEvents": 0,
+      "events": [
+        {
+          "type": "run.started",
+          "runtime": "codex",
+          "model": "gpt-5.5"
+        },
+        {
+          "type": "session.updated",
+          "externalSessionId": "01a00f50-51ac-7581-8781-39c9e28b1ede"
+        },
+        {
+          "type": "runtime.stderr",
+          "text": "2026-08-19T09:41:48.004398Z ERROR codex_models_manager::cache: failed to load models cache: missing field `base_instructions` at line 81 column 5\n"
+        },
+        {
+          "type": "runtime.stderr",
+          "text": "2026-08-19T09:41:52.686526Z ERROR rmcp::transport::worker: worker quit with fatal: Transport channel closed, when AuthRequired(AuthRequiredError { www_authenticate_header: \"Bearer resource_metadata=\\\"https://api.anthropic.com/v1/design/.well-known/oauth-protected-resource\\\", scope=\\\"user:design:read user:design:write\\\"\" })\n"
+        },
+        {
+          "type": "run.failed",
+          "exitCode": null,
+          "errorCode": "codex_error",
+          "error": "Selected model is at capacity. Please try a different model."
+        }
+      ],
+      "attemptInItem": 1
+    },
+    {
+      "historicalRunId": 46,
+      "historicalItemId": 66,
+      "itemTitle": "[E2E #51 T48-E2E-51-20260817061106] FINAL #45 implementation - outcome snapshot and registry mechanism",
+      "role": "executor",
+      "purpose": "execution",
+      "runtime": "claude",
+      "model": null,
+      "startedAt": "2026-08-21 08:26:36",
+      "recordedState": "failed",
+      "recordedErrorCode": "claude_success",
+      "droppedEvents": 1,
+      "events": [
+        {
+          "type": "run.started",
+          "runtime": "claude",
+          "model": null
+        },
+        {
+          "type": "session.updated",
+          "externalSessionId": "e52d66b8-f0a4-4787-a286-79090081ce80",
+          "runtimeVersion": "2.1.220"
+        },
+        {
+          "type": "usage.updated",
+          "mode": "cumulative",
+          "inputTokens": 0,
+          "outputTokens": 0,
+          "totalTokens": 0,
+          "costUsd": 0
+        },
+        {
+          "type": "message.completed",
+          "messageId": "3f5f0f6d-2331-4152-8932-7ff5b4f86355",
+          "role": "assistant",
+          "text": "Failed to authenticate: OAuth session expired and could not be refreshed",
+          "stopReason": "stop_sequence"
+        },
+        {
+          "type": "run.failed",
+          "exitCode": 1,
+          "errorCode": "claude_success",
+          "error": "Failed to authenticate: OAuth session expired and could not be refreshed"
+        }
+      ],
+      "attemptInItem": 2
+    },
+    {
+      "historicalRunId": 47,
+      "historicalItemId": 66,
+      "itemTitle": "[E2E #51 T48-E2E-51-20260817061106] FINAL #45 implementation - outcome snapshot and registry mechanism",
+      "role": "executor",
+      "purpose": "execution",
+      "runtime": "claude",
+      "model": null,
+      "startedAt": "2026-08-21 08:59:12",
+      "recordedState": "failed",
+      "recordedErrorCode": "claude_success",
+      "droppedEvents": 1,
+      "events": [
+        {
+          "type": "run.started",
+          "runtime": "claude",
+          "model": null
+        },
+        {
+          "type": "session.updated",
+          "externalSessionId": "44ab8ee6-8638-45a4-a891-f0721aa9158a",
+          "runtimeVersion": "2.1.220"
+        },
+        {
+          "type": "usage.updated",
+          "mode": "cumulative",
+          "inputTokens": 0,
+          "outputTokens": 0,
+          "totalTokens": 0,
+          "costUsd": 0
+        },
+        {
+          "type": "message.completed",
+          "messageId": "305c813e-ebda-4783-98c9-01c38839d1c7",
+          "role": "assistant",
+          "text": "Failed to authenticate: OAuth session expired and could not be refreshed",
+          "stopReason": "stop_sequence"
+        },
+        {
+          "type": "run.failed",
+          "exitCode": 1,
+          "errorCode": "claude_success",
+          "error": "Failed to authenticate: OAuth session expired and could not be refreshed"
+        }
+      ],
+      "attemptInItem": 3
+    },
+    {
+      "historicalRunId": 52,
+      "historicalItemId": 72,
+      "itemTitle": "修复 review 状态投影语义与返工耗尽升级通知（源于 #66 复盘）",
+      "role": "executor",
+      "purpose": "execution",
+      "runtime": "pi",
+      "model": "openai/gpt-5.5",
+      "startedAt": "2026-08-25 03:59:24",
+      "recordedState": "failed",
+      "recordedErrorCode": "process_exit",
+      "droppedEvents": 0,
+      "events": [
+        {
+          "type": "session.updated",
+          "externalSessionId": "01a03712-aa2c-773b-8102-3ce3455fe3c3"
+        },
+        {
+          "type": "run.started",
+          "runtime": "pi",
+          "model": "openai/gpt-5.5"
+        },
+        {
+          "type": "runtime.stderr",
+          "text": "node:events:496\n      throw er; // Unhandled 'error' event\n      ^\n\nTypeError: zlib.createZstdDecompress is not a function\n    at Object.onResponseStart (/Users/<user>/Workspace/AI/pi-lead-child/node_modules/@earendil-works/pi-coding-agent/node_modules/undici/lib/web/fetch/index.js:2309:38)\n    at Request.onResponseStart (/Users/<user>/Workspace/AI/pi-lead-child/node_modules/@earendil-works/pi-coding-agent/node_modules/undici/lib/core/request.js:345:39)\n    at Parser.onHeadersComplete (/Users/<user>/Workspace/AI/pi-lead-child/node_modules/@earendil-works/pi-coding-agent/node_modules/undici/lib/dispatcher/client-h1.js:702:27)\n    at wasm_on_headers_complete (/Users/<user>/Workspace/AI/pi-lead-child/node_modules/@earendil-works/pi-coding-agent/node_modules/undici/lib/dispatcher/client-h1.js:158:30)\n    at wasm://wasm/00034eea:wasm-function[10]:0x571\n    at wasm://wasm/00034eea:wasm-function[20]:0x845f\n    at Parser.execute (/Users/<user>/Workspace/AI/pi-lead-child/node_modules/@earendil-works/pi-coding-agent/node_modules/undici/lib/dispatcher/client-h1.js:353:22)\n    at Parser.readMore (/Users/<user>/Workspace/AI/pi-lead-child/node_modules/@earendil-works/pi-coding-agent/node_modules/undic…[clipped]"
+        },
+        {
+          "type": "run.failed",
+          "exitCode": 1,
+          "errorCode": "process_exit",
+          "error": "Pi process exited before agent_end (1)"
+        }
+      ],
+      "attemptInItem": 1
+    },
+    {
+      "historicalRunId": 53,
+      "historicalItemId": 72,
+      "itemTitle": "修复 review 状态投影语义与返工耗尽升级通知（源于 #66 复盘）",
+      "role": "executor",
+      "purpose": "execution",
+      "runtime": "claude",
+      "model": "claude-opus-5",
+      "startedAt": "2026-08-25 06:05:11",
+      "recordedState": "failed",
+      "recordedErrorCode": "unhandled_run_exception",
+      "droppedEvents": 527,
+      "events": [
+        {
+          "type": "run.started",
+          "runtime": "claude",
+          "model": "claude-opus-5"
+        },
+        {
+          "type": "session.updated",
+          "externalSessionId": "0d683cbd-98ee-48db-b806-d8beef333630",
+          "runtimeVersion": "2.1.238"
+        },
+        {
+          "type": "usage.updated",
+          "mode": "cumulative",
+          "inputTokens": 26618074,
+          "outputTokens": 99825,
+          "totalTokens": 26717899,
+          "costUsd": 18.494206000000002
+        },
+        {
+          "type": "message.completed",
+          "messageId": "msg_011CeNzqQqAdQ22CaHvd48jz",
+          "role": "assistant",
+          "text": "All three fixes are implemented, tested, and verified at runtime.\n\n## What changed\n\n**1. `review` split into its real semantics** — `packages/protocol/src/index.ts:75`\nAdded `rework_exhausted` to `TicketReviewState.state`, plus `reworkCyclesUsed` / `maxReworkCycles` / `outcomeRecoveryFailed`. A new single-source-of-truth module `src/coordinator/review-authority.ts` computes the facts (real verification status — a verdict superseded by a later executor Run is **unknown**, not stale-FAIL; rework budget used vs granted; whether self-recovery failed) and both the automation (`delegated-review.ts`) and the projection (`control-plane.ts:reviewState`) now read the same facts. Entering the deadlock state requires *no reviewer in flight* **and** (recovery failed **or** budget spent with a FAIL/explicit halt) — so the few seconds between \"rework delivered\" and \"reviewer queued\" is still ordinary flow, not a false alarm.\n\nCompanion (`model.ts`, `TicketThread.tsx`) renders one card per semantic. `rework_exhausted` gets a dedicated danger card with 当前验证状态 / 核查 Run / 已用返工次数, counts as `needsAttention` (critical — #66's `blockerCount` was 0 because Lead had consumed the inbox), and relabels the acceptance button to **仍要验收通过** with the risk stated in full. The button is not removed: `review→done` is the user's call, and hiding it would repeat the \"user locked out by their own gate\" bug this repo keeps fixing.\n\n**2. Failed self-recovery rolls back** — `outcome-recovery.ts`, `stages.ts`\nAdded the system-only edge `review->blocked`. `recordOutcomeRegistrationMissing` now takes `demoteUnrecoveredReview`, passed only by the live path in `children/manager.ts`: when the just-finished latest executor Run produces no registrable outcome, the ticket goes to `blocked` with its blocker instead of parking at \"待验收\". Startup repair deliberately does *not* pass it — it reconstructs history and must stay bounded.\n\n**3. `rework_exhausted` notifies the user explicitly** — `delegated-review.ts`\nThe escalation now carries a purpose-built notice: 已用返工次数 n/m, each cycle's failure summary, and the real PASS/FAIL/未知 status. Rework accounting now counts the user-authorized rework (`rework_dispatch_requested`) against the same grant — in #66 the authorization *was* the first rework, which is why the counter read 0/1 while the budget was actually gone.\n\n## Verification\n\n- `test/review-deadlock.test.ts` (10 tests) — #66 reconstructed from its real ledger (I read the production DB read-only to get the exact run/checkpoint/policy history), plus the four projection branches and both demotion paths.\n- `apps/companion/.../reviewProjection.test.ts` (7 tests) — #66 no longer renders as a plain acceptance card.\n- **Old-behaviour check**: with the three fixes temporarily neutralized, the three headline regression tests fail; restored, they pass.\n- **Runtime evidence** (`test/ticket72-rework-exhausted-runtime.test.ts`): a live daemon + real paired HTTP server, driven through `POST /v1/lead/delegation {start_rework:true}` → rework → second reviewer FAIL, then read back over the wire. Captured in `artifacts/ticket-72-rework-exhausted/runtime-evidence.json` — `GET /v1/notifications` returns the new `rework_exhausted` notice, `GET /v1/tickets` returns `reviewState.state=\"rework_exhausted\"`.\n- Full suites: root `126 files / 956 tests` passed; companion `39 files / 332 tests` passed.\n\n## Two things you should know\n\n- **`npm run typecheck` / `npm run verify` could not be run.** This session's sandbox only permits `./node_modules/.bin/vitest run *`; `tsc`, `npm`, `npx` and `node` all return \"requires approval\". I audited the new types by hand and vitest transpiles everything cleanly, but the typecheck gate is genuinely unverified. Approving `Bash(./node_modules/.bin/tsc *)` (or running `npm run verify` yourself) would close it.\n- **The ticket tools were not available** — `submit_checkpoint`, `ticket_update`, `request_decision`, `begin_planning` etc. are not exposed in this session, so no checkpoints were filed and I could not perform the atomic `ticket_update(status='review', ...)`. The outcome envelope below carries the same content.\n\nPLC_OUTCOME_V1 {\"summary\":\"Split stage=review into its real semantics with a dedicated rework-exhausted/recovery-failed state, rolled failed self-recovery back to blocked, and gave rework exhaustion an explicit user notification; regressed against ticket #66's real history and verified on a live daemon over HTTP.\",\"changes\":[{\"kind\":\"file\",\"ref\":\"src/coordinator/review-authority.ts\",\"summary\":\"New shared fact layer for review: real verification status (superseded verdicts are unknown), rework budget used/granted incl. user-authorized rework, self-recovery failure, and the deadlock predicate\"},{\"kind\":\"file\",\"ref\":\"src/gateway/control-plane.ts\",\"summary\":\"reviewState now projects six semantics from the shared facts and carries the rework budget\"},{\"kind\":\"file\",\"ref\":\"src/coordinator/delegated-review.ts\",\"summary\":\"Rework accounting moved to the shared module; rework_exhausted escalation emits a purpose-built user notice with cycles, per-cycle reasons and real verification status\"},{\"kind\":\"file\",\"ref\":\"src/pipeline/outcome-recovery.ts\",\"summary\":\"recordOutcomeRegistrationMissing can demote an unrecovered review to blocked on the live path only\"},{\"kind\":\"file\",\"ref\":\"src/children/manager.ts\",\"summary\":\"Live run completion opts into the review->blocked demotion\"},{\"kind\":\"file\",\"ref\":\"packages/protocol/src/index.ts\",\"summary\":\"TicketReviewState gains rework_exhausted plus reworkCyclesUsed/maxReworkCycles/outcomeRecoveryFailed\"},{\"kind\":\"file\",\"ref\":\"packages/protocol/src/stages.ts\",\"summary\":\"Added the system-only review->blocked edge\"},{\"kind\":\"file\",\"ref\":\"apps/companion/src/features/workspace/model.ts\",\"summary\":\"buildReviewNoticePresentation/isReviewDeadlocked; rework_exhausted counts as needsAttention\"},{\"kind\":\"file\",\"ref\":\"apps/companion/src/features/tickets/TicketThread.tsx\",\"summary\":\"Renders a per-semantic review card and weights the acceptance button by its risk\"},{\"kind\":\"file\",\"ref\":\"test/review-deadlock.test.ts\",\"summary\":\"New regression suite reconstructing ticket #66's real ledger\"},{\"kind\":\"file\",\"ref\":\"test/ticket72-rework-exhausted-runtime.test.ts\",\"summary\":\"Live-daemon HTTP acceptance that records runtime evidence\"},{\"kind\":\"file\",\"ref\":\"apps/companion/src/features/workspace/reviewProjection.test.ts\",\"summary\":\"Companion projection branches plus the #66 regression\"},{\"kind\":\"file\",\"ref\":\"apps/companion/src/features/tickets/ticketComponents.test.ts\",\"summary\":\"Source-boundary assertions for the new review card and risk-weighted acceptance\"}],\"deliverables\":[{\"kind\":\"path\",\"ref\":\"src/coordinator/review-authority.ts\",\"label\":\"shared review fact layer\"},{\"kind\":\"path\",\"ref\":\"test/review-deadlock.test.ts\",\"label\":\"#66 regression suite\"},{\"kind\":\"path\",\"ref\":\"test/ticket72-rework-exhausted-runtime.test.ts\",\"label\":\"runtime acceptance\"},{\"kind\":\"path\",\"ref\":\"artifacts/ticket-72-rework-exhausted/runtime-evidence.json\",\"label\":\"live HTTP evidence of the new notification and projection\"}],\"validations\":[{\"command\":\"./node_modules/.bin/vitest run test/\",\"outcome\":\"passed\",\"exitCode\":0,\"summary\":\"126 files / 956 tests passed\",\"evidenceRef\":null},{\"command\":\"cd apps/companion && ./node_modules/.bin/vitest run\",\"outcome\":\"passed\",\"exitCode\":0,\"summary\":\"39 files / 332 tests passed\",\"evidenceRef\":null},{\"command\":\"./node_modules/.bin/vitest run test/ticket72-rework-exhausted-runtime.test.ts\",\"outcome\":\"passed\",\"exitCode\":0,\"summary\":\"Live daemon + paired HTTP: GET /v1/notifications returned the rework_exhausted notice and GET /v1/tickets returned reviewState.state=rework_exhausted\",\"evidenceRef\":\"artifacts/ticket-72-rework-exhausted/runtime-evidence.json\"},{\"command\":\"old-behaviour probe: neutralize the three fixes, rerun test/review-deadlock.test.ts\",\"outcome\":\"passed\",\"exitCode\":0,\"summary\":\"3 headline regression tests fail without the fixes and pass with them\",\"evidenceRef\":null},{\"command\":\"npm run typecheck\",\"outcome\":\"skipped\",\"exitCode\":null,\"summary\":\"Not run: this session's sandbox only permits ./node_modules/.bin/vitest run; tsc/npm/npx/node require approval\",\"evidenceRef\":null}]}"
+        },
+        {
+          "type": "run.completed",
+          "exitCode": 0
+        }
+      ],
+      "attemptInItem": 2
+    },
+    {
+      "historicalRunId": 54,
+      "historicalItemId": 72,
+      "itemTitle": "修复 review 状态投影语义与返工耗尽升级通知（源于 #66 复盘）",
+      "role": "executor",
+      "purpose": "execution",
+      "runtime": "claude",
+      "model": "claude-opus-5",
+      "startedAt": "2026-08-25 07:52:03",
+      "recordedState": "failed",
+      "recordedErrorCode": "unhandled_run_exception",
+      "droppedEvents": 267,
+      "events": [
+        {
+          "type": "run.started",
+          "runtime": "claude",
+          "model": "claude-opus-5"
+        },
+        {
+          "type": "session.updated",
+          "externalSessionId": "e90ce9ab-d227-4692-8c25-8abddbfac4f5",
+          "runtimeVersion": "2.1.238"
+        },
+        {
+          "type": "usage.updated",
+          "mode": "cumulative",
+          "inputTokens": 3804092,
+          "outputTokens": 22819,
+          "totalTokens": 3826911,
+          "costUsd": 3.340934499999999
+        },
+        {
+          "type": "message.completed",
+          "messageId": "msg_011CeP7bLhYxigMmAtXkZVJk",
+          "role": "assistant",
+          "text": "All three requirements are implemented, wired end-to-end, and verified. Summary of what I found and confirmed:\n\n**1. Review state projection split (`stage=review` → six semantics)**\n- `src/coordinator/review-authority.ts` is the single fact source both automation and UI read: current *real* verification status (a PASS/FAIL superseded by a later executor run projects as **unknown**, not stale-PASS), rework budget with per-cycle failure reasons, and self-recovery failure.\n- `src/gateway/control-plane.ts` now derives `reviewState` from that instead of its own private verdict query, adding the `rework_exhausted` state plus `reworkCyclesUsed` / `maxReworkCycles` / `outcomeRecoveryFailed`.\n- Companion `buildReviewNoticePresentation` renders a dedicated danger card; `TicketThread.tsx` shows an explicit 验收风险 block and demotes 验收通过 to a danger-toned **仍要验收通过** (the entry point isn't removed — the user stays the decider).\n\n**2. Failed self-recovery no longer parks in review**\n- `recordOutcomeRegistrationMissing(..., demoteUnrecoveredReview: true)` on the live path (`src/children/manager.ts`) transitions review→blocked with the blocker attached. Startup repair deliberately does *not* pass the flag, so historical reconstruction can't rewrite stages en masse.\n\n**3. Explicit `rework_exhausted` notification**\n- Replaces the old generic \"automation blocked\" text with a full report: used cycles (`1/1`), per-cycle failure summaries, and the real verification status. The accounting fix matters — user-authorized rework (`rework_dispatch_requested`) now counts against the budget, which is why #66 showed `0/1` while the budget was actually spent.\n\n**Verification (per AGENTS.md, each regression was proven to fail pre-fix):**\n\n| Reverted fix | Result |\n|---|---|\n| demote-on-recovery-failure | `expected 'review' to be 'blocked'` |\n| rework-exhausted notice payload | title fell back to `工单 #1 automation blocked` |\n| companion `rework_exhausted` attention | `needsAttention` false → card rendered as ordinary 待验收 |\n\nAll reverts were restored and confirmed clean. Full backend suite **165 files / 1288 tests passed**; companion **39 files / 332 tests passed**. Runtime evidence was regenerated this session from a live daemon + real HTTP (`artifacts/ticket-72-rework-exhausted/runtime-evidence.json`) — `GET /v1/notifications` returns the new notice and `GET /v1/tickets` returns `reviewState.state=\"rework_exhausted\"`.\n\n**Two things I could not do, stated plainly:**\n- The ticket MCP tools (`submit_checkpoint`, `ticket_update`, `request_decision`) are not present in this session, so I could not file checkpoints or move the ticket to `review` via tool call. The envelope below is the only channel available.\n- `npm run typecheck` / `typecheck:companion` / `build` / `acceptance:item-model` are not runnable — only `./node_modules/.bin/vitest run *` is allowlisted, and every `npm`/`tsc`/`tsx` invocation was denied. So the full `npm run verify` gate is **not** confirmed; only the two test suites are.\n\nPLC_OUTCOME_V1 {\"summary\":\"修复 review 状态投影语义与返工耗尽升级通知（#66 复盘三点）：stage=review 拆分为六种语义并新增 rework_exhausted 专属展示态与验收风险提示；自我恢复失败在活跃执行路径上回退 review→blocked 并挂 blocker；返工额度用尽产生含已用次数、每轮失败原因、真实验证状态的显式用户通知。三条回归均已验证在修复前失败、修复后通过；后端 1288 测试与 companion 332 测试全绿；运行态证据由真实 daemon+HTTP 重新生成。未能运行 typecheck/build/acceptance（本会话仅允许 vitest）。\",\"changes\":[{\"kind\":\"file\",\"ref\":\"src/coordinator/review-authority.ts\",\"summary\":\"新增 review 阶段事实层：真实验证状态（过期裁决记为未知）、返工额度与每轮失败原因、自我恢复失败判定、卡死态判定\"},{\"kind\":\"file\",\"ref\":\"src/gateway/control-plane.ts\",\"summary\":\"reviewState 改为消费 review-authority 统一事实，新增 rework_exhausted 状态与 reworkCyclesUsed/maxReworkCycles/outcomeRecoveryFailed 字段\"},{\"kind\":\"file\",\"ref\":\"src/coordinator/delegated-review.ts\",\"summary\":\"rework_exhausted 升级时产生完整用户通知（已用次数/各轮失败原因/真实验证状态/下一步），并按统一口径计入用户授权的返工\"},{\"kind\":\"file\",\"ref\":\"src/pipeline/outcome-recovery.ts\",\"summary\":\"新增 demoteUnrecoveredReview：活跃路径自我恢复失败时将工单从 review 打回 blocked；启动修复不改写历史 stage\"},{\"kind\":\"file\",\"ref\":\"src/children/manager.ts\",\"summary\":\"run.completed 且恢复失败时以 demoteUnrecoveredReview 记录 outcome registration missing\"},{\"kind\":\"file\",\"ref\":\"packages/protocol/src/index.ts\",\"summary\":\"TicketReviewState 增加 rework_exhausted 取值与返工额度、恢复失败字段\"},{\"kind\":\"file\",\"ref\":\"packages/protocol/src/stages.ts\",\"summary\":\"新增 system 专属边 review->blocked\"},{\"kind\":\"file\",\"ref\":\"apps/companion/src/features/workspace/model.ts\",\"summary\":\"新增 buildReviewNoticePresentation/isReviewDeadlocked，按 reviewState 分流卡片语气与验收风险文案，卡死态计入需要介入\"},{\"kind\":\"file\",\"ref\":\"apps/companion/src/features/tickets/TicketThread.tsx\",\"summary\":\"渲染专属 review 状态卡片与验收风险区块，卡死态下验收通过改为 danger 语气的仍要验收通过\"},{\"kind\":\"file\",\"ref\":\"test/review-deadlock.test.ts\",\"summary\":\"以 #66 真实时间线构造 fixture，覆盖投影分流、恢复失败回退、返工耗尽通知三组回归\"},{\"kind\":\"file\",\"ref\":\"test/ticket72-rework-exhausted-runtime.test.ts\",\"summary\":\"真实 daemon + HTTP 运行态验收，从线上接口读回通知与工单投影并留档证据\"},{\"kind\":\"file\",\"ref\":\"apps/companion/src/features/workspace/reviewProjection.test.ts\",\"summary\":\"companion 侧四种 review 语义分支与 #66 回归断言\"},{\"kind\":\"file\",\"ref\":\"artifacts/ticket-72-rework-exhausted/runtime-evidence.json\",\"summary\":\"本次运行重新生成的运行态证据\"}],\"deliverables\":[{\"kind\":\"path\",\"ref\":\"src/coordinator/review-authority.ts\",\"label\":\"review 阶段统一事实层\"},{\"kind\":\"path\",\"ref\":\"src/pipeline/outcome-recovery.ts\",\"label\":\"自我恢复失败回退 blocked\"},{\"kind\":\"path\",\"ref\":\"src/coordinator/delegated-review.ts\",\"label\":\"rework_exhausted 显式通知\"},{\"kind\":\"path\",\"ref\":\"apps/companion/src/features/workspace/model.ts\",\"label\":\"review 状态投影与验收风险\"},{\"kind\":\"path\",\"ref\":\"artifacts/ticket-72-rework-exhausted/runtime-evidence.json\",\"label\":\"运行态证据\"}],\"validations\":[{\"command\":\"./node_modules/.bin/vitest run\",\"outcome\":\"passed\",\"exitCode\":0,\"summary\":\"后端全量 165 个测试文件 / 1288 个测试通过\",\"evidenceRef\":null},{\"command\":\"./node_modules/.bin/vitest run --root apps/companion\",\"outcome\":\"passed\",\"exitCode\":0,\"summary\":\"companion 全量 39 个测试文件 / 332 个测试通过\",\"evidenceRef\":null},{\"command\":\"./node_modules/.bin/vitest run test/review-deadlock.test.ts test/ticket72-rework-exhausted-runtime.test.ts\",\"outcome\":\"passed\",\"exitCode\":0,\"summary\":\"三条回归在临时回退各自修复后分别失败（review!=blocked / 通知标题回落 automation blocked / needsAttention=false），恢复后全部通过\",\"evidenceRef\":\"artifacts/ticket-72-rework-exhausted/runtime-evidence.json\"},{\"command\":\"npm run typecheck && npm run build && npm run acceptance:item-model\",\"outcome\":\"skipped\",\"exitCode\":null,\"summary\":\"本会话仅允许 ./node_modules/.bin/vitest run，npm/tsc/tsx 调用均被拒绝，完整 verify 门未验证\",\"evidenceRef\":null}]}"
+        },
+        {
+          "type": "run.completed",
+          "exitCode": 0
+        }
+      ],
+      "attemptInItem": 3
+    },
+    {
+      "historicalRunId": 59,
+      "historicalItemId": 76,
+      "itemTitle": "Companion 真实验收最小 coding 任务：创建并验证 acceptance.txt",
+      "role": "executor",
+      "purpose": "execution",
+      "runtime": "pi",
+      "model": "openai/gpt-5.5",
+      "startedAt": "2026-09-04 10:39:54",
+      "recordedState": "failed",
+      "recordedErrorCode": "process_exit",
+      "droppedEvents": 0,
+      "events": [
+        {
+          "type": "session.updated",
+          "externalSessionId": "01a06c00-ef31-7306-937c-4fb53c1a5add"
+        },
+        {
+          "type": "run.started",
+          "runtime": "pi",
+          "model": "openai/gpt-5.5"
+        },
+        {
+          "type": "runtime.stderr",
+          "text": "node:events:496\n      throw er; // Unhandled 'error' event\n      ^\n\nTypeError: zlib.createZstdDecompress is not a function\n    at Object.onResponseStart (/Users/<user>/Workspace/AI/pi-lead-child/node_modules/@earendil-works/pi-coding-agent/node_modules/undici/lib/web/fetch/index.js:2309:38)\n    at Request.onResponseStart (/Users/<user>/Workspace/AI/pi-lead-child/node_modules/@earendil-works/pi-coding-agent/node_modules/undici/lib/core/request.js:345:39)\n    at Parser.onHeadersComplete (/Users/<user>/Workspace/AI/pi-lead-child/node_modules/@earendil-works/pi-coding-agent/node_modules/undici/lib/dispatcher/client-h1.js:702:27)\n    at wasm_on_headers_complete (/Users/<user>/Workspace/AI/pi-lead-child/node_modules/@earendil-works/pi-coding-agent/node_modules/undici/lib/dispatcher/client-h1.js:158:30)\n    at wasm://wasm/00034eea:wasm-function[10]:0x571\n    at wasm://wasm/00034eea:wasm-function[20]:0x845f\n    at Parser.execute (/Users/<user>/Workspace/AI/pi-lead-child/node_modules/@earendil-works/pi-coding-agent/node_modules/undici/lib/dispatcher/client-h1.js:353:22)\n    at Parser.readMore (/Users/<user>/Workspace/AI/pi-lead-child/node_modules/@earendil-works/pi-coding-agent/node_modules/undic…[clipped]"
+        },
+        {
+          "type": "run.failed",
+          "exitCode": 1,
+          "errorCode": "process_exit",
+          "error": "Pi process exited before agent_end (1)"
+        }
+      ],
+      "attemptInItem": 1
+    },
+    {
+      "historicalRunId": 62,
+      "historicalItemId": 77,
+      "itemTitle": "安装 Matt Pocock skills：retro、implement spec（grill-me/grilling 已存在）",
+      "role": "executor",
+      "purpose": "execution",
+      "runtime": "codex",
+      "model": "gpt-5.4-mini",
+      "startedAt": "2026-10-08 11:07:50",
+      "recordedState": "failed",
+      "recordedErrorCode": "codex_error",
+      "droppedEvents": 16,
+      "events": [
+        {
+          "type": "run.started",
+          "runtime": "codex",
+          "model": "gpt-5.4-mini"
+        },
+        {
+          "type": "session.updated",
+          "externalSessionId": "01a11b32-c0e7-71c1-8cb7-cdd9b87fde37"
+        },
+        {
+          "type": "runtime.stderr",
+          "text": "Reading additional input from stdin...\n"
+        },
+        {
+          "type": "runtime.stderr",
+          "text": "2026-10-08T11:07:52.645985Z ERROR codex_login::auth::manager: Failed to refresh token: 401 Unauthorized: {\n  \"error\": {\n    \"message\": \"Your refresh token has been invalidated. Please try signing in again.\",\n    \"type\": \"invalid_request_error\",\n    \"param\": null,\n    \"code\": \"refresh_token_invalidated\"\n  }\n}\n"
+        },
+        {
+          "type": "runtime.stderr",
+          "text": "2026-10-08T11:07:52.646327Z ERROR codex_login::auth::manager: Failed to refresh token: Your access token could not be refreshed because your refresh token was revoked. Please log out and sign in again.\n2026-10-08T11:07:52.652321Z ERROR codex_login::auth::manager: Failed to refresh token: Your access token could not be refreshed because your refresh token was revoked. Please log out and sign in again.\n"
+        },
+        {
+          "type": "runtime.stderr",
+          "text": "2026-10-08T11:07:52.663095Z ERROR codex_login::auth::manager: Failed to refresh token: Your access token could not be refreshed because your refresh token was revoked. Please log out and sign in again.\n2026-10-08T11:07:52.676373Z ERROR codex_login::auth::manager: Failed to refresh token: Your access token could not be refreshed because your refresh token was revoked. Please log out and sign in again.\n2026-10-08T11:07:52.683116Z ERROR codex_login::auth::manager: Failed to refresh token: Your access token could not be refreshed because your refresh token was revoked. Please log out and sign in again.\n"
+        },
+        {
+          "type": "runtime.stderr",
+          "text": "2026-10-08T11:07:58.028008Z ERROR codex_login::auth::manager: Failed to refresh token: Your access token could not be refreshed because your refresh token was revoked. Please log out and sign in again.\n"
+        },
+        {
+          "type": "runtime.stderr",
+          "text": "2026-10-08T11:07:58.148194Z ERROR codex_login::auth::manager: Failed to refresh token: Your access token could not be refreshed because your refresh token was revoked. Please log out and sign in again.\n"
+        },
+        {
+          "type": "runtime.stderr",
+          "text": "2026-10-08T11:07:58.553891Z ERROR codex_login::auth::manager: Failed to refresh token: Your access token could not be refreshed because your refresh token was revoked. Please log out and sign in again.\n"
+        },
+        {
+          "type": "runtime.stderr",
+          "text": "2026-10-08T11:07:58.796062Z ERROR codex_login::auth::manager: Failed to refresh token: Your access token could not be refreshed because your refresh token was revoked. Please log out and sign in again.\n"
+        },
+        {
+          "type": "run.failed",
+          "exitCode": null,
+          "errorCode": "codex_error",
+          "error": "Reconnecting... 1/5 (unexpected status 502 Bad Gateway: unknown provider for model gpt-5.4-mini, url: http://codex-proxy.example/v1/responses)"
+        }
+      ],
+      "attemptInItem": 1
+    },
+    {
+      "historicalRunId": 63,
+      "historicalItemId": 77,
+      "itemTitle": "安装 Matt Pocock skills：retro、implement spec（grill-me/grilling 已存在）",
+      "role": "executor",
+      "purpose": "execution",
+      "runtime": "claude",
+      "model": "openai/gpt-5.4-mini",
+      "startedAt": "2026-10-08 11:08:52",
+      "recordedState": "failed",
+      "recordedErrorCode": "claude_success",
+      "droppedEvents": 1,
+      "events": [
+        {
+          "type": "run.started",
+          "runtime": "claude",
+          "model": "openai/gpt-5.4-mini"
+        },
+        {
+          "type": "session.updated",
+          "externalSessionId": "411110e8-42c0-41b5-8a54-f2265005b729",
+          "runtimeVersion": "2.1.258"
+        },
+        {
+          "type": "usage.updated",
+          "mode": "cumulative",
+          "inputTokens": 0,
+          "outputTokens": 0,
+          "totalTokens": 0,
+          "costUsd": 0
+        },
+        {
+          "type": "message.completed",
+          "messageId": "3dbf710a-d395-41e8-a0fa-632a0571e451",
+          "role": "assistant",
+          "text": "Failed to authenticate: OAuth session expired and could not be refreshed",
+          "stopReason": "stop_sequence"
+        },
+        {
+          "type": "run.failed",
+          "exitCode": 1,
+          "errorCode": "claude_success",
+          "error": "Failed to authenticate: OAuth session expired and could not be refreshed"
+        }
+      ],
+      "attemptInItem": 2
+    },
+    {
+      "historicalRunId": 64,
+      "historicalItemId": 77,
+      "itemTitle": "安装 Matt Pocock skills：retro、implement spec（grill-me/grilling 已存在）",
+      "role": "executor",
+      "purpose": "execution",
+      "runtime": "codex",
+      "model": "gpt-5.5",
+      "startedAt": "2026-10-08 11:09:00",
+      "recordedState": "failed",
+      "recordedErrorCode": "codex_error",
+      "droppedEvents": 376,
+      "events": [
+        {
+          "type": "run.started",
+          "runtime": "codex",
+          "model": "gpt-5.5"
+        },
+        {
+          "type": "session.updated",
+          "externalSessionId": "01a11b33-cb4e-77e3-a94e-2efdf972d1ab"
+        },
+        {
+          "type": "runtime.stderr",
+          "text": "Reading additional input from stdin...\n"
+        },
+        {
+          "type": "runtime.stderr",
+          "text": "2026-10-08T11:09:01.605967Z ERROR codex_login::auth::manager: Failed to refresh token: 401 Unauthorized: {\n  \"error\": {\n    \"message\": \"Your refresh token has been invalidated. Please try signing in again.\",\n    \"type\": \"invalid_request_error\",\n    \"param\": null,\n    \"code\": \"refresh_token_invalidated\"\n  }\n}\n"
+        },
+        {
+          "type": "runtime.stderr",
+          "text": "2026-10-08T11:09:01.606573Z ERROR codex_login::auth::manager: Failed to refresh token: Your access token could not be refreshed because your refresh token was revoked. Please log out and sign in again.\n2026-10-08T11:09:01.613909Z ERROR codex_login::auth::manager: Failed to refresh token: Your access token could not be refreshed because your refresh token was revoked. Please log out and sign in again.\n"
+        },
+        {
+          "type": "runtime.stderr",
+          "text": "2026-10-08T11:09:01.630217Z ERROR codex_login::auth::manager: Failed to refresh token: Your access token could not be refreshed because your refresh token was revoked. Please log out and sign in again.\n"
+        },
+        {
+          "type": "runtime.stderr",
+          "text": "2026-10-08T11:36:56.938521Z ERROR codex_login::auth::manager: Failed to refresh token: Your access token could not be refreshed because your refresh token was revoked. Please log out and sign in again.\n2026-10-08T11:36:56.957041Z ERROR codex_login::auth::manager: Failed to refresh token: Your access token could not be refreshed because your refresh token was revoked. Please log out and sign in again.\n"
+        },
+        {
+          "type": "runtime.stderr",
+          "text": "2026-10-08T11:36:56.965007Z ERROR codex_login::auth::manager: Failed to refresh token: Your access token could not be refreshed because your refresh token was revoked. Please log out and sign in again.\n"
+        },
+        {
+          "type": "runtime.stderr",
+          "text": "2026-10-08T11:36:56.997330Z ERROR codex_login::auth::manager: Failed to refresh token: Your access token could not be refreshed because your refresh token was revoked. Please log out and sign in again.\n"
+        },
+        {
+          "type": "runtime.stderr",
+          "text": "2026-10-08T11:36:56.998104Z ERROR codex_login::auth::manager: Failed to refresh token: Your access token could not be refreshed because your refresh token was revoked. Please log out and sign in again.\n2026-10-08T11:36:56.998731Z ERROR codex_login::auth::manager: Failed to refresh token: Your access token could not be refreshed because your refresh token was revoked. Please log out and sign in again.\n"
+        },
+        {
+          "type": "message.completed",
+          "messageId": "item_61",
+          "role": "assistant",
+          "text": "网络查询现在有了足够证据，且我已开始按要求运行 `npx skills add mattpocock/skills@retro -g -y`。这个安装命令正在等待外部网络/克隆结果；我会逐项处理，不会并发装多个 skill，以便明确每个目标的状态。"
+        },
+        {
+          "type": "run.failed",
+          "exitCode": null,
+          "errorCode": "codex_error",
+          "error": "Reconnecting... waiting for network (Connection failed: error sending request)"
+        }
+      ],
+      "attemptInItem": 3
+    }
+  ]
+}

@@ -1,0 +1,10 @@
+#!/bin/sh
+# pi-lead-child CLI wrapper — 构建产物优先（launchd/生产），PLC_DEV=1 或无 dist 时回退 tsx 源码
+# DIR 是 apps/cli，ROOT 是 monorepo 根（tsx 被 workspaces 提升到根的 node_modules）。
+SELF="$(readlink -f "$0" 2>/dev/null || echo "$0")"
+DIR="$(cd "$(dirname "$SELF")/.." && pwd)"
+ROOT="$(cd "$DIR/../.." && pwd)"
+if [ -f "$DIR/dist/cli.mjs" ] && [ -z "$PLC_DEV" ]; then
+  exec node "$DIR/dist/cli.mjs" "$@"
+fi
+exec "$ROOT/node_modules/.bin/tsx" "$DIR/src/cli.ts" "$@"

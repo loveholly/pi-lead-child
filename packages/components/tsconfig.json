@@ -1,0 +1,11 @@
+{
+  // web 一遍：Metro 在 web 上选 Xxx.tsx。iOS 和 Android 两遍见 tsconfig.ios.json 和 tsconfig.android.json：
+  // 它们和 Metro 一样先找 Xxx.ios.tsx / Xxx.android.tsx，再找 Xxx.native.tsx，最后找 Xxx.tsx。
+  // 三遍都通过，才说明每个组件的各平台实现满足同一份 props 类型。
+  "extends": "expo/tsconfig.base",
+  "compilerOptions": {
+    "strict": true,
+    "allowImportingTsExtensions": true
+  },
+  "include": ["src"]
+}
