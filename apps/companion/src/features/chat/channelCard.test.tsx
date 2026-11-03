@@ -226,6 +226,27 @@ describe('the channel card component', () => {
     expect(screen.getByTestId('channel-card-7-line')).toBeTruthy();
   });
 
+  // 在来源里打开（2026-11-03）：daemon 给了地址时，浮层的头部有「在 Slack 中打开」，点了去 Slack 里这条消息；
+  // 只认 https 的地址，别的协议不画。
+  it('opens the message in the source from the panel, only for an https link', async () => {
+    const link = 'https://acme.slack.com/archives/D0ZHANG/p1700000000000100';
+    const open = vi.spyOn(window, 'open').mockImplementation(() => null);
+    renderUI(<ChannelMessageCard card={card({ link })} onAction={vi.fn()} />);
+    await openCard(7);
+    const action = screen.getByTestId('channel-card-7-open-in-source');
+    expect(action.textContent).toBe('Open in Slack');
+    fireEvent.click(action);
+    await waitFor(() => expect(open).toHaveBeenCalledWith(link, expect.anything(), expect.anything()));
+    open.mockRestore();
+    cleanup();
+    for (const bad of ['javascript:alert(1)', 'slack://channel?team=T0000&id=D0ZHANG', 'http://acme.slack.com/x', null]) {
+      renderUI(<ChannelMessageCard card={card({ link: bad })} onAction={vi.fn()} />);
+      await openCard(7);
+      expect(screen.queryByTestId('channel-card-7-open-in-source')).toBeNull();
+      cleanup();
+    }
+  });
+
   // 2026-10-28 用户报：照你的话处理完的卡，浮层里「已照你的话处理 回了表情 :heart:」下面又写了一遍同样的话。
   it('says what Lead did once in the panel of a handled card', async () => {
     const handled = card({

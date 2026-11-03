@@ -71,7 +71,7 @@ import {
   CHANNEL_REPLY_DRAFT_KINDS, CHANNEL_LOOKUP_CHECK_STATUSES, CHANNEL_RULE_CHANGE_FLAG, DEFAULT_INTENT_GRANT_BOUNDS, channelPolicyLabels,
   channelRuleChangeNotice, isChannelRuleChangeKind, type ChannelRuleChangeKind,
   GRANT_INTENTS, describeRunGrant, SENDER_TRUST_LABELS, isChannelClosingKind, isChannelIntent,
-  isSenderTrust, NEVER_DELEGATED_TRUST, redactSecretText, strongerDelivery,
+  isSenderTrust, NEVER_DELEGATED_TRUST, redactSecretText, sourceLink, strongerDelivery,
   type ChannelCardAction, type ChannelCardDto, type ChannelHandbook, type HandbookRehearsal, type HandbookRehearsalRequest, type ChannelCardState, type ChannelDeliveryMode, type ChannelIntent,
   type ChannelReactionEmoji, type EventDisposition, type SenderTrust, CHANNEL_POLICY_DEFAULTS, CHANNEL_POLICY_REPLAY_HOURS,
   CHANNEL_POLICY_REPLAY_MAX_CALLS,
@@ -1351,6 +1351,7 @@ export class ChannelHub {
       authority: input.action, intent: input.intent, handbook: input.handbook ?? null,
       messageId: typeof event.payload.messageId === "string" ? event.payload.messageId : null,
       messages: merged.seqs, cardId: card.id, summary, context: context?.context ?? null,
+      link: linkOf(adapter, event.payload),
     });
     const recorded = appendEvent(db, {
       source: "system", sourceRef: messageEventRef(adapter.id, merged.seqs), kind: MESSAGE_EVENT_KIND, entityKey: card.objectKey,
@@ -2237,8 +2238,12 @@ export class ChannelHub {
 
   /** 最近有动静的对话（道），最近的在前：给 Lead 翻对话列表用，只有结构化的事实。 */
   recentConversations(source: string | null, limit = 20): ChannelRecentConversation[] {
+    const lastPayloadOf = this.lastPayloadReader();
     return listRecentChannelLanes(this.db, Math.min(Math.max(Math.floor(limit), 1), 50), source ?? undefined)
-      .map((lane) => ({ id: lane.objectKey, label: lane.label, updatedAt: lane.updatedAt, summary: lane.summary }));
+      .map((lane) => ({
+        id: lane.objectKey, label: lane.label, updatedAt: lane.updatedAt, summary: lane.summary,
+        link: linkOf(this.options.registry.get(lane.source), lastPayloadOf(lane.source, lane.objectKey)),
+      }));
   }
 
   /** 还在等你的卡（open、snoozed、replying_self），给 Lead 自查用：只有结构化的事实，没有原文。旧的在前。 */
@@ -3202,6 +3207,7 @@ export class ChannelHub {
       revokeUntil: card.revokeUntil,
       resolvedAt: card.resolvedAt,
       actions: this.actionsFor(card, adapter),
+      link: linkOf(adapter, getEvent(this.db, card.lastSeq)?.payload),
       createdAt: card.createdAt,
       updatedAt: card.updatedAt,
     };
@@ -3481,17 +3487,22 @@ export class ChannelHub {
 
   // 这个来源有没结束的卡的道，带这条道里这个来源最后一条事件的 payload。
   private openLanesOf(adapter: ChannelAdapter, limit: number): ChannelOpenLane[] {
+    const lastPayloadOf = this.lastPayloadReader();
+    return listOpenChannelLanes(this.db, Math.max(1, Math.trunc(limit)), adapter.id)
+      .map((lane) => ({ objectKey: lane.objectKey, lastPayload: lastPayloadOf(adapter.id, lane.objectKey) }));
+  }
+
+  // 读一条道里某个来源最后一条事件的 payload（没有、读不出时是 null）。只 prepare 一次，给循环里一条条读。
+  private lastPayloadReader(): (source: string, objectKey: string) => Record<string, unknown> | null {
     const last = this.db.prepare("SELECT payload FROM events WHERE source = ? AND entity_key = ? ORDER BY seq DESC LIMIT 1");
-    return listOpenChannelLanes(this.db, Math.max(1, Math.trunc(limit)), adapter.id).map((lane) => {
-      const row = last.get(adapter.id, lane.objectKey) as { payload: string } | undefined;
-      let lastPayload: Record<string, unknown> | null = null;
+    return (source, objectKey) => {
+      const row = last.get(source, objectKey) as { payload: string } | undefined;
       try {
-        lastPayload = row ? JSON.parse(row.payload) as Record<string, unknown> : null;
+        return row ? JSON.parse(row.payload) as Record<string, unknown> : null;
       } catch {
-        lastPayload = null;
+        return null;
       }
-      return { objectKey: lane.objectKey, lastPayload };
-    });
+    };
   }
 
   // ── 代查（代查与按信心代回 spec D3–D8）────────────────────────────────────────
@@ -4353,6 +4364,16 @@ function pendingCardOf(payload: Record<string, unknown>): { delivery: ChannelDel
   if (!target || typeof target !== "object") return null;
   const replyTarget = Object.fromEntries(Object.entries(target as Record<string, unknown>).filter(([, value]) => typeof value === "string")) as Record<string, string>;
   return { delivery: pending.delivery, replyTarget };
+}
+
+// 在来源里打开一条入站事件的地址（ChannelAdapter.link）：只收 https 的地址（protocol 的 sourceLink），适配器出错时当作没有。
+function linkOf(adapter: ChannelAdapter | undefined, payload: Record<string, unknown> | null | undefined): string | null {
+  if (!adapter?.link || !payload) return null;
+  try {
+    return sourceLink(adapter.link(payload));
+  } catch {
+    return null;
+  }
 }
 
 // 这条消息自己在来源里的引用（payload 的 messageRef，回表情的目标）。没有或者不合格时是 null。

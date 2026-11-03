@@ -211,6 +211,8 @@ const messageEventProperties = {
   edits: Type.Integer({ minimum: 0 }),
   // 外部通道：这条消息所在的会话卡（现有的通道工具按它找，工单 05 换工具）。
   cardId: Type.Optional(Nullable(Id)),
+  // 外部通道：在来源里打开这条消息的地址（只会是 https，channels.ts 的 sourceLink）。Lead 带用户去来源里看时用。来源给不出时没有。
+  link: Type.Optional(Nullable(Type.String())),
 };
 
 export const MessageEventSchema = Type.Object(messageEventProperties);

@@ -314,6 +314,8 @@ const SlackFields = {
   externalShared: Type.Optional(Type.Union([Type.Boolean(), Type.Null()])),
   // 频道名（不带 #）。私信、问不到时是 null。记忆沉淀用它做笔记的标题、按名字排除频道。
   channelName: Type.Optional(Type.Union([Type.String(), Type.Null()])),
+  // 工作区的网址（auth.test 的 url 的 origin），拼「在 Slack 中打开」的地址用。还不知道时没有。
+  workspaceUrl: Type.Optional(Type.String()),
 };
 
 const MINUTE = 60_000;
@@ -759,6 +761,52 @@ function placeOf(channel: string, channelType: string, ts: string, threadTs: str
   };
 }
 
+// Slack 的编号（频道 C、私有频道 G、私信 D；工作区 T、企业 E）和消息的 ts（秒.微秒）。拼地址以前按它们检查，别的字不进地址。
+const SLACK_ID = /^[A-Z0-9]{2,40}$/;
+const SLACK_TEAM_ID = /^[TE][A-Z0-9]{1,40}$/;
+const SLACK_TS = /^\d{1,12}\.\d{6}$/;
+
+/**
+ * 工作区的网址（auth.test 的 url，例如 https://acme.slack.com/）：只认 https、*.slack.com 的主机，不带用户名和密码。
+ * 返回不带结尾斜杠的 origin；不合格时是 null。
+ */
+export function slackWorkspaceUrl(value: unknown): string | null {
+  if (!isString(value)) return null;
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return null;
+  }
+  if (url.protocol !== "https:" || url.username || url.password || url.port) return null;
+  if (!/^[a-z0-9-]+(\.[a-z0-9-]+)*\.slack\.com$/i.test(url.hostname)) return null;
+  return url.origin;
+}
+
+/**
+ * 在 Slack 里打开一条消息的地址（会话卡上的「在 Slack 中打开」、交给 Lead 的消息事件）。不调接口，按 chat.getPermalink
+ * 给的格式拼（https://docs.slack.dev/reference/methods/chat.getPermalink）：
+ *   <工作区>/archives/<频道>/p<ts 去掉小数点>；thread 里的回复再加 ?thread_ts=<根消息的 ts>&cid=<频道>。
+ * 根消息自己（threadTs 是空的，或者等于 ts）不加 thread_ts。私信、群聊、频道都是这个格式（频道编号是 D、G、C 开头）。
+ * 不知道工作区的网址时（还没换过凭据），退到 app_redirect（https://docs.slack.dev/interactivity/deep-linking）：
+ * 打开这个对话，不定位到这条消息；ts 是 null 时也是它。编号不合格时是 null。
+ */
+export function slackMessageLink(input: {
+  workspaceUrl: string | null; team: string | null; channel: unknown; ts: unknown; threadTs: unknown;
+}): string | null {
+  const channel = typeof input.channel === "string" && SLACK_ID.test(input.channel) ? input.channel : null;
+  if (!channel) return null;
+  const ts = typeof input.ts === "string" && SLACK_TS.test(input.ts) ? input.ts : null;
+  const thread = typeof input.threadTs === "string" && SLACK_TS.test(input.threadTs) && input.threadTs !== ts ? input.threadTs : null;
+  const workspace = slackWorkspaceUrl(input.workspaceUrl);
+  if (workspace && ts) {
+    const query = thread ? `?${new URLSearchParams({ thread_ts: thread, cid: channel })}` : "";
+    return `${workspace}/archives/${channel}/p${ts.replace(".", "")}${query}`;
+  }
+  const team = input.team && SLACK_TEAM_ID.test(input.team) ? input.team : null;
+  return `https://slack.com/app_redirect?${new URLSearchParams({ ...(team ? { team } : {}), channel })}`;
+}
+
 export function createSlackChannelAdapter(options: SlackChannelOptions): ChannelAdapter {
   const now = options.now ?? (() => new Date());
   const maxAgeMs = options.maxSignatureAgeMs ?? 5 * MINUTE;
@@ -771,6 +819,8 @@ export function createSlackChannelAdapter(options: SlackChannelOptions): Channel
   const conversations = new Map<string, ConversationInfo>();
   // 用户本人所在的工作区：auth.test（会话方式是换好的会话）或者投递的 team_id 告诉我们。补拉的消息靠它认出外部的人。
   let homeTeam: string | null = null;
+  // 工作区的网址（auth.test 的 url；会话方式是会话的 apiBase，没有时按 domain 拼）：拼消息的地址用（slackMessageLink）。不知道时是 null。
+  let homeUrl: string | null = null;
   // 连接方式。浏览器会话方式下，Web API 经过会话（SlackSessions），其余的代码两种方式一样。
   const mode = (): SlackConnection => ((typeof options.connection === "function" ? options.connection() : options.connection) === "session"
     ? "session" : "app");
@@ -1070,6 +1120,8 @@ export function createSlackChannelAdapter(options: SlackChannelOptions): Channel
       fields: {
         channelId: input.channel, channelType: input.channelType, ts: input.ts, threadTs: place.thread, echo: input.echo,
         externalShared: info.externalShared, channelName: info.name,
+        // 记下工作区的网址：以后没连上 Slack（或者 daemon 刚重启）时，卡上的「在 Slack 中打开」照样能拼出来。
+        ...(homeUrl ? { workspaceUrl: homeUrl } : {}),
         ...(slackAttachmentsOnly(input.message) ? { attachmentsOnly: true } : {}),
       },
       ...(input.amends ? { amends: input.amends } : {}),
@@ -1179,6 +1231,8 @@ export function createSlackChannelAdapter(options: SlackChannelOptions): Channel
       return null;
     }
     homeTeam = identity.teamId;
+    // 先用会话给的网址（Enterprise Grid 下只拼 domain 会拼到别的主机），没有时才按 domain 拼。
+    homeUrl = slackWorkspaceUrl(identity.url) ?? (identity.domain ? slackWorkspaceUrl(`https://${identity.domain}.slack.com`) : null);
     let accountName: string | undefined;
     try {
       const info = await web.call("users.info", { user: identity.userId }, cookie);
@@ -1221,6 +1275,7 @@ export function createSlackChannelAdapter(options: SlackChannelOptions): Channel
       return null;
     }
     if (isString(auth.team_id)) homeTeam = auth.team_id;
+    homeUrl = slackWorkspaceUrl(auth.url);
     let accountName: string | undefined;
     try {
       const info = await options.api.call("users.info", { user: auth.user_id }, userToken);
@@ -1397,6 +1452,14 @@ export function createSlackChannelAdapter(options: SlackChannelOptions): Channel
     ],
     standingOrders: SEEDS,
     memory: memorySpec,
+    // 在 Slack 里打开一条消息（slackMessageLink）。删了的消息打不开：thread 里的打开 thread 的根消息，别的打开这个对话。
+    link(payload) {
+      const deleted = payload.amends === "deleted";
+      return slackMessageLink({
+        workspaceUrl: isString(payload.workspaceUrl) ? payload.workspaceUrl : homeUrl, team: homeTeam, channel: payload.channelId,
+        ts: deleted ? payload.threadTs ?? null : payload.ts, threadTs: deleted ? null : payload.threadTs,
+      });
+    },
     // 每次读时现算（hub 每发一条消息读一次）：设置页改了 emoji 以后，下一条消息就用新的。
     get disclosureMark() {
       return disclosureMarkNow();
