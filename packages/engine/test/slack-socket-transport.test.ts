@@ -4,7 +4,7 @@
 //   - 断了就重连；重新连上以后补拉还有没结束的卡的道，不重复记；第一次连上也补拉；
 //   - 连不上时退避再试；SDK 的日志和报错里没有令牌；
 //   - 停下时断开连接，已经 ack 的投递交完；
-//   - 连接的状态报给 host.status（设置页）；停了以后能再开（设置页改了凭据以后热重连），上一代没连完的连接不留下。
+//   - 连接的状态报给 host.status（设置页）；每次连上以后的第一个事件报给 host.received（连上了却收不到事件时提醒）；停了以后能再开（设置页改了凭据以后热重连），上一代没连完的连接不留下。
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { tempDir } from "@pi-lead-child/core/testing";
@@ -35,9 +35,13 @@ afterEach(async () => {
 });
 
 let statuses: ChannelTransportStatus[] = [];
+let received = 0;
 
 function start(): void {
-  adapter.transport!.start({ ...hub.transportContext("slack"), status: (update) => statuses.push(update) }, async (delivery) => {
+  received = 0;
+  adapter.transport!.start({
+    ...hub.transportContext("slack"), status: (update) => statuses.push(update), received: () => { received += 1; },
+  }, async (delivery) => {
     slack.timeline.push(`deliver:${JSON.parse(delivery.body).event.ts}`);
     return hub.receiveFromTransport("slack", delivery);
   });
@@ -176,6 +180,31 @@ describe("the Socket Mode transport", () => {
     start();
     await vi.waitFor(() => expect(statuses.map((status) => status.state)).toEqual(["connecting", "error", "connected"]));
     expect(statuses[1]).toEqual({ state: "error", error: expect.stringContaining("Slack 拒绝了连接（invalid_auth）") });
+  });
+
+  // 2026-11-02：应用没有订阅用户事件时连上了也收不到事件。第一个用户本人能看到的事件报给 host.received，设置页据此提醒。
+  it("reports the first event the user can see on every connection, not other envelopes or other installers' events", async () => {
+    start();
+    await connected();
+    slack.socket()!.envelope("interactive", { type: "block_actions" });
+    await vi.waitFor(() => expect(slack.acks).toHaveLength(1));
+    expect(received).toBe(0);
+    // 别人也装了这个应用：他们能看到、用户本人看不到的事件不算（不能让它把「收不到事件」的提醒清掉）。
+    slack.push(slack.seenBy(slack.dm("U0LI", "周末的排班换一下？", { channel: "D0ZHANGLI" }), ["U0ZHANG"]));
+    await vi.waitFor(() => expect(slack.acks).toHaveLength(2));
+    await vi.waitFor(() => expect(logs.join("\n")).toContain("dropped a Slack event"));
+    expect(kinds()).toEqual([]);
+    expect(received).toBe(0);
+    slack.push(slack.dm("U0ZHANG", "第一条"));
+    slack.push(slack.dm("U0ZHANG", "第二条"));
+    await vi.waitFor(() => expect(kinds()).toHaveLength(2));
+    expect(received).toBe(1);
+    slack.dropConnection();
+    await vi.waitFor(() => expect(slack.connections).toBe(2));
+    expect(received).toBe(1);
+    slack.push(slack.dm("U0ZHANG", "重连以后的"));
+    await vi.waitFor(() => expect(kinds()).toHaveLength(3));
+    expect(received).toBe(2);
   });
 
   it("starts again after a stop with a new client", async () => {

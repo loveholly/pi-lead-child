@@ -8,7 +8,12 @@
 //   3. 状态：每个来源在内存里记 status、lastError、lastConnectedAt、account、missingScopes。channels.ts 在传输连上、断开、
 //      连不上时报来（onSourceStatus）。变了就推 snapshot.required（resource channel-settings）。
 //   4. 「不是我」（网关的 owner-actions.ts）：保险库里这个来源的密钥还是那次保存的版本时，删掉并热重连。
-//   5. 连接方式（2026-11-02，有几种方式的来源，ChannelAdapter.connection）：操作层的 channel_connection 经过这里。
+//   5. 收不到事件（2026-11-02）：设置页存了令牌以后有没有收到过事件，记在 kv 的 channel.<来源>.events。从存了令牌以后
+//      第一次连上算起满 noEventsWarnMs（缺省 30 分钟）还一个都没收到，并且现在连着、这次连接至少连了 2 分钟，
+//      状态里带上来源插件给的提醒（noEventsWarning）。断线、出错不从头算；重新保存、删除、没有配置、换回不用登录的方式才从头算。
+//      没有这一行（令牌来自环境变量或 Keychain，或者是这以前存的）时不提醒：只是一段时间没人发消息的用户不会看到它。
+//      用要登录的连接方式（第 6 条）时也不提醒：那种方式不报收到的事件。
+//   6. 连接方式（2026-11-02，有几种方式的来源，ChannelAdapter.connection）：操作层的 channel_connection 经过这里。
 //      - 登录：打开来源的登录窗口（不等它），用户登录以后按那种方式的检查试一次，全过才存进保险库、记下换到这种方式、热重连。
 //        同一时间一个来源只有一个登录窗口；取消、超时、窗口关掉都记成登录的结果，设置页和 Lead 都看得到。
 //      - 换回不用登录的方式：记下来，热重连。
@@ -25,6 +30,7 @@ import {
 } from "@pi-lead-child/engine";
 import { ChannelSettingsError, type ChannelSettingsService, type ChannelSourceSettingsView } from "@pi-lead-child/gateway";
 import {
+  CHANNEL_SETUP_URL_MAX,
   redactSecretText,
   type ChannelConnectionDto,
   type ChannelSecretCheck,
@@ -53,6 +59,8 @@ export interface ChannelSettingsOptions {
   now?: () => Date;
   // 一次检查最多等多久。缺省 30 秒（Web API 自己有超时和重试，这里再兜一层）。
   testTimeoutMs?: number;
+  // 连上多久还没收到事件就提醒。缺省 30 分钟。
+  noEventsWarnMs?: number;
   // 登录窗口最多开多久（设置页显示的剩余时间；来源自己也按这个时长关窗口）。缺省 5 分钟。
   signInWindowMs?: number;
 }
@@ -63,6 +71,10 @@ interface SourceState {
   status: ChannelSourceStatus;
   lastError: string | null;
   lastConnectedAt: string | null;
+  // 这次连上以后收到第一个事件的时间（只在内存里，不给客户端）。每次连上重新算。
+  firstEventAt: string | null;
+  // 存了令牌以后第一次连上的时间（毫秒），等第一个事件。重新保存、删除、没有配置、换方式时清掉；断线、出错不清。
+  quietSince: number | null;
   // 最近知道的账号（检查的结果，或者连上时凭据里的）。DTO 里只有连上时才给。
   account: ChannelSourceAccount | null;
   missingScopes: string[];
@@ -70,6 +82,22 @@ interface SourceState {
 
 const DEFAULT_TEST_TIMEOUT_MS = 30_000;
 const DEFAULT_SIGN_IN_WINDOW_MS = 5 * 60_000;
+const DEFAULT_NO_EVENTS_WARN_MS = 30 * 60_000;
+// 这次连接至少连了多久才提醒：断线很久以后刚连上时，先给实时事件一点时间进来，不一连上就弹提醒。
+// 2 分钟：有人说话的工作区几分钟内就有事件，远小于 30 分钟的门槛，不明显推迟提醒。
+// 已知的误报（PR #2 审阅，2026-11-03）：Mac 睡了一夜，醒来连上后 2 分钟里没人说话，也会提醒，哪怕订阅是好的。
+// 睡眠时状态还是 connected（醒来以后 SDK 的心跳才发现断了），Node 的计时在 macOS 上也算睡眠的时间（libuv 用
+// mach_continuous_time），所以「只算连着的时间」挡不住它；把这个值调长会让短于它的抖动连接永远等不到提醒。
+// 改成在提醒文字里先说「这段时间没人发消息（例如 Mac 在睡眠）可以忽略」。
+const MIN_CONNECTED_MS = 2 * 60_000;
+
+// 存了令牌以后有没有收到过事件。savedAt、firstEventAt 是 ISO 时间。
+interface EventsRecord {
+  savedAt: string;
+  firstEventAt: string | null;
+}
+
+const eventsKey = (source: string) => `channel.${source}.events`;
 
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -112,6 +140,9 @@ export class ChannelSettings implements ChannelSettingsService, ChannelConnectio
   private sources: { adapters: () => readonly ChannelAdapter[]; reload: (source: string) => Promise<void> } | null = null;
   private queue: Promise<unknown> = Promise.resolve();
   private readonly now: () => Date;
+  // 到了该提醒的时候通知客户端重新读（每个来源一个）。
+  private readonly warnTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private stopped = false;
 
   constructor(private readonly options: ChannelSettingsOptions) {
     this.sealed = new SealedSecrets(options.db, options.vault);
@@ -165,7 +196,9 @@ export class ChannelSettings implements ChannelSettingsService, ChannelConnectio
   private sourceState(source: string): SourceState {
     let state = this.states.get(source);
     if (!state) {
-      state = { status: "not_configured", lastError: null, lastConnectedAt: null, account: null, missingScopes: [] };
+      state = {
+        status: "not_configured", lastError: null, lastConnectedAt: null, firstEventAt: null, quietSince: null, account: null, missingScopes: [],
+      };
       this.states.set(source, state);
     }
     return state;
@@ -177,6 +210,74 @@ export class ChannelSettings implements ChannelSettingsService, ChannelConnectio
     const before = JSON.stringify(state);
     mutate(state);
     if (JSON.stringify(state) !== before) this.options.publish?.();
+    this.armWarning(source);
+  }
+
+  // ── 收不到事件 ────────────────────────────────────────────────────────────────────
+
+  private readEvents(source: string): EventsRecord | null {
+    const row = this.options.db.prepare("SELECT value FROM kv WHERE key = ?").get(eventsKey(source)) as { value: string } | undefined;
+    if (!row) return null;
+    try {
+      const value = JSON.parse(row.value) as Partial<EventsRecord> | null;
+      if (typeof value?.savedAt !== "string") return null;
+      return { savedAt: value.savedAt, firstEventAt: typeof value.firstEventAt === "string" ? value.firstEventAt : null };
+    } catch {
+      return null;
+    }
+  }
+
+  private writeEvents(source: string, record: EventsRecord | null): void {
+    if (record === null) {
+      this.options.db.prepare("DELETE FROM kv WHERE key = ?").run(eventsKey(source));
+      return;
+    }
+    this.options.db.prepare(
+      `INSERT INTO kv (key, value, updated_at) VALUES (?, ?, datetime('now'))
+       ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at`,
+    ).run(eventsKey(source), JSON.stringify(record));
+  }
+
+  private warnMs(): number {
+    return this.options.noEventsWarnMs ?? DEFAULT_NO_EVENTS_WARN_MS;
+  }
+
+  // 还在等存了令牌以后的第一个事件：连着，并且 kv 里记着「还没收到」。
+  private waitingForEvents(source: string, state: SourceState): boolean {
+    return state.status === "connected" && state.quietSince !== null && this.readEvents(source)?.firstEventAt === null;
+  }
+
+  // 什么时候该提醒（毫秒）：满 noEventsWarnMs，并且这次连接连满 MIN_CONNECTED_MS。
+  private warnAt(state: SourceState): number {
+    const connectedAt = state.lastConnectedAt ? Date.parse(state.lastConnectedAt) : this.now().getTime();
+    return Math.max(state.quietSince! + this.warnMs(), connectedAt + MIN_CONNECTED_MS);
+  }
+
+  // 还没到提醒的时候：到点通知客户端重新读，状态里就有了提醒。
+  private armWarning(source: string): void {
+    const timer = this.warnTimers.get(source);
+    if (timer) clearTimeout(timer);
+    this.warnTimers.delete(source);
+    const state = this.sourceState(source);
+    if (this.stopped || !this.waitingForEvents(source, state)) return;
+    const left = this.warnAt(state) - this.now().getTime();
+    if (left <= 0) return;
+    const next = setTimeout(() => {
+      this.warnTimers.delete(source);
+      this.options.publish?.();
+    }, left);
+    next.unref?.();
+    this.warnTimers.set(source, next);
+  }
+
+  private noEventsWarning(adapter: ChannelAdapter, state: SourceState): string | null {
+    const warning = adapter.settings!.noEventsWarning;
+    if (!warning || !this.waitingForEvents(adapter.id, state)) return null;
+    // 要登录的连接方式（例如 Slack 的浏览器会话）不报 received，按它算会误报。
+    const control = adapter.connection;
+    if (control?.needsSignIn(control.mode())) return null;
+    if (this.now().getTime() < this.warnAt(state)) return null;
+    return warning(getLocale(this.options.db)).slice(0, 1_000) || null;
   }
 
   /** channels.ts 报的来源状态（onSourceStatus）。 */
@@ -185,6 +286,7 @@ export class ChannelSettings implements ChannelSettingsService, ChannelConnectio
       switch (update.state) {
         case "not_configured":
           state.status = "not_configured";
+          state.quietSince = null;
           state.lastError = null;
           state.account = null;
           state.missingScopes = [];
@@ -197,6 +299,8 @@ export class ChannelSettings implements ChannelSettingsService, ChannelConnectio
           state.status = "connected";
           state.lastError = null;
           state.lastConnectedAt = this.now().toISOString();
+          state.firstEventAt = null;
+          state.quietSince ??= this.now().getTime();
           // 检查时认出的账号更全（显示名）：还是同一个人时留着它。
           if (update.account && state.account?.userId !== update.account.userId) state.account = update.account;
           return;
@@ -207,6 +311,14 @@ export class ChannelSettings implements ChannelSettingsService, ChannelConnectio
             ? this.m().signedOut
             : this.scrubFor(source, update.error).slice(0, 500) || this.m().cannotConnect;
           return;
+        case "received": {
+          if (state.firstEventAt) return;
+          const at = this.now().toISOString();
+          state.firstEventAt = at;
+          const record = this.readEvents(source);
+          if (record && !record.firstEventAt) this.writeEvents(source, { ...record, firstEventAt: at });
+          return;
+        }
       }
     });
   }
@@ -237,6 +349,7 @@ export class ChannelSettings implements ChannelSettingsService, ChannelConnectio
   private view(adapter: ChannelAdapter): ChannelSourceSettingsView {
     const settings = adapter.settings!;
     const state = this.sourceState(adapter.id);
+    const locale = getLocale(this.options.db);
     return {
       source: adapter.id,
       label: adapter.label.slice(0, 60),
@@ -245,16 +358,26 @@ export class ChannelSettings implements ChannelSettingsService, ChannelConnectio
       missingScopes: state.missingScopes.slice(0, 50),
       lastError: state.lastError,
       lastConnectedAt: state.lastConnectedAt,
+      noEventsWarning: this.noEventsWarning(adapter, state),
       secrets: settings.secrets.slice(0, 8).map((spec) => {
         const found = this.resolve(spec.name);
         return {
-          name: spec.name, label: spec.label, prefix: spec.prefix, hint: spec.hint,
+          name: spec.name, label: spec.label, prefix: spec.prefix, hint: spec.hint(locale).slice(0, 300),
           present: found !== null, origin: found?.origin ?? null,
         };
       }),
       manifest: settings.manifest,
-      setupUrl: settings.setupUrl,
+      // 超过契约的长度时不给：一个来源的长链接不能让整个列表过不了客户端的校验。
+      setupUrl: settings.setupUrl && settings.setupUrl.length <= CHANNEL_SETUP_URL_MAX ? settings.setupUrl : null,
+      setupNote: settings.setupNote?.(locale).slice(0, 1_000) || null,
     };
+  }
+
+  /** 停机（关库之前）：清掉提醒的定时器，之后不再设。 */
+  stop(): void {
+    this.stopped = true;
+    for (const timer of this.warnTimers.values()) clearTimeout(timer);
+    this.warnTimers.clear();
   }
 
   // ── 检查 ──────────────────────────────────────────────────────────────────────────
@@ -349,9 +472,12 @@ export class ChannelSettings implements ChannelSettingsService, ChannelConnectio
       }
       const names = adapter.settings!.secrets.map((spec) => spec.name).filter((name) => secrets[name]?.trim());
       for (const name of names) this.sealed.set(channelSecretVaultName(name), { value: secrets[name]!.trim(), host: null });
+      // 存了新的令牌：从头等第一个事件。
+      if (names.length) this.writeEvents(source, { savedAt: this.now().toISOString(), firstEventAt: null });
       this.change(source, (state) => {
         state.account = result.account;
         state.missingScopes = [...result.missingScopes];
+        if (names.length) state.quietSince = null;
       });
       this.options.log(`[channel-settings] ${source}: ${names.length ? `saved ${names.join(", ")} to the vault` : "nothing new to save"}; reconnecting`);
       await this.reload(adapter);
@@ -365,7 +491,11 @@ export class ChannelSettings implements ChannelSettingsService, ChannelConnectio
     const names = adapter.settings!.secrets.map((spec) => spec.name)
       .filter((name) => this.sealed.sealed(channelSecretVaultName(name)) !== null);
     for (const name of names) this.sealed.set(channelSecretVaultName(name), null);
-    this.change(adapter.id, (state) => { state.missingScopes = []; });
+    this.writeEvents(adapter.id, null);
+    this.change(adapter.id, (state) => {
+      state.missingScopes = [];
+      state.quietSince = null;
+    });
     return names;
   }
 
@@ -513,6 +643,8 @@ export class ChannelSettings implements ChannelSettingsService, ChannelConnectio
     await this.serial(async () => {
       if (control.mode() === mode) return;
       setChannelConnectionMode(this.options.db, source, mode);
+      // 换了方式：等事件从这种方式第一次连上从头算（要登录的方式连着的时间不算，第 5 条）。
+      this.change(source, (state) => { state.quietSince = null; });
       this.options.log(`[channel-settings] ${source}: switched to the ${mode} connection; reconnecting`);
       await this.reload(adapter);
     });

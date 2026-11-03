@@ -80,7 +80,7 @@ const LOCAL_PAGE = "http://localhost:8081";
 let channelVault: { revision: number; names: string[] } = { revision: 0, names: [] };
 const channelView = (): ChannelSourceSettingsView => ({
   source: "chat", label: "Chat", status: channelVault.names.length ? "connected" : "not_configured", account: null,
-  missingScopes: [], lastError: null, lastConnectedAt: null, manifest: null, setupUrl: null,
+  missingScopes: [], lastError: null, lastConnectedAt: null, noEventsWarning: null, manifest: null, setupUrl: null, setupNote: null,
   secrets: [{
     name: "PLC_CHAT_TOKEN", label: "Token", prefix: "chat-", hint: "", present: channelVault.names.length > 0,
     origin: channelVault.names.length ? "vault" : null,

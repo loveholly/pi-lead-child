@@ -29,12 +29,14 @@ function slack(overrides: Partial<ChannelSourceSettingsDto> = {}): ChannelSource
     missingScopes: [],
     lastError: null,
     lastConnectedAt: null,
+    noEventsWarning: null,
     secrets: [
       { name: 'PLC_SLACK_APP_TOKEN', label: 'App-Level Token', prefix: 'xapp-', hint: '在 Basic Information → App-Level Tokens 里生成', present: false, origin: null },
       { name: 'PLC_SLACK_USER_TOKEN', label: 'User OAuth Token', prefix: 'xoxp-', hint: '在 OAuth & Permissions 里安装应用后拿到', present: false, origin: null },
     ],
     manifest: MANIFEST,
     setupUrl: 'https://api.slack.com/apps',
+    setupNote: null,
     editable: true,
     ...overrides,
   };
@@ -290,11 +292,26 @@ describe('the channel settings section', () => {
     expect(screen.getByTestId('channel-slack-external').textContent).toContain('dev-secret:PLC_SLACK_APP_TOKEN');
   });
 
+  // 2026-11-02：连上了却一个事件都没收到时，卡上显示 daemon 给的提醒。
+  it('shows the warning when the source is connected but no events come in', () => {
+    const { runtime } = render([saved(['vault', 'vault'], { noEventsWarning: 'Check Event Subscriptions → Subscribe to events on behalf of users.' })]);
+    const card = screen.getByTestId('channel-slack-no-events');
+    expect(card.textContent).toContain('Connected, but no events come in');
+    expect(card.textContent).toContain('Subscribe to events on behalf of users');
+    // 收到了事件：提醒消失。
+    act(() => { runtime.control.setState({ channelSettings: { sources: [saved(['vault', 'vault'])] } }); });
+    expect(screen.queryByTestId('channel-slack-no-events')).toBeNull();
+  });
+
   it('expands the app manifest, copies it, and links to the page that creates the app', async () => {
     const writeText = vi.fn(async () => {});
     vi.stubGlobal('navigator', { ...navigator, clipboard: { writeText } });
-    render([slack()]);
+    // 链接带上了清单（2026-11-02）：只显示网页的地址，不显示整份清单。
+    const setupNote = 'Add the scopes under User Token Scopes, not Bot Token Scopes.';
+    render([slack({ setupUrl: 'https://api.slack.com/apps?new_app=1&manifest_yaml=display_information%3A%0A', setupNote })]);
     expect(screen.getByTestId('channel-slack-setup-url').textContent).toBe('https://api.slack.com/apps');
+    // 建应用的要点由来源插件给（2026-11-02），原样显示在链接下面。
+    expect(screen.getByTestId('channel-slack-setup-note').textContent).toBe(setupNote);
     expect(screen.queryByTestId('channel-slack-manifest')).toBeNull();
     fireEvent.click(screen.getByTestId('channel-slack-manifest-toggle'));
     expect(screen.getByTestId('channel-slack-manifest').textContent).toContain('socket_mode_enabled: true');

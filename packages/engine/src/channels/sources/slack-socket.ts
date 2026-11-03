@@ -12,7 +12,9 @@
 //   4. SDK 的日志只要 warn 以上，转到 hub 的日志，去掉令牌。
 //   5. 连接的状态（正在连、连上了、连不上）报给 host.status（设置页的通道状态，2026-10-20）。连不上以后再试时，
 //      状态仍然是上一次的错误，直到连上。
-//   6. 停了以后能再开（设置页改了凭据以后 daemon 先 stop 再 start）。每次 start 是新的一代：上一代还没结束的连接
+//   6. 每次连上以后第一个用户本人能看到的事件报给 host.received（设置页：连上了却收不到事件时提醒检查订阅）。
+//      要等 parse 认过（别人也装了这个应用时，他们的事件不算）：适配器认过以后调 userEvent()。
+//   7. 停了以后能再开（设置页改了凭据以后 daemon 先 stop 再 start）。每次 start 是新的一代：上一代还没结束的连接
 //      看到换代就退出（连上了就断开），结束以后用新的凭据再连。
 // SDK 在第一次连接时才加载（加载要一秒左右；engine 被很多进程引用）。测试用 createClient 注入假的客户端。
 import type { SocketModeOptions } from "@slack/socket-mode";
@@ -88,6 +90,8 @@ class SlackSocketTransport implements ChannelTransport {
   private clientToken: string | null = null;
   private stopped = true;
   private connectedBefore = false;
+  // 这次连上以后收到过事件没有（每次连上重新算）。
+  private eventSeen = false;
   private connecting: Promise<void> | null = null;
   // 第几次 start。open 开始时记下，等待以后发现换了一代就退出。
   private generation = 0;
@@ -271,6 +275,7 @@ class SlackSocketTransport implements ChannelTransport {
     this.failures = 0;
     this.lastProblem = null;
     this.report({ state: "connected" });
+    this.eventSeen = false;
     const reconnected = this.connectedBefore;
     this.connectedBefore = true;
     host.log(reconnected ? "socket: reconnected (Socket Mode)" : "socket: connected (Socket Mode)");
@@ -313,6 +318,17 @@ class SlackSocketTransport implements ChannelTransport {
     }, "delivering an event");
   }
 
+  /** 适配器认过的一个用户本人能看到的事件（不是补拉的）。这次连上以后的第一个报给 host.received。 */
+  userEvent(): void {
+    if (this.stopped || this.eventSeen) return;
+    this.eventSeen = true;
+    try {
+      this.host?.received?.();
+    } catch (error) {
+      this.host?.log(`socket: the event listener failed: ${errorText(error)}`);
+    }
+  }
+
   private enqueue(task: () => Promise<unknown>, what: string): void {
     this.queue = this.queue.then(task).then(() => {}, (error: unknown) => {
       this.host?.log(`socket: failed while ${what}: ${errorText(error)}`);
@@ -320,7 +336,7 @@ class SlackSocketTransport implements ChannelTransport {
   }
 }
 
-/** Socket Mode 的传输。 */
-export function createSlackSocketTransport(input: SlackSocketTransportInput): ChannelTransport {
+/** Socket Mode 的传输。userEvent：适配器认过一个用户本人能看到的事件以后调。 */
+export function createSlackSocketTransport(input: SlackSocketTransportInput): ChannelTransport & { userEvent(): void } {
   return new SlackSocketTransport(input);
 }

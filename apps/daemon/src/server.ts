@@ -5437,6 +5437,8 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     // 先停子 agent 工单（被打断的记成失败交回 hub），再停通道：hub 停下时要等它们的回复决定做完，然后才关库。
     await agentTasks.close();
     await stopChannels(startedChannels);
+    // 通道停了：收不到事件的提醒不用再等（定时器不留到关库以后）。
+    channelSettings.stop();
     await channelMemory?.stop();
     network.stop();
     if (livenessTimer) clearTimeout(livenessTimer);

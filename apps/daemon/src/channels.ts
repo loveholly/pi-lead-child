@@ -11,7 +11,7 @@
 //     声明了密钥的来源，密钥齐了才启动传输（没有密钥时不连，也不刷日志）。
 //   - 热重连（slack-settings 工单 S1）：设置页存了、删了凭据，或者用户点了「不是我」以后，reloadChannelSource 清掉凭据缓存、
 //     停传输，密钥齐了就重新开。不用重启 daemon。
-//   - 连接的状态（没配置、正在连、连上了、出错）报给 onSourceStatus（channel-settings.ts 记下来给设置页看）。
+//   - 连接的状态（没配置、正在连、连上了、出错）和连上以后收到的第一个事件报给 onSourceStatus（channel-settings.ts 记下来给设置页看）。
 //   - 推送、卡变了以后的网关事件、Lead 的当前局面、影子分诊加问的问题，由 server.ts 接上。
 //   - 别人发来的消息紧不紧急、请求 A、请求 B、用户自己的话：hub 问 server.ts 给的 SmartModel（Lead 会话的那一个），这里不自己建。
 //   - 代查（slack-takeover 工单 04）：server.ts 把代查的启动器（lookup.ts）、候选仓库和配置里的主人名交给 hub。
@@ -153,12 +153,16 @@ export function channelCredentials(input: {
   };
 }
 
-/** 一个来源的连接状态（设置页）。account：连上的是谁（凭据里的用户本人和工作区）。error 不含凭据。 */
+/**
+ * 一个来源的连接状态（设置页）。account：连上的是谁（凭据里的用户本人和工作区）。error 不含凭据。
+ * received：这次连上以后收到了第一个来源的事件（不改连接状态）。
+ */
 export type ChannelSourceStatusUpdate =
   | { state: "not_configured" }
   | { state: "connecting" }
   | { state: "connected"; account: ChannelSourceAccount | null }
-  | { state: "error"; error: string; reason?: "signed_out" };
+  | { state: "error"; error: string; reason?: "signed_out" }
+  | { state: "received" };
 
 /** startChannels 接好的通道：hub、热重连、停机。 */
 export interface StartedChannels {
@@ -246,6 +250,7 @@ class ChannelSources implements StartedChannels {
       status: (update) => this.report(adapter, update.state === "connected"
         ? { state: "connected", account: latest ? accountOf(latest) : null }
         : update),
+      received: () => this.report(adapter, { state: "received" }),
     };
   }
 
