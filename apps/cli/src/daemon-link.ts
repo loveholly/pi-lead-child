@@ -19,6 +19,9 @@ export async function daemonStatus(request: LocalRequest, dir?: string): Promise
 // ops 入口 start --auto 的退出码：supervisor 拒绝自动拉起（用户 plc daemon stop 过，或者维护进行中）。
 // 拒绝的原因和该怎么做（运行 plc daemon start，或者等升级完成）已经由 ops 入口打印出来。
 export const AUTO_START_REFUSED = 3;
+// ops 入口 start --auto 的退出码：等到期限 daemon 还没就绪，supervisor 还在等它。这不是启动失败，
+// ops 入口已经打印了「daemon 仍在启动，用 plc daemon status 看进度」。
+export const DAEMON_STILL_STARTING = 4;
 
 export interface EnsureDaemonDeps {
   request: LocalRequest;
@@ -44,6 +47,7 @@ export async function ensureDaemon(deps: EnsureDaemonDeps): Promise<DaemonLocalS
   deps.notice("daemon 未运行，正在启动...");
   const code = await deps.start();
   if (code === AUTO_START_REFUSED) throw new CliError("plc 没有自动启动 daemon（原因见上一行）。");
+  if (code === DAEMON_STILL_STARTING) throw new CliError("daemon 还在启动，这次命令没有执行（见上一行）。稍后再运行一次。");
   if (code !== 0) throw new CliError(startFailureHint(deps.dir));
   const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
   const deadline = Date.now() + (deps.waitMs ?? 20_000);

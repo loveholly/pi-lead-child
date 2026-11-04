@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { createServer, type Server, type Socket } from "node:net";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -10,11 +10,14 @@ import { tempDir } from "@pi-lead-child/core/testing";
 import { supervisorAvailable, supervisorListening, supervisorRequest } from "../src/client.js";
 import type { SupervisorStatus } from "../src/protocol.js";
 import {
-  autoStartRefusal, DEFAULT_DAEMON_READY_TIMEOUT_MS, explicitStartRefusal, itemsBlockingMaintenance, pruneRestartBackups,
+  autoStartRefusal, daemonStderrTail, explicitStartRefusal, itemsBlockingMaintenance, pruneRestartBackups,
   startingDaemonVerdict, startSupervisor, type SupervisorHandle,
 } from "../src/server.js";
 import { loadSupervisorState } from "../src/state.js";
-import { writeBuildProvenance } from "../src/deploy/readiness.js";
+import {
+  DEFAULT_DAEMON_READY_TIMEOUT_MS, daemonReadyTimeoutMs, ENSURE_RUNNING_MARGIN_MS, ensureRunningTimeoutMs,
+} from "../src/daemon-ready-timeout.js";
+import { cliDistDir, stagedCliDir, stagingDistDir, writeBuildProvenance } from "../src/deploy/readiness.js";
 import { backupSqlite } from "../src/deploy/backup.js";
 import { setTimeout as delay } from "node:timers/promises";
 
@@ -239,15 +242,34 @@ describe("the deploy gate at the maintenance entry", () => {
     return { root, distDir, git };
   }
 
+  // 三审 2026-11-03：plc 的 cli 也构建到暂存目录，和 daemon 一起换。旧 cli 先放好，测试看它什么时候被换掉。
+  function oldCli(deployment: { root: string }): string {
+    const path = join(cliDistDir(deployment.root), "cli.mjs");
+    mkdirSync(cliDistDir(deployment.root), { recursive: true });
+    writeFileSync(path, "// old cli\n");
+    return path;
+  }
+
+  // 假构建：daemon 和 cli 都写进暂存目录（真的构建按 stagedCliDir 把 cli 放在 outdir 里的 cli/）。
+  function writeStagedBuild(root: string, outdir: string, distDir: string): void {
+    writeFileSync(join(outdir, "coordinatord.mjs"), "// new\n");
+    mkdirSync(stagedCliDir(distDir), { recursive: true });
+    writeFileSync(join(stagedCliDir(distDir), "cli.mjs"), "// new cli\n");
+    writeBuildProvenance(root, outdir);
+  }
+
   async function start(
     dir: string, deployment: { root: string; distDir: string },
     backupDatabase?: (source: string, destination: string) => Promise<void>,
+    buildDist?: (root: string, outdir: string, signal: AbortSignal) => Promise<void>,
   ) {
     const dbFile = join(dir, "plc.db");
     openDb(dbFile).close();
     writeFileSync(join(dir, "fake-active-items.json"), JSON.stringify([]));
     handle = await startSupervisor({
       ...(backupDatabase ? { backupDatabase } : {}),
+      // 不给就用一个会失败的假构建：测试不会不小心跑真的构建。
+      buildDist: buildDist ?? (async () => { throw new Error("test: no build here"); }),
       dataDir: dir,
       dbPath: dbFile,
       daemonCommand: { bin: resolve("node_modules/.bin/tsx"), args: [resolve("packages/supervisor/test/fake-supervised-daemon.ts")] },
@@ -375,6 +397,244 @@ describe("the deploy gate at the maintenance entry", () => {
     expect(Number(failed.daemon?.pid)).toBe(pid);
   }, 30_000);
 
+  // 2026-11-02：修复合并进主 checkout 以后请求重启，dist 还是旧 commit 构建的；闸门只看「是 HEAD 的祖先」就放行了，
+  // 重启跑的还是旧代码。现在 dist 不是干净 HEAD 的构建时，维护在停机之前先从 HEAD 构建。
+  it("builds dist from HEAD before the restart when the build is behind a clean HEAD", async () => {
+    const dir = tempDir("plc-supervisor-stale-dist-");
+    const deployment = deployCheckout(dir);
+    const builds: string[] = [];
+    const pid = await start(dir, deployment, undefined, async (root, outdir) => {
+      builds.push(root);
+      writeBuildProvenance(root, outdir);
+    });
+    writeFileSync(join(deployment.root, "packages", "code.ts"), "export const x = 7;\n");
+    deployment.git("commit", "-qam", "the fix");
+    const head = deployment.git("rev-parse", "HEAD");
+    expect((await supervisorRequest<SupervisorStatus>({ type: "status" }, { dataDir: dir })).deploy?.build?.commit).not.toBe(head);
+
+    await supervisorRequest({ type: "request_maintenance", action: "restart", reason: "deploy the fix" }, { dataDir: dir });
+    const done = await waitStatus(dir, (status) => status.supervisor.maintenance?.state === "succeeded" && Number(status.daemon?.pid) !== pid);
+    expect(builds).toEqual([deployment.root]);
+    expect(done.deploy).toMatchObject({ ready: true, head, build: { commit: head } });
+  }, 30_000);
+
+  // 审查 2026-11-02：dist 来自别的分支时以前就拒绝，现在也不能变成「自动构建再部署」。
+  it("still refuses a dist from another branch, and does not build", async () => {
+    const dir = tempDir("plc-supervisor-side-dist-");
+    const deployment = deployCheckout(dir);
+    const builds: string[] = [];
+    await start(dir, deployment, undefined, async (root) => { builds.push(root); });
+    deployment.git("checkout", "-qb", "side");
+    writeFileSync(join(deployment.root, "packages", "code.ts"), "export const x = 10;\n");
+    deployment.git("commit", "-qam", "side");
+    writeBuildProvenance(deployment.root, deployment.distDir);
+    deployment.git("checkout", "-q", "main");
+    const refusal = await supervisorRequest({ type: "request_maintenance", action: "restart", reason: "deploy" }, { dataDir: dir })
+      .then(() => null, (error: Error & { code?: string }) => error);
+    expect(refusal).toMatchObject({ code: "deploy_refused", message: expect.stringContaining("不在主 checkout 当前分支的历史里") });
+    expect(builds).toEqual([]);
+  }, 30_000);
+
+  // 审查 2026-11-02：构建在「Lead 空着」检查之后、排空之前。构建期间 Lead 开始的一轮会被重启打断。
+  // 现在构建完回到 pending，下一次巡检重新等 Lead 和 Run 排空。
+  it("waits for Lead again after the build, before it stops the daemon", async () => {
+    const dir = tempDir("plc-supervisor-build-then-wait-");
+    const deployment = deployCheckout(dir);
+    const builds: string[] = [];
+    const pid = await start(dir, deployment, undefined, async (root, outdir) => {
+      builds.push(root);
+      writeFileSync(join(dir, "fake-lead-busy"), "1\n");
+      writeBuildProvenance(root, outdir);
+    });
+    writeFileSync(join(deployment.root, "packages", "code.ts"), "export const x = 11;\n");
+    deployment.git("commit", "-qam", "the fix");
+    await supervisorRequest({ type: "request_maintenance", action: "restart", reason: "deploy the fix" }, { dataDir: dir });
+    const waiting = await waitStatus(dir, (status) => builds.length === 1 && status.supervisor.maintenance?.state === "waiting_for_drain");
+    expect(Number(waiting.daemon?.pid)).toBe(pid);
+    writeFileSync(join(dir, "fake-lead-busy"), "0\n");
+    const done = await waitStatus(dir, (status) => status.supervisor.maintenance?.state === "succeeded" && Number(status.daemon?.pid) !== pid);
+    expect(builds).toHaveLength(1);
+    expect(done.deploy).toMatchObject({ ready: true, rebuild: false });
+  }, 45_000);
+
+  // 审查 2026-11-02：构建期间 HEAD 又变了，构建出来的不是请求时的 HEAD。
+  it("does not restart onto a build of a different commit than the HEAD it set out to build", async () => {
+    const dir = tempDir("plc-supervisor-build-head-moved-");
+    const deployment = deployCheckout(dir);
+    const pid = await start(dir, deployment, undefined, async (root, outdir) => {
+      writeFileSync(join(root, "packages", "code.ts"), "export const x = 13;\n");
+      deployment.git("commit", "-qam", "during the build");
+      writeBuildProvenance(root, outdir);
+    });
+    writeFileSync(join(deployment.root, "packages", "code.ts"), "export const x = 12;\n");
+    deployment.git("commit", "-qam", "the fix");
+    await supervisorRequest({ type: "request_maintenance", action: "restart", reason: "deploy the fix" }, { dataDir: dir });
+    const failed = await waitStatus(dir, (status) => status.supervisor.maintenance?.state === "failed");
+    expect(failed.supervisor.maintenance?.error).toContain("HEAD");
+    expect(Number(failed.daemon?.pid)).toBe(pid);
+  }, 30_000);
+
+  it("keeps the running daemon and reports why when that build fails", async () => {
+    const dir = tempDir("plc-supervisor-stale-dist-fails-");
+    const deployment = deployCheckout(dir);
+    const cli = oldCli(deployment);
+    const pid = await start(dir, deployment, undefined, async (_root, outdir) => {
+      mkdirSync(stagedCliDir(deployment.distDir), { recursive: true });
+      writeFileSync(join(stagedCliDir(deployment.distDir), "cli.mjs"), "// new cli\n");
+      writeFileSync(join(outdir, "coordinatord.mjs"), "// half\n");
+      throw new Error("esbuild: Could not resolve \"./missing.js\"");
+    });
+    writeFileSync(join(deployment.root, "packages", "code.ts"), "export const x = 8;\n");
+    deployment.git("commit", "-qam", "the fix");
+
+    await supervisorRequest({ type: "request_maintenance", action: "restart", reason: "deploy the fix" }, { dataDir: dir });
+    const failed = await waitStatus(dir, (status) => status.supervisor.maintenance?.state === "failed");
+    expect(failed.supervisor.maintenance?.error).toContain("deploy refused");
+    expect(failed.supervisor.maintenance?.error).toContain("Could not resolve");
+    expect(failed.supervisor.maintenance?.backupPath).toBeNull();
+    expect(failed.supervisor.maintenance?.failureKind).toBe("build_failed");
+    expect(Number(failed.daemon?.pid)).toBe(pid);
+    expect(failed.supervisor.phase).toBe("running");
+    // cli 先构建好了，daemon 才失败：cli 也不能换进去（三审 2026-11-03）。
+    expect(readFileSync(cli, "utf8")).toBe("// old cli\n");
+    expect(existsSync(join(deployment.distDir, "coordinatord.mjs"))).toBe(false);
+    expect(existsSync(stagingDistDir(deployment.distDir))).toBe(false);
+    // 审查 2026-11-02：请求方早就拿到了「已接受」，失败要另外告诉 daemon，由它叫醒 Lead。
+    await vi.waitFor(() => expect(readFileSync(join(dir, "fake-commands.log"), "utf8")).toContain("maintenance_failed"));
+  }, 30_000);
+
+  // 二审 2026-11-02：构建完就换进 dist 的话，之后备份失败，旧 daemon 照跑，dist 却已经是新的；daemon 一崩溃就从新 dist
+  // 拉起，迁移在没有备份的情况下执行。现在构建到暂存目录，备份成功、停机之前才换进 dist。
+  it("keeps the new build out of dist until the backup succeeded", async () => {
+    const dir = tempDir("plc-supervisor-staged-build-");
+    const deployment = deployCheckout(dir);
+    const base = deployment.git("rev-parse", "HEAD");
+    mkdirSync(join(deployment.distDir, "web"));
+    writeFileSync(join(deployment.distDir, "web", "index.html"), "web\n");
+    const cli = oldCli(deployment);
+    const outdirs: string[] = [];
+    const pid = await start(dir, deployment, async () => { throw new Error("disk full"); }, async (root, outdir) => {
+      outdirs.push(outdir);
+      writeStagedBuild(root, outdir, deployment.distDir);
+    });
+    writeFileSync(join(deployment.root, "packages", "code.ts"), "export const x = 14;\n");
+    deployment.git("commit", "-qam", "the fix");
+    await supervisorRequest({ type: "request_maintenance", action: "restart", reason: "deploy the fix" }, { dataDir: dir });
+    const failed = await waitStatus(dir, (status) => status.supervisor.maintenance?.state === "failed");
+    expect(failed.supervisor.maintenance?.error).toContain("database backup failed");
+    expect(outdirs).toHaveLength(1);
+    expect(outdirs[0]).not.toBe(deployment.distDir);
+    expect(existsSync(outdirs[0])).toBe(false);
+    expect(existsSync(join(deployment.distDir, "coordinatord.mjs"))).toBe(false);
+    expect(JSON.parse(readFileSync(join(deployment.distDir, "build-info.json"), "utf8")).commit).toBe(base);
+    expect(readFileSync(cli, "utf8")).toBe("// old cli\n");
+    expect(Number(failed.daemon?.pid)).toBe(pid);
+  }, 45_000);
+
+  it("swaps the staged daemon and cli in after the backup, and leaves dist/web alone", async () => {
+    const dir = tempDir("plc-supervisor-staged-swap-");
+    const deployment = deployCheckout(dir);
+    mkdirSync(join(deployment.distDir, "web"));
+    writeFileSync(join(deployment.distDir, "web", "index.html"), "web\n");
+    const cli = oldCli(deployment);
+    const pid = await start(dir, deployment, undefined, async (root, outdir) => writeStagedBuild(root, outdir, deployment.distDir));
+    writeFileSync(join(deployment.root, "packages", "code.ts"), "export const x = 15;\n");
+    deployment.git("commit", "-qam", "the fix");
+    const head = deployment.git("rev-parse", "HEAD");
+    await supervisorRequest({ type: "request_maintenance", action: "restart", reason: "deploy the fix" }, { dataDir: dir });
+    await waitStatus(dir, (status) => status.supervisor.maintenance?.state === "succeeded" && Number(status.daemon?.pid) !== pid);
+    expect(readFileSync(join(deployment.distDir, "coordinatord.mjs"), "utf8")).toBe("// new\n");
+    expect(JSON.parse(readFileSync(join(deployment.distDir, "build-info.json"), "utf8")).commit).toBe(head);
+    expect(readFileSync(join(deployment.distDir, "web", "index.html"), "utf8")).toBe("web\n");
+    expect(readFileSync(cli, "utf8")).toBe("// new cli\n");
+    expect(existsSync(stagingDistDir(deployment.distDir))).toBe(false);
+  }, 45_000);
+
+  // 三审 2026-11-03：换到一半出错（这里 cli 的目录不让写，daemon 的文件已经换进去了）：换回原来的构建，daemon 不停。
+  it("puts the old daemon and cli back and keeps the daemon running when the swap fails", async () => {
+    const dir = tempDir("plc-supervisor-staged-swap-fails-");
+    const deployment = deployCheckout(dir);
+    const base = deployment.git("rev-parse", "HEAD");
+    const cli = oldCli(deployment);
+    writeFileSync(join(deployment.distDir, "coordinatord.mjs"), "// old\n");
+    const pid = await start(dir, deployment, undefined, async (root, outdir) => writeStagedBuild(root, outdir, deployment.distDir));
+    writeFileSync(join(deployment.root, "packages", "code.ts"), "export const x = 18;\n");
+    deployment.git("commit", "-qam", "the fix");
+    chmodSync(cliDistDir(deployment.root), 0o555);
+    try {
+      await supervisorRequest({ type: "request_maintenance", action: "restart", reason: "deploy the fix" }, { dataDir: dir });
+      const failed = await waitStatus(dir, (status) => status.supervisor.maintenance?.state === "failed");
+      expect(failed.supervisor.maintenance?.failureKind).toBe("swap_failed");
+      expect(failed.supervisor.maintenance?.error).toContain("已经换回原来的构建");
+      expect(failed.supervisor.phase).toBe("running");
+      expect(Number(failed.daemon?.pid)).toBe(pid);
+    } finally {
+      chmodSync(cliDistDir(deployment.root), 0o755);
+    }
+    expect(readFileSync(join(deployment.distDir, "coordinatord.mjs"), "utf8")).toBe("// old\n");
+    expect(JSON.parse(readFileSync(join(deployment.distDir, "build-info.json"), "utf8")).commit).toBe(base);
+    expect(readFileSync(cli, "utf8")).toBe("// old cli\n");
+    expect(existsSync(stagingDistDir(deployment.distDir))).toBe(false);
+  }, 45_000);
+
+  // 三审 2026-11-03：构建完回到 pending，停机前再过一次闸门。这时被拒绝，暂存的 daemon 和 cli 一起丢掉。
+  it("drops the staged daemon and cli when the gate refuses after the build", async () => {
+    const dir = tempDir("plc-supervisor-staged-recheck-");
+    const deployment = deployCheckout(dir);
+    const cli = oldCli(deployment);
+    // 构建记录写好以后才改 checkout：这次构建本身是干净 HEAD 的，拒绝来自停机前的那一次闸门。
+    const pid = await start(dir, deployment, undefined, async (root, outdir) => {
+      writeStagedBuild(root, outdir, deployment.distDir);
+      writeFileSync(join(deployment.root, "packages", "code.ts"), "export const x = 20;\n");
+    });
+    writeFileSync(join(deployment.root, "packages", "code.ts"), "export const x = 19;\n");
+    deployment.git("commit", "-qam", "the fix");
+    await supervisorRequest({ type: "request_maintenance", action: "restart", reason: "deploy the fix" }, { dataDir: dir });
+    const failed = await waitStatus(dir, (status) => status.supervisor.maintenance?.state === "failed");
+    expect(failed.supervisor.maintenance?.failureKind).toBe("deploy_refused");
+    expect(failed.supervisor.maintenance?.error).toContain("packages/code.ts");
+    expect(Number(failed.daemon?.pid)).toBe(pid);
+    expect(existsSync(join(deployment.distDir, "coordinatord.mjs"))).toBe(false);
+    expect(readFileSync(cli, "utf8")).toBe("// old cli\n");
+    expect(existsSync(stagingDistDir(deployment.distDir))).toBe(false);
+  }, 45_000);
+
+  // 二审 2026-11-02：构建期间 status 说「backing_up」，Lead 就告诉用户在备份。
+  it("says building while it builds", async () => {
+    const dir = tempDir("plc-supervisor-building-phase-");
+    const deployment = deployCheckout(dir);
+    let release!: () => void;
+    const gate = new Promise<void>((done) => { release = done; });
+    await start(dir, deployment, undefined, async (root, outdir) => {
+      await gate;
+      writeBuildProvenance(root, outdir);
+    });
+    writeFileSync(join(deployment.root, "packages", "code.ts"), "export const x = 16;\n");
+    deployment.git("commit", "-qam", "the fix");
+    await supervisorRequest({ type: "request_maintenance", action: "restart", reason: "deploy the fix" }, { dataDir: dir });
+    await waitStatus(dir, (status) => status.supervisor.phase === "building");
+    release();
+    await waitStatus(dir, (status) => status.supervisor.maintenance?.state === "succeeded");
+  }, 45_000);
+
+  // 二审 2026-11-02：supervisor 停下时还在跑的构建要一起停，不能留着它、也不能让 close 等它。
+  it("cancels a running build when the supervisor closes", async () => {
+    const dir = tempDir("plc-supervisor-build-cancel-");
+    const deployment = deployCheckout(dir);
+    let seen: AbortSignal | null = null;
+    await start(dir, deployment, undefined, (_root, _outdir, signal) => {
+      seen = signal;
+      return new Promise<void>(() => {});
+    });
+    writeFileSync(join(deployment.root, "packages", "code.ts"), "export const x = 17;\n");
+    deployment.git("commit", "-qam", "the fix");
+    await supervisorRequest({ type: "request_maintenance", action: "restart", reason: "deploy the fix" }, { dataDir: dir });
+    await vi.waitFor(() => expect(seen).not.toBeNull(), { timeout: 15_000 });
+    await handle!.close();
+    handle = null;
+    expect(seen!.aborted).toBe(true);
+  }, 45_000);
+
   it("keeps only the newest restart backups and leaves the others alone", () => {
     const dir = join(tempDir("plc-supervisor-prune-"), "backups");
     mkdirSync(dir);
@@ -433,7 +693,7 @@ describe("stopping the daemon while Lead is answering", () => {
 describe("a daemon that starts slower than the ready deadline", () => {
   afterEach(() => { vi.useRealTimers(); });
 
-  async function supervise(dir: string): Promise<number> {
+  async function supervise(dir: string, log: (line: string) => void = () => {}): Promise<number> {
     const dbFile = join(dir, "plc.db");
     openDb(dbFile).close();
     writeFileSync(join(dir, "fake-active-items.json"), JSON.stringify([]));
@@ -445,7 +705,7 @@ describe("a daemon that starts slower than the ready deadline", () => {
       env: { PLC_DATA_DIR: dir },
       restartBaseMs: 50,
       restartMaxMs: 200,
-      log: () => {},
+      log,
     });
     await supervisorRequest({ type: "ensure_running" }, { dataDir: dir, timeoutMs: 15_000 });
     return Number((await waitStatus(dir, (status) => Boolean(status.daemon?.pid))).daemon?.pid);
@@ -509,6 +769,72 @@ describe("a daemon that starts slower than the ready deadline", () => {
       status.supervisor.phase === "running" && Boolean(status.daemon?.pid) && Number(status.daemon?.pid) !== firstPid);
     expect(recovered.supervisor.desiredState).toBe("running");
   }, 45_000);
+
+  // 2026-11-02：daemon 崩了一次，拉起来的新 daemon 启动慢，supervisor 第一次等超时、下一轮接着等到它就绪。
+  // 就绪走的是「已有 child 在启动」那条分支，crashCount 没清零：phase 是 running，crashCount 还停在崩溃时的数，
+  // 下次崩溃的退避时间也按它算。
+  it("clears the crash count once a daemon that crashed comes back through a slow start", async () => {
+    const dir = tempDir("plc-supervisor-crash-slow-");
+    const lines: string[] = [];
+    const firstPid = await supervise(dir, (line) => lines.push(line));
+    // 崩溃后的第一次拉起马上退出，第二次拉起拿到锁、迟迟不监听。
+    writeFileSync(join(dir, "fake-exit-on-start"), "");
+    writeFileSync(join(dir, "fake-hold-start"), "");
+    process.kill(firstPid, "SIGKILL");
+    const holding = join(dir, "fake-holding");
+    await vi.waitFor(() => expect(existsSync(holding)).toBe(true), { timeout: 15_000, interval: 50 });
+    const slowPid = Number(readFileSync(holding, "utf8"));
+    expect(loadSupervisorState(join(dir, "supervisor-state.json")).crashCount).toBeGreaterThan(0);
+
+    // 拨过等就绪的期限：这一轮放弃等待，下一轮接着等同一个进程。
+    vi.setSystemTime(Date.now() + DEFAULT_DAEMON_READY_TIMEOUT_MS + 1_000);
+    await vi.waitFor(() => expect(lines.some((line) => line.includes("did not become ready"))).toBe(true), { timeout: 15_000, interval: 50 });
+    unlinkSync(join(dir, "fake-hold-start"));
+    const recovered = await waitStatus(dir, (status) => status.supervisor.phase === "running" && Number(status.daemon?.pid) === slowPid);
+    expect(recovered.supervisor.crashCount).toBe(0);
+    expect(loadSupervisorState(join(dir, "supervisor-state.json")).crashCount).toBe(0);
+  }, 45_000);
+
+  // 2026-11-02：daemon 没就绪就退出时，supervisor.log 只有 (code=1, signal=null)，原因在 coordinatord.err.log 里，
+  // 还混着以前几次启动的输出。现在把本次启动写进 err.log 的末尾几行（脱敏后）附进 supervisor.log。
+  it("logs the tail of what the exiting daemon wrote to stderr, without earlier runs or tokens", async () => {
+    const dir = tempDir("plc-supervisor-exit-stderr-");
+    const lines: string[] = [];
+    const firstPid = await supervise(dir, (line) => lines.push(line));
+    appendFileSync(join(dir, "logs", "coordinatord.err.log"), "an earlier run said this\n");
+    writeFileSync(join(dir, "fake-exit-on-start"), "");
+    process.kill(firstPid, "SIGKILL");
+
+    await vi.waitFor(() => expect(lines.some((line) => line.includes("cannot open the ledger"))).toBe(true), { timeout: 15_000, interval: 50 });
+    const exited = lines.find((line) => line.includes("cannot open the ledger"))!;
+    expect(exited).toContain("exited before it answered status");
+    expect(exited).not.toContain("an earlier run said this");
+    expect(exited).not.toContain("fake0token0value0abcdef123456");
+    expect(exited).toContain("[REDACTED]");
+    // 只进 supervisor.log：status（会经 get_runtime_health 到达 Lead）里没有 stderr。
+    const recovered = await waitStatus(dir, (status) => status.supervisor.phase === "running" && Boolean(status.daemon?.pid));
+    expect(JSON.stringify(recovered)).not.toContain("cannot open the ledger");
+  }, 45_000);
+});
+
+// 决策边界：本次启动写进 err.log 的哪一段进 supervisor.log。
+describe("the stderr tail of a daemon that exited while starting", () => {
+  it("reads only what was written after the offset, keeps the last 2 KB of whole lines, and redacts secrets", () => {
+    const dir = tempDir("plc-supervisor-stderr-tail-");
+    const path = join(dir, "coordinatord.err.log");
+    expect(daemonStderrTail(join(dir, "missing.log"), 0, {})).toBe("");
+    writeFileSync(path, "old run\n");
+    const offset = statSync(path).size;
+    expect(daemonStderrTail(path, offset, {})).toBe("");
+    appendFileSync(path, "first\nsecond\n");
+    expect(daemonStderrTail(path, offset, {})).toBe("first | second");
+
+    appendFileSync(path, `${"x".repeat(3_000)}\nAM_API_KEY value is k3y-0123456789abcdefABCDEF\nboom\n`);
+    const tail = daemonStderrTail(path, offset, { AM_API_KEY: "k3y-0123456789abcdefABCDEF" });
+    expect(tail).not.toContain("first");
+    expect(tail).not.toContain("xxx");
+    expect(tail).toBe("AM_API_KEY value is [REDACTED] | boom");
+  });
 });
 
 // 决策边界：一个已经启动、还没回答 status 的 daemon，要不要接着等。
@@ -521,6 +847,16 @@ describe("waiting for a daemon that is starting", () => {
     expect(verdict(true, false, 39_000)).toBe("ready");
     expect(verdict(false, true, 1_000)).toBe("exited");
     expect(verdict(false, false, DEFAULT_DAEMON_READY_TIMEOUT_MS)).toBe("timed_out");
+  });
+
+  // plc daemon start 等 ensure_running 的期限跟着 supervisor 等 daemon 的期限走，读同一个环境变量（2026-11-02）。
+  it("lets plc wait for ensure_running longer than the supervisor waits for the daemon, from the same variable", () => {
+    expect(daemonReadyTimeoutMs({})).toBe(DEFAULT_DAEMON_READY_TIMEOUT_MS);
+    expect(daemonReadyTimeoutMs({ PLC_DAEMON_READY_TIMEOUT_MS: "abc" })).toBe(DEFAULT_DAEMON_READY_TIMEOUT_MS);
+    expect(daemonReadyTimeoutMs({ PLC_DAEMON_READY_TIMEOUT_MS: "-5" })).toBe(DEFAULT_DAEMON_READY_TIMEOUT_MS);
+    expect(daemonReadyTimeoutMs({ PLC_DAEMON_READY_TIMEOUT_MS: "300000" })).toBe(300_000);
+    expect(ensureRunningTimeoutMs({})).toBe(DEFAULT_DAEMON_READY_TIMEOUT_MS + ENSURE_RUNNING_MARGIN_MS);
+    expect(ensureRunningTimeoutMs({ PLC_DAEMON_READY_TIMEOUT_MS: "300000" })).toBe(300_000 + ENSURE_RUNNING_MARGIN_MS);
   });
 });
 

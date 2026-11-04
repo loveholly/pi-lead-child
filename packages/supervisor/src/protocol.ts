@@ -2,6 +2,7 @@
 // 这里转出，supervisor 包内部和既有调用方照旧从本包引用。
 export type {
   MaintenanceAction,
+  MaintenanceFailureKind,
   MaintenanceRequest,
   MaintenanceState,
   SupervisorCommand,

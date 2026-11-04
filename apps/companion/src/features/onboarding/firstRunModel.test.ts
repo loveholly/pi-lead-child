@@ -45,6 +45,20 @@ describe('the provider request', () => {
     expect(customProviderName('https://api.openrouter.ai/v1', [])).toBe('openrouter');
     expect(customProviderName('https://gateway.corp.example.com/v1', ['example'])).toBe('example-2');
   });
+
+  // 连接失败后再点「连接」：同一个地址的服务商已经在了，覆盖它，不再新增 deepseek-2、deepseek-3……
+  it('reuses the name of a provider already at the same address, so a retry overwrites it', () => {
+    const custom = (baseUrl: string) => ({ preset: 'custom' as const, apiKey: 'sk-test', baseUrl, api: 'openai-completions' as const });
+    const existing = [{ name: 'deepseek', baseUrl: 'https://api.deepseek.com/v1' }];
+    expect(firstRunProviderRequest(custom('https://api.deepseek.com/v1/'), existing, 'en')).toEqual({
+      ok: true, input: { name: 'deepseek', baseUrl: 'https://api.deepseek.com/v1', api: 'openai-completions', apiKey: 'sk-test' },
+    });
+    // 按规范化后的地址比：主机名大小写不算不同。已经堆起来的重复项不清理，用第一个。
+    const piled = [...existing, { name: 'deepseek-2', baseUrl: 'https://api.deepseek.com/v1' }];
+    expect(firstRunProviderRequest(custom('https://API.DeepSeek.com/v1'), piled, 'en')).toMatchObject({ ok: true, input: { name: 'deepseek' } });
+    // 地址不一样的照旧另起一个名字。
+    expect(firstRunProviderRequest(custom('https://api.deepseek.com/v2'), existing, 'en')).toMatchObject({ ok: true, input: { name: 'deepseek-2' } });
+  });
 });
 
 describe('the model choice', () => {

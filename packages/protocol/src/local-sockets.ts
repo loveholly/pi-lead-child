@@ -31,6 +31,9 @@ export const LocalSocketCommandSchema = Type.Union([
   // 把 Lead 的默认模型写进 config.json（plc lead use）。经 daemon 写，daemon 核对 config.json 时才认得出这是它自己写的
   // （2026-10-19 审查：别的进程直接改 config.json 会报警）。回答 { path, models }。改完要重启 daemon 才生效。
   StrictObject({ type: Type.Literal("set_lead_model"), ...RequestId, spec: Type.String({ minLength: 3, maxLength: 200 }) }),
+  // supervisor 发：一次已接受的维护在停机前失败了（例如从 HEAD 重新构建失败）。只带维护的 id：daemon 向 supervisor
+  // 核对这次维护确实失败了，用 supervisor 记的原因叫醒 Lead。能连上 plc.sock 的进程写不进自己的话。
+  StrictObject({ type: Type.Literal("maintenance_failed"), ...RequestId, maintenanceId: Type.String({ minLength: 1, maxLength: 100 }) }),
 ]);
 export type LocalSocketCommand = Static<typeof LocalSocketCommandSchema>;
 
@@ -140,6 +143,7 @@ export type SupervisorPhase =
   | "running"
   | "stopped"
   | "waiting_for_drain"
+  | "building"
   | "backing_up"
   | "restarting"
   | "verifying"
@@ -167,7 +171,11 @@ export interface MaintenanceRequest {
   // 这次维护要不要备份数据库。旧版本 supervisor 的记录里没有这一项。
   backup?: boolean;
   error: string | null;
+  // 停机前失败的类别。daemon 叫醒 Lead 时只写它，不写 error 里的构建输出（可能引用源码）。
+  failureKind?: MaintenanceFailureKind;
 }
+
+export type MaintenanceFailureKind = "build_failed" | "build_mismatch" | "backup_failed" | "deploy_refused" | "swap_failed";
 
 /** supervisor 支持重启前备份（request_maintenance 的 backup）。旧版本的 status 里没有它。 */
 export const SUPERVISOR_FEATURE_MAINTENANCE_BACKUP = "maintenance_backup";
@@ -202,5 +210,6 @@ export interface SupervisorStatus {
   // 这个 supervisor 支持的可选功能，例如 SUPERVISOR_FEATURE_MAINTENANCE_BACKUP。
   features?: string[];
   // 部署闸门现在的判断（supervisor 知道 daemon 从哪个 checkout 启动时才有）。
-  deploy?: { ready: boolean; reasons: string[]; head: string | null; build: { commit: string; dirty: boolean } | null };
+  // rebuild：dist 不是干净 HEAD 的构建，维护会先从 HEAD 构建。
+  deploy?: { ready: boolean; reasons: string[]; head: string | null; build: { commit: string; dirty: boolean } | null; rebuild?: boolean };
 }

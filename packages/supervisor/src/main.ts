@@ -1,6 +1,7 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { dataDir, dbPath, distDir, loadEnvConfig, packageSource, projectRoot } from "@pi-lead-child/core";
+import { daemonReadyTimeoutMs } from "./daemon-ready-timeout.js";
 import { loadKeychainEnv } from "./deploy/keychain.js";
 import { startSupervisor, SupervisorAlreadyRunningError, type SupervisorHandle } from "./server.js";
 import { runtimeSearchPath } from "@pi-lead-child/runtime";
@@ -26,12 +27,6 @@ function daemonCommand(): { bin: string; args: string[] } {
   };
 }
 
-// PLC_DAEMON_READY_TIMEOUT_MS：daemon 启动以后最多等多久它回答 status（毫秒）。不是正整数时用缺省值。
-function daemonReadyTimeoutMs(): number | undefined {
-  const configured = Number(process.env.PLC_DAEMON_READY_TIMEOUT_MS);
-  return Number.isSafeInteger(configured) && configured > 0 ? configured : undefined;
-}
-
 let supervisor: SupervisorHandle;
 try {
   supervisor = await startSupervisor({
@@ -39,6 +34,7 @@ try {
     dbPath: dbPath(),
     daemonCommand: daemonCommand(),
     cwd: root,
+    // PLC_DAEMON_READY_TIMEOUT_MS。plc daemon start 按同一个变量决定等 ensure_running 多久。
     daemonReadyTimeoutMs: daemonReadyTimeoutMs(),
     deployment: runsFromDist() ? { root, distDir: distDir() } : null,
   });

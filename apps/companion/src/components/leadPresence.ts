@@ -21,6 +21,8 @@ export type LeadPresence = {
   label: string;
   // 名字下面的一行小字。在线时是最近一次巡检的时间（没有巡检过就没有）。
   subtitle: string | null;
+  // 认证、配置这类失败（没有 key、key 错、模型名不对）：系统自己好不了，要用户去设置 → 模型。点 Lead 的名字打开那里。
+  needsModelSetup?: boolean;
 };
 
 export function leadPresence(input: {
@@ -70,6 +72,7 @@ export function leadPresence(input: {
         pulse: false,
         label: m.degraded(name, lead.reason ?? m.modelFailed(name)),
         subtitle: m.checkConfig(short),
+        needsModelSetup: true,
       };
     }
     // 时间已经过了：系统正在重试，或者刚试完、新的状态还没到。不再写一个过去的时间。

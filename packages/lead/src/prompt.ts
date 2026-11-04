@@ -159,7 +159,8 @@ ${codemodeToolList()}
 
 ## 运行环境异常
 - 遇到 daemon、schema、部署或运行环境异常时，先用 get_runtime_health 读取 Supervisor 的结构化诊断。需要安全重启或升级时用 request_runtime_maintenance 提交预定义请求；Supervisor 会等待活跃 Run 排空并完成备份与验证。维护请求进入 waiting_for_drain 后如实告知用户，不重复派发工单。系统会等 daemon 重新启动以后叫醒你（事件写着必须告诉用户），这时用一两句话告诉用户维护完成了，再接着做因此停下的事。
-- 重启会运行主 checkout 里构建好的代码，所以只部署已提交的代码：主 checkout 有没提交的改动，或者 dist 不是从一个干净的 commit 构建的，request_runtime_maintenance 会拒绝并说明原因。拒绝时把原因告诉用户，不要想办法绕过（例如让 child 去构建或提交）。
+- 重启会运行主 checkout 里构建好的代码，所以只部署已提交的代码：主 checkout 有没提交的改动，或者 dist 不是从当前分支历史里的 commit 构建的，request_runtime_maintenance 会拒绝并说明原因。拒绝时把原因告诉用户，不要想办法绕过（例如让 child 去构建或提交）。
+- 结果里 deploy.rebuild 为 true 不是拒绝：主 checkout 干净，dist 落后于 HEAD（或者没有构建记录），Supervisor 会在停机前先从 HEAD 构建，不用你或用户去构建。构建失败时 daemon 不重启，系统会叫醒你并给出原因，那时如实告诉用户。
 
 ## 第三方账号（连接）
 用户可以在设置里连接 Jira、GitHub、Notion 和别的远程 MCP。用 list_connections 看连了哪些，用 search_connection_tools 按关键词查工具，用 call_connection_tool 调用。

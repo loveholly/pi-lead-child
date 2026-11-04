@@ -102,6 +102,58 @@ describe("connecting with one click", () => {
     expect(h.flowStatus(started.flowId)).toMatchObject({ state: "failed", message: "You refused the authorization on the authorization page" });
   });
 
+  // U10：授权失败以前只改内存里的流程状态，daemon 日志里什么都没有。日志只带阶段、kind 和错误码，不带服务器的描述和令牌。
+  it("logs a failed first connection with the stage and error code, without the server's description", async () => {
+    const logs: string[] = [];
+    const h = hub({ log: (line) => logs.push(line) });
+    const started = await h.addCustom(vendor.mcpUrl);
+    if (started.flow !== "browser") throw new Error("expected a browser flow");
+    // Slack 的样子：HTTP 200，{"ok":false,"error":"..."}。
+    vendor.failNextExchange.push({ status: 200, body: { ok: false, error: "bad_client_secret", error_description: "secret sk-do-not-log was wrong" } });
+    const callback = vendor.approve(started.authorizeUrl);
+    await expect(h.completeCallback({ ...callback, error: null, errorDescription: null })).rejects.toMatchObject({ code: "authorization_failed" });
+    expect(logs).toContain("[connections] custom: authorization failed (stage=token_exchange, kind=protocol, code=bad_client_secret, server=mcp.fake.test)");
+    // 第一次连接失败时还没有连接行，所以只写日志。
+    expect(getConnectionByServer(db, vendor.mcpUrl)).toBeNull();
+    expect(logs.join("\n")).not.toContain("sk-do-not-log");
+    expect(logs.join("\n")).not.toContain(callback.code);
+  });
+
+  it("logs a failed re-authorization and records it on the existing connection", async () => {
+    const logs: string[] = [];
+    const h = hub({ log: (line) => logs.push(line) });
+    const k = await connectCustom(h);
+    const id = Number(k.slice(7));
+
+    const denied = await h.addCustom(vendor.mcpUrl);
+    if (denied.flow !== "browser") throw new Error("expected a browser flow");
+    const { state } = vendor.approve(denied.authorizeUrl);
+    await expect(h.completeCallback({ state, code: null, iss: null, error: "invalid_scope", errorDescription: "scope admin:everything is not allowed" }))
+      .rejects.toMatchObject({ code: "authorization_failed" });
+    expect(logs).toContain(`[connections] ${k}: authorization failed (stage=callback, kind=authorization_error, code=invalid_scope, server=mcp.fake.test)`);
+
+    const retry = await h.addCustom(vendor.mcpUrl);
+    if (retry.flow !== "browser") throw new Error("expected a browser flow");
+    vendor.failNextExchange.push({ status: 401, body: { error: "invalid_client", error_description: "redirect_uri did not match the registered one" } });
+    const callback = vendor.approve(retry.authorizeUrl);
+    await expect(h.completeCallback({ ...callback, error: null, errorDescription: null })).rejects.toMatchObject({ code: "authorization_failed" });
+    expect(logs).toContain(`[connections] ${k}: authorization failed (stage=token_exchange, kind=invalid_client, code=invalid_client, server=mcp.fake.test)`);
+
+    const failures = listConnectionEvents(db, id).filter((event) => event.kind === "authorization_failed");
+    expect(failures.map((event) => JSON.parse(event.detail!))).toEqual([
+      { stage: "token_exchange", kind: "invalid_client", code: "invalid_client" },
+      { stage: "callback", kind: "authorization_error", code: "invalid_scope" },
+    ]);
+    // 原来的连接不受影响。
+    expect(getConnection(db, id)).toMatchObject({ status: "connected" });
+
+    const text = logs.join("\n");
+    expect(text).not.toContain("admin:everything");
+    expect(text).not.toContain("redirect_uri did not match");
+    expect(text).not.toContain(callback.code);
+    for (const token of [...vendor.access.keys(), ...vendor.refresh.keys()]) expect(text).not.toContain(token);
+  });
+
   it("asks for a pre-registered client when the provider requires one", async () => {
     const h = hub();
     expect(h.get("slack")).toMatchObject({ state: "needs_setup" });

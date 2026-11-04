@@ -327,26 +327,36 @@ export async function leadModelCatalog(
   return { models, notes };
 }
 
+// unavailable：分工里在用、目录却拉不到的服务商和原因（服务商名字和错误原文，不带 key）。
+// only：只重新注册这几个服务商（daemon 按退避重拉还缺目录的）。别的不动：拉得到目录的注册不会因为一次抖动被换成缺省的。
 export async function registerLeadProviders(
   runtime: ModelRuntime,
   config: LeadModelConfig,
   env: Record<string, string | undefined> = process.env,
   fetchImpl: typeof fetch = fetch,
   // 最大输出。缺省是 Lead 用的 16384；子 agent 另起的 ModelRuntime 要更大的（lookup/session.ts）。目录说的更小时用目录的。
-  options: { maxOutputTokens?: number } = {},
-): Promise<string[]> {
+  options: { maxOutputTokens?: number; only?: ReadonlySet<string> } = {},
+): Promise<{ notes: string[]; unavailable: Array<{ provider: string; reason: string }> }> {
   const notes: string[] = [];
+  const unavailable: Array<{ provider: string; reason: string }> = [];
   const chosenProviders = new Set(config.models.map((spec) => parseModelName(spec).provider));
   for (const [name, provider] of Object.entries(config.providers)) {
+    if (options.only && !options.only.has(name)) continue;
     let catalog: Awaited<ReturnType<typeof providerCatalog>>;
     try {
       catalog = await providerCatalog(name, provider, env, fetchImpl);
     } catch (error) {
       // 设置页能接入服务商（2026-10-29）：一个地址填错、分工里又没用它的服务商，不能让 Lead 起不来。跳过它，原因写进说明。
-      // 分工里在用的服务商照旧报错：Lead 要用的模型注册不上。
-      if (chosenProviders.has(name)) throw error;
-      notes.push(`${name}: skipped (${String(error)})`);
-      continue;
+      if (!chosenProviders.has(name)) {
+        notes.push(`${name}: skipped (${String(error)})`);
+        continue;
+      }
+      // 分工里在用的服务商也不再抛错（以前 daemon 起不来，被反复重启）：只注册分工里的模型，
+      // Lead 照常起来，模型调用失败时按降级显示，原因交给 daemon。
+      const reason = `${name}: model catalog failed (${String(error)})`;
+      notes.push(reason);
+      unavailable.push({ provider: name, reason });
+      catalog = { models: [], note: null };
     }
     if (catalog.note) notes.push(catalog.note);
     // lead.models 里这个 provider 的模型也要注册：带推理强度后缀的（as4/claude-sonnet-5(high)）不在目录里。
@@ -359,7 +369,7 @@ export async function registerLeadProviders(
       provider, modelIds, resolveLeadApiKey(provider, env, name), catalog.models, options.maxOutputTokens ?? DEFAULT_MAX_TOKENS,
     ));
   }
-  return notes;
+  return { notes, unavailable };
 }
 
 export async function listConfiguredLeadModelSpecs(

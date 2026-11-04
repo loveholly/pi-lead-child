@@ -43,10 +43,12 @@ const setup = (brain: boolean): SetupStatus => ({
 
 type Perform = (type: string, id: string, action: string, request: unknown) => Promise<{ target: unknown; action: string; result: unknown }>;
 
-function firstRunRuntime() {
+type SaveInput = { name: string; baseUrl: string };
+
+function firstRunRuntime(save: (input: SaveInput, providers: ModelProvider[]) => ModelProvider[] = () => [anthropic]) {
   const state = { providers: [] as ModelProvider[], brain: false };
-  const perform = vi.fn<Perform>(async (_type, _id, action) => {
-    if (action === 'save_provider') state.providers = [anthropic];
+  const perform = vi.fn<Perform>(async (_type, _id, action, request) => {
+    if (action === 'save_provider') state.providers = save((request as { input: SaveInput }).input, state.providers);
     if (action === 'set_brain_chain') state.brain = true;
     return { target: { type: 'model_settings', id: 'models' }, action, result: { summary: 'ok', note: null } };
   });
@@ -100,6 +102,25 @@ describe('the first-run page', () => {
     await waitFor(() => expect(screen.getByTestId('app-slot')).toBeTruthy());
     expect(perform.mock.calls[1]!.slice(0, 3)).toEqual(['model_settings', 'models', 'set_brain_chain']);
     expect((perform.mock.calls[1]![3] as { input: unknown }).input).toEqual({ models: [{ model: 'anthropic/claude-sonnet-5-5', effort: null }] });
+  });
+
+  // 其他服务连上了但目录读不出来，用户改了 key 再点「连接」：覆盖同一个服务商，config.json 里不再多出 deepseek-2、deepseek-3……
+  it('overwrites the same provider when the user retries another service at the same address', async () => {
+    const { runtime, perform } = firstRunRuntime((input, providers) => [
+      ...providers.filter((entry) => entry.name !== input.name),
+      { ...anthropic, name: input.name, baseUrl: input.baseUrl, api: 'openai-completions', keyHost: 'api.deepseek.com', models: [], problem: 'GET https://api.deepseek.com/v1/models failed: 401' },
+    ]);
+    renderWithRuntime(<RootTabs />, runtime);
+    fireEvent.click(screen.getByTestId('first-run-preset-custom'));
+    fireEvent.change(screen.getByTestId('first-run-base-url'), { target: { value: 'https://api.deepseek.com/v1' } });
+    fireEvent.change(screen.getByTestId('first-run-api-key'), { target: { value: 'sk-test-wrong' } });
+    fireEvent.click(screen.getByTestId('first-run-connect'));
+    await waitFor(() => expect(screen.getByTestId('first-run-problem').textContent).toBe('GET https://api.deepseek.com/v1/models failed: 401'));
+    fireEvent.change(screen.getByTestId('first-run-api-key'), { target: { value: 'sk-test-right' } });
+    fireEvent.click(screen.getByTestId('first-run-connect'));
+    await waitFor(() => expect(perform).toHaveBeenCalledTimes(2));
+    const names = perform.mock.calls.map((call) => (call[3] as { input: SaveInput }).input.name);
+    expect(names).toEqual(['deepseek', 'deepseek']);
   });
 
   it('lets the user in without a brain for this session', () => {

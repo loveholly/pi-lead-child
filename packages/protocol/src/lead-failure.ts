@@ -44,7 +44,9 @@ export function isLeadTransportFailure(raw: string): boolean {
 }
 // auth_unavailable、no auth available 本身不算：代理在所有账号冷却、或者上游暂时 5xx 时也这么回，那是短暂的故障，
 // 系统应该自己再试（发布评审）。用户实际遇到的那条里带着上游的 403 forbidden，靠后面的上游错误认出来。
-const AUTH = /\b40[13]\b|unauthori[sz]ed|forbidden|request not allowed|invalid[ _-]?(?:x-)?api[ _-]?key|authentication failed|认证失败/i;
+// pi 发 prompt 前的检查：这个服务商没有 key（"No API key found for openai."）。不调模型，再试也一样（2026-11：缺省模型没有 key，
+// 每一轮都这样失败了三天，以前分成 unknown，顶栏不显示）。
+const AUTH = /\b40[13]\b|unauthori[sz]ed|forbidden|request not allowed|invalid[ _-]?(?:x-)?api[ _-]?key|no api key found|authentication failed|认证失败/i;
 // 上下文满了：pi 的溢出恢复失败（"Context overflow recovery failed"），或者 daemon 记的「上下文满了」（lead-health.ts）。
 const CONTEXT = /context overflow|上下文满了/i;
 const CONFIG = /\b404\b|model[ _-]?not[ _-]?found|unknown[ _-]?model|invalid[ _-]?model|no such model|model .*not supported/i;

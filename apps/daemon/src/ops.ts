@@ -3,7 +3,7 @@
 // （supervisor 的 launchd 和 doctor、lead 的模型配置），所以由 daemon 自己提供：
 //   start [--auto] 启动：没有 supervisor 就后台拉起它，再让它拉起 daemon。--auto 是客户端的自动拉起：
 //                  用户 plc daemon stop 过、或者维护进行中时，supervisor 拒绝，退出码 3。
-//                  显式启动在维护进行中也被拒绝（退出码 3）
+//                  显式启动在维护进行中也被拒绝（退出码 3）。等到期限 daemon 还没就绪：退出码 4（仍在启动，不是失败）
 //   stop           没有 supervisor 时停 daemon，并在 supervisor-state.json 里记下"用户停的"
 //   install        安装 launchd 常驻 supervisor
 //   uninstall      卸载 launchd 常驻
@@ -19,7 +19,7 @@ import {
   dataDir, dbPath, distDir, envConfigPath, loadEnvConfig, packageSource, projectRoot, workspaceDir,
 } from "@pi-lead-child/core";
 import {
-  agentStatus, autoStartRefusal, buildsFreshReal, loadSupervisorState, saveSupervisorState, dbProbesReal, distFreshReal, formatChecks, installAgent, keychainSecretExists,
+  agentStatus, autoStartRefusal, buildsFreshReal, loadSupervisorState, saveSupervisorState, dbProbesReal, distFreshReal, formatChecks, ensureRunningTimeoutMs, installAgent, keychainSecretExists, keychainSetCommand,
   plistContent, plistPath, resolveDaemonOnlyKey, resolveKeyReal, runDoctor, supervisorAvailable, supervisorListening, supervisorRequest, supervisorSockPath,
   uninstallAgent, uninstallHindsightService, type BuildOutput, type DoctorProbes, type SupervisorStatus,
 } from "@pi-lead-child/supervisor";
@@ -36,6 +36,8 @@ const PROJECT_ROOT = projectRoot();
 const USAGE = "usage: ops.mjs start [--auto] | stop | install | uninstall | doctor | lead-model | lead-use <provider/model> | ledger-guard status|uninstall";
 // start --auto 被 supervisor 拒绝（plc 的 daemon-link.ts 认这个退出码）。
 const AUTO_START_REFUSED = 3;
+// ensure_running 等到期限还没回答：supervisor 还在等 daemon 就绪，daemon 仍在启动（plc 的 daemon-link.ts 认这个退出码）。
+const DAEMON_STILL_STARTING = 4;
 
 // 构建产物和它打包进去的源码。doctor 用源码的修改时间判断构建是否过期。
 // daemon 的构建打包全部后端包；plc 的构建只打包 client、protocol 和 core。
@@ -67,6 +69,10 @@ async function waitForSupervisor(timeoutMs = 20_000): Promise<void> {
   while (Date.now() < deadline) {
     if (await supervisorAvailable()) return;
     await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  // socket 在监听：supervisor 活着，只是忙得没回答（例如负载高），不是没起来。
+  if (await supervisorListening()) {
+    throw new Error(`supervisor 在运行但还没回答（等了 ${timeoutMs / 1_000} 秒）。稍后用 plc daemon status 看进度；日志: ${join(dataDir(), "supervisor.log")}`);
   }
   throw new Error(`supervisor 启动失败，查看日志: ${join(dataDir(), "supervisor.log")}`);
 }
@@ -171,7 +177,7 @@ async function start(auto: boolean, force = false): Promise<number> {
   try {
     const started = await supervisorRequest<{ forcedPastDeployGate?: string[] }>({
       type: "ensure_running", ...(auto ? { auto: true } : {}), ...(force ? { force: true } : {}),
-    }, { timeoutMs: 35_000 });
+    }, { timeoutMs: ensureRunningTimeoutMs() });
     if (started?.forcedPastDeployGate?.length) {
       console.error(`已用 --force 越过部署闸门启动，supervisor 日志里有记录：\n- ${started.forcedPastDeployGate.join("\n- ")}`);
     }
@@ -180,6 +186,12 @@ async function start(auto: boolean, force = false): Promise<number> {
     if (error?.code === "auto_start_refused" || error?.code === "maintenance_in_progress") {
       console.error(error.message);
       return AUTO_START_REFUSED;
+    }
+    // 等 ensure_running 的期限比 supervisor 等 daemon 的期限（PLC_DAEMON_READY_TIMEOUT_MS）长。到期还没回答，
+    // 是 supervisor 还在等一个启动慢的 daemon：不算启动失败（2026-11-02：负载高时 daemon 3 分钟才就绪）。
+    if (error?.code === "timeout") {
+      console.error("daemon 仍在启动，用 plc daemon status 看进度。");
+      return DAEMON_STILL_STARTING;
     }
     // 部署闸门：主 checkout 有没提交的代码，或者 dist 不是从干净的 commit 构建的。
     if (error?.code === "deploy_refused") {
@@ -220,8 +232,7 @@ async function install(): Promise<number> {
   const configuredKey = resolveKeyReal(dataDir(), {}, "AM_API_KEY") === "config";
   if (!configuredKey && !keychainSecretExists("AM_API_KEY")) {
     console.error(
-      "无法安装：launchd 后台没有可持久读取的 AM_API_KEY。请先运行 "
-      + "bash ~/.agents/skills/keychain-secrets/keychain-secrets.sh set AM_API_KEY",
+      `无法安装：launchd 后台没有可持久读取的 AM_API_KEY。请先运行 ${keychainSetCommand("AM_API_KEY")}`,
     );
     return 1;
   }

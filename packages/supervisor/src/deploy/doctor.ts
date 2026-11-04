@@ -9,6 +9,7 @@ import { LATEST_SCHEMA_VERSION, SCHEMA_MIGRATION_VERSIONS, type Db } from "@pi-l
 import { loadAishConn } from "@pi-lead-child/store";
 
 import type { GatewayExposureStatus } from "@pi-lead-child/protocol";
+import { keychainSetCommand } from "./keychain.js";
 
 export interface DoctorCheck { name: string; ok: boolean | null; detail: string; fix?: string }
 // 账本 schema 的只读读数。current 是 schema_migrations 的 MAX(version)，与 supervisor 的读法一致；
@@ -87,7 +88,7 @@ export async function runDoctor(p: DoctorProbes): Promise<DoctorCheck[]> {
       : ts === "shell" ? "只在当前 shell 的环境变量里（例如 ~/.zshrc）。launchd 起的 daemon 读不到它，SmartModel 用 Lead 的 LLM 兜底"
       : ts ? `来源: ${ts}` : "设置页、config.json 和 Keychain 里都没有。没有 key 时 SmartModel 用 Lead 的 LLM 兜底",
     fix: ts === "broken" ? "检查 config.json 里 TYPESAFE_API_KEY 条目的 value/fromEnv 拼写"
-      : ts === null || ts === "shell" ? "bash ~/.agents/skills/keychain-secrets/keychain-secrets.sh set TYPESAFE_API_KEY" : undefined,
+      : ts === null || ts === "shell" ? keychainSetCommand("TYPESAFE_API_KEY") : undefined,
   });
   const perms = p.configPerms();
   checks.push({
@@ -191,7 +192,6 @@ function eventLogCheck(s: EventLogStatus): DoctorCheck {
 }
 
 type KeySource = ReturnType<DoctorProbes["resolveKey"]>;
-const KEYCHAIN_SET = "bash ~/.agents/skills/keychain-secrets/keychain-secrets.sh set";
 
 // 令牌从哪里来（给人看，不显示值）。daemon 的取法：设置页存进保险库的 → daemon 专用的环境变量（launchd 起的 daemon
 // 从 config.json 的 env 段拿到）→ Keychain。
@@ -224,7 +224,7 @@ function slackChannelCheck(app: KeySource, user: KeySource): DoctorCheck {
   return {
     name, ok: false,
     detail: `${problems.join("；")}。两个令牌都有时才启用 Slack 通道。在设置页保存的马上生效；放进 Keychain 的要重启 daemon`,
-    fix: `在设置 → 消息通道里填上 ${missing.join("、")}；或者 ${missing.map((key) => `${KEYCHAIN_SET} ${key}`).join("；")}，再重启 daemon`,
+    fix: `在设置 → 消息通道里填上 ${missing.join("、")}；或者 ${missing.map((key) => keychainSetCommand(key)).join("；")}，再重启 daemon`,
   };
 }
 

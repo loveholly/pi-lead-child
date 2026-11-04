@@ -62,11 +62,11 @@ describe("runDoctor", () => {
     const tavily = checks.find((c) => c.name.includes("TAVILY"))!;
     expect(tavily.ok).toBeNull(); // 可选项缺失 = "–" 不是 "✗"
   });
-  it("TYPESAFE_API_KEY 是可选项：缺失只是 –，并提示用 keychain 脚本写入；有来源时 ✓", async () => {
+  it("TYPESAFE_API_KEY 是可选项：缺失只是 –，并提示用 security 命令写入 Keychain；有来源时 ✓", async () => {
     const missing = (await runDoctor({ ...okProbes, resolveKey: () => null })).find((c) => c.name.includes("TYPESAFE"))!;
     expect(missing.ok).toBeNull();
     expect(missing.detail).toMatch(/兜底/);
-    expect(missing.fix).toBe("bash ~/.agents/skills/keychain-secrets/keychain-secrets.sh set TYPESAFE_API_KEY");
+    expect(missing.fix).toBe('security add-generic-password -U -a "$USER" -s "dev-secret:TYPESAFE_API_KEY" -w');
     const present = (await runDoctor({ ...okProbes, resolveKey: () => "keychain" })).find((c) => c.name.includes("TYPESAFE"))!;
     expect(present).toMatchObject({ ok: true, detail: "来源: keychain" });
     expect(present.fix).toBeUndefined();
@@ -79,7 +79,7 @@ describe("runDoctor", () => {
     const shell = (await runDoctor({ ...okProbes, resolveKey: () => "shell" })).find((c) => c.name.includes("TYPESAFE"))!;
     expect(shell.ok).toBeNull();
     expect(shell.detail).toMatch(/只在当前 shell 的环境变量里/);
-    expect(shell.fix).toBe("bash ~/.agents/skills/keychain-secrets/keychain-secrets.sh set TYPESAFE_API_KEY");
+    expect(shell.fix).toBe('security add-generic-password -U -a "$USER" -s "dev-secret:TYPESAFE_API_KEY" -w');
     const settings = (await runDoctor({ ...okProbes, resolveKey: () => "settings" })).find((c) => c.name.includes("TYPESAFE"))!;
     expect(settings).toMatchObject({ ok: true, detail: "来源: 设置页（保险库）" });
   });
@@ -125,10 +125,16 @@ describe("runDoctor", () => {
     const half = await slackCheck({ PLC_SLACK_APP_TOKEN: "keychain" });
     expect(half).toMatchObject({ ok: false, detail: expect.stringContaining("缺 PLC_SLACK_USER_TOKEN") });
     expect(half.fix).toBe(
-      "在设置 → 消息通道里填上 PLC_SLACK_USER_TOKEN；或者 bash ~/.agents/skills/keychain-secrets/keychain-secrets.sh set PLC_SLACK_USER_TOKEN，再重启 daemon",
+      '在设置 → 消息通道里填上 PLC_SLACK_USER_TOKEN；或者 security add-generic-password -U -a "$USER" -s "dev-secret:PLC_SLACK_USER_TOKEN" -w，再重启 daemon',
     );
     const shell = await slackCheck({ PLC_SLACK_APP_TOKEN: "keychain", PLC_SLACK_USER_TOKEN: "shell" });
     expect(shell).toMatchObject({ ok: false, detail: expect.stringContaining("PLC_SLACK_USER_TOKEN 只在当前 shell 的环境变量里") });
+  });
+  // keychain-secrets.sh 只在作者自己的机器上有，doctor 提示它，用户照做就是「没有这个文件」。改成 macOS 自带的 security。
+  it("修复提示不再指向不存在的 keychain-secrets.sh", async () => {
+    const checks = await runDoctor({ ...okProbes, resolveKey: (key) => key === "PLC_SLACK_APP_TOKEN" ? "keychain" : null });
+    expect(checks.some((check) => check.fix?.includes("dev-secret:"))).toBe(true);
+    expect(formatChecks(checks)).not.toContain("keychain-secrets.sh");
   });
   it("config 权限过宽是 fail", async () => {
     const checks = await runDoctor({ ...okProbes, configPerms: () => "644" });

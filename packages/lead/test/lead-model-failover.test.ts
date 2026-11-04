@@ -59,6 +59,23 @@ describe("the Lead model failover", () => {
     expect(failover.restore(200_000)).toBeNull();
   });
 
+  // daemon 的长退避不等过这个时间（第二轮审阅 4）：在备用模型上时是换回第一个模型的时间，还有额度封禁时取更早的到期时间。
+  it("says when it may switch models next: the switch-back time, or a quota block ending", () => {
+    let now = 1_000_000;
+    const failover = createLeadModelFailover({ models: ["a/x", "b/y"], now: () => now });
+    expect(failover.returnAt()).toBeNull();
+    failover.turnFailed("401 Unauthorized");
+    expect(failover.desired()).toBe("b/y");
+    expect(failover.returnAt()).toBe(now + DEFAULT_LEAD_MODEL_RESTORE_MS);
+    const blocked = createLeadModelFailover({
+      models: ["a/x", "b/y"], now: () => now, quotaStore: { load: () => ({ "a/x": now + 5_000 }), save: () => {} },
+    });
+    expect(blocked.returnAt()).toBe(now + 5_000);
+    // 封禁到期了、还没换回（只在一轮开始时换）：给的是已经过去的换回时间，daemon 马上叫醒 Lead。
+    now += 6_000;
+    expect(blocked.returnAt()).toBe(now - 1_000);
+  });
+
   it("tries the first model again after a cool-down when the service gave no recovery time", () => {
     const failover = createLeadModelFailover({ models: ["p/a", "p/b"] });
     expect(failover.turnFailed(RATE_LIMIT, 0)).toMatchObject({ kind: "switch", to: "p/b", restoreAt: DEFAULT_LEAD_MODEL_RESTORE_MS });

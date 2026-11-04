@@ -46,7 +46,8 @@ export const devicesMessages = defineMessages({
       nameControl: 'The device name cannot contain line breaks or other control characters.',
       gatewayLocalOnly: 'The gateway listens only on this Mac, so the phone cannot connect. '
         + 'Set PLC_GATEWAY_HOST and PLC_GATEWAY_PORT on the Mac, then restart the daemon.',
-      loopbackOff: 'This daemon does not allow pairing from the local web page. Run plc pair new in a terminal on the Mac.',
+      loopbackOff: 'This daemon does not allow pairing from the local web page. '
+        + 'Restart the daemon with PLC_ALLOW_LOOPBACK_AUTO_PAIR=1, then reload this page.',
       onlyLocal: 'Only a web page opened on the Mac that runs the daemon can add a phone.',
       add: 'Add phone',
       close: 'Close',
@@ -111,7 +112,7 @@ export const devicesMessages = defineMessages({
       nameTooLong: (max) => `设备名最多 ${max} 个字符`,
       nameControl: '设备名不能包含换行等控制字符',
       gatewayLocalOnly: '网关只在本机监听，手机连不上。请在 Mac 上设置 PLC_GATEWAY_HOST 和 PLC_GATEWAY_PORT，然后重启 daemon。',
-      loopbackOff: '这个 daemon 没有开启本机网页配对。请在 Mac 的终端运行 plc pair new。',
+      loopbackOff: '这个 daemon 没有开启本机网页配对。请用 PLC_ALLOW_LOOPBACK_AUTO_PAIR=1 重启 daemon，然后刷新这个页面。',
       onlyLocal: '只有在运行 daemon 的 Mac 上打开的网页才能添加手机。',
       add: '添加手机',
       close: '关闭',

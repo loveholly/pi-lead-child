@@ -51,6 +51,9 @@ describe("classifyLeadModelError", () => {
     expect(classifyLeadModelError('529 {"type":"overloaded_error"}')).toBe("busy");
     expect(classifyLeadModelError("401 Unauthorized")).toBe("auth");
     expect(classifyLeadModelError("Invalid API key")).toBe("auth");
+    // 回归：pi 发 prompt 前发现服务商没有 key。以前是 unknown，顶栏和会话都不叫人去设置模型。
+    expect(classifyLeadModelError("No API key found for openai.\n\nUse /login to log into a provider via OAuth or API key.")).toBe("auth");
+    expect(classifyLeadModelError('No API key found for "openai"')).toBe("auth");
     expect(classifyLeadModelError("fetch failed: ECONNREFUSED 127.0.0.1:8317")).toBe("unavailable");
     expect(classifyLeadModelError("the model refused the tool schema")).toBe("unknown");
     expect(classifyLeadModelError('404 {"error":"model not found: claude-sonnet-9"}')).toBe("config");

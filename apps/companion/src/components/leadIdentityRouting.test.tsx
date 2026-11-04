@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 // 会话顶栏的 Lead 名字：已经配对时打开设置的「本设备」，还没配对时照旧打开配对页（issue 06）。
 // 手机上没有第五个 tab，这里就是设置的入口。
+import type { LeadStatus } from '@pi-lead-child/protocol';
 import { fireEvent, screen } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -14,13 +15,22 @@ const router = vi.hoisted(() => ({ push: vi.fn() }));
 vi.mock('expo-crypto', () => ({ getRandomBytesAsync: vi.fn(), digest: vi.fn(), CryptoDigestAlgorithm: {} }));
 vi.mock('expo-router', () => ({ useRouter: () => router }));
 
-function renderIdentity(phase: ControlPlanePhase) {
+function renderIdentity(phase: ControlPlanePhase, lead?: LeadStatus) {
   const runtime = createCompanionStateRuntime({
     client: {} as CompanionRuntimeDependencies['client'],
     credentials: {} as CompanionRuntimeDependencies['credentials'],
     scheduler: { schedule: () => 0, cancel: () => {}, now: () => 0 },
   });
-  runtime.control.setState({ phase, connectionState: phase === 'ready' ? 'connected' : 'disconnected' });
+  runtime.control.setState({
+    phase, connectionState: phase === 'ready' ? 'connected' : 'disconnected',
+    ...(lead ? {
+      overview: {
+        model: 'openai/gpt-test', sessionId: 'lead-session', busy: false, runningTicketIds: [],
+        counts: { activeTickets: 0, reviewTickets: 0, blockedTickets: 0, pendingApprovals: 0, unreadNotices: 0 },
+        aish: null, lead,
+      },
+    } : {}),
+  });
   renderUI(<CompanionRuntimeProvider runtime={runtime}><LeadIdentity /></CompanionRuntimeProvider>);
 }
 
@@ -37,6 +47,17 @@ describe('the Paimon identity', () => {
     renderIdentity('connecting');
     fireEvent.click(screen.getByTestId('lead-identity'));
     expect(router.push).toHaveBeenCalledWith('/settings/device');
+  });
+
+  // 回归：模型没有 key 时点 Lead 的名字直接去设置 → 模型（服务商和 key 在那里填）。
+  it('opens Settings → Models when Lead\'s model needs a key or configuration', () => {
+    renderIdentity('ready', {
+      state: 'degraded', since: '2026-10-20T01:00:00.000Z', failures: 3, reason: 'Paimon 的模型账号认证失败',
+      detail: 'No API key found for openai.', nextAttemptAt: null, lastSuccessAt: null,
+    });
+    expect(screen.getByText(/Check Settings → Models/)).toBeTruthy();
+    fireEvent.click(screen.getByTestId('lead-identity'));
+    expect(router.push).toHaveBeenCalledWith('/settings/model');
   });
 
   it('opens the pairing page when the device is not paired', () => {

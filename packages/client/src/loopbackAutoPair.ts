@@ -44,6 +44,24 @@ export function shouldRecoverLoopbackCredentials(
     failures.some(isExplicitCredentialFailure);
 }
 
+// 存着的凭证连的就是本机网页的这个回环 daemon。
+export function usesLoopbackEndpoint(
+  credentials: ControlPlaneCredentials,
+  loopbackEndpoint: string | null | undefined,
+): boolean {
+  return Boolean(loopbackEndpoint) && isSameLoopbackEndpoint(credentials.baseUrl, loopbackEndpoint!);
+}
+
+// 本机网页拿着做不了决定的凭证（plc pair new 建的配对、本机兑换的邀请：网关按来历去掉了 approvals:respond）。
+// 回环自动配对给的 loopback_web 凭证能做决定，所以先试着换一张；网关拒绝时留着原来的凭证。
+export function shouldUpgradeLoopbackCredentials(
+  credentials: ControlPlaneCredentials,
+  loopbackEndpoint: string | null | undefined,
+): boolean {
+  return usesLoopbackEndpoint(credentials, loopbackEndpoint) &&
+    !credentials.binding.scopes.includes('approvals:respond');
+}
+
 export function shouldReplaceLoopbackCredentials(
   credentials: ControlPlaneCredentials,
   loopbackEndpoint: string | null | undefined,

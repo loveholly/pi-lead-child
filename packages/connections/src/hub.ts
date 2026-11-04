@@ -348,6 +348,14 @@ interface DeviceFlow extends FlowBase {
 
 type Flow = BrowserFlow | DeviceFlow;
 
+// 授权失败写进日志和 connection_events 的内容。kind 是 OAuthError 的 kind，或者 hub 自己判出的原因；
+// code 是服务器给的错误码（OAuthError.code、回调的 error 参数）。
+interface FlowFailure {
+  stage: "callback" | "token_exchange" | "device_poll" | "waiting";
+  kind: string;
+  code?: string | null;
+}
+
 const WHOAMI_TOOL = /(^|[_.-])(get[_-]?me|get[_-]?self|whoami|user[_-]?info|current[_-]?user|read[_-]?user[_-]?profile)$|^atlassianUserInfo$/i;
 
 function hashState(state: string): string {
@@ -885,22 +893,22 @@ export class ConnectionHub {
     this.#flowByState.delete(flow.stateHash);
     if (flow.state !== "pending") throw new ConnectionError("flow_not_found", m.flowLinkUsed);
     if (flow.expiresAt <= this.#now()) {
-      this.#failFlow(flow, "expired", m.flowTimedOut);
+      this.#failFlow(flow, "expired", m.flowTimedOut, { stage: "callback", kind: "expired" });
       throw new ConnectionError("flow_not_found", m.flowTimedOutReturn(leadDisplayName(this.#db)), flow.key);
     }
     if (params.error) {
       const message = params.error === "access_denied" ? m.deniedOnAuthPage : m.authorizationFailed(params.errorDescription ?? params.error);
-      this.#failFlow(flow, "failed", message);
+      this.#failFlow(flow, "failed", message, { stage: "callback", kind: "authorization_error", code: params.error });
       throw new ConnectionError("authorization_failed", message, flow.key);
     }
     // RFC 9207：有 iss 时必须是这个授权服务器；服务器声明支持 iss 时必须有。
     if ((params.iss !== null && params.iss !== flow.server.issuer)
       || (params.iss === null && flow.server.authorization_response_iss_parameter_supported)) {
-      this.#failFlow(flow, "failed", m.wrongIssuer);
+      this.#failFlow(flow, "failed", m.wrongIssuer, { stage: "callback", kind: "wrong_issuer" });
       throw new ConnectionError("authorization_failed", m.wrongIssuer, flow.key);
     }
     if (!params.code) {
-      this.#failFlow(flow, "failed", m.noCode);
+      this.#failFlow(flow, "failed", m.noCode, { stage: "callback", kind: "no_code" });
       throw new ConnectionError("authorization_failed", m.noCode, flow.key);
     }
     let tokens: TokenSet;
@@ -910,7 +918,11 @@ export class ConnectionHub {
       });
     } catch (error) {
       const failure = this.#authError(flow.key, error, m.exchangeTokenFailed);
-      this.#failFlow(flow, "failed", failure.message);
+      this.#failFlow(flow, "failed", failure.message, {
+        stage: "token_exchange",
+        kind: error instanceof OAuthError ? error.kind : "unexpected",
+        code: error instanceof OAuthError ? error.code : null,
+      });
       throw failure;
     }
     const row = this.#saveConnected({
@@ -936,17 +948,24 @@ export class ConnectionHub {
     };
   }
 
-  #failFlow(flow: Flow, state: "failed" | "expired", message: string): void {
+  // 所有授权失败都从这里过：改流程状态，写一行日志；已有连接行时（例如重新授权）再记一条事件。
+  // 第一次连接时还没有行（connection_events.connection_id 不能为空），只写日志。
+  // 日志和事件只带阶段、kind 和错误码，不带 message：里面可能有服务器回的 error_description。
+  #failFlow(flow: Flow, state: "failed" | "expired", message: string, failure: FlowFailure): void {
     flow.state = state;
     flow.message = message;
     if (flow.kind === "device" && flow.timer) clearTimeout(flow.timer);
+    const code = failure.code ? (/^[A-Za-z0-9_.-]{1,64}$/.test(failure.code) ? failure.code : "unrecognized") : null;
+    this.#log(`[connections] ${flow.key}: authorization failed (stage=${failure.stage}, kind=${failure.kind}, code=${code ?? "none"}, server=${new URL(flow.serverUrl).host})`);
+    const row = getConnectionByServer(this.#db, flow.serverUrl);
+    if (row) addConnectionEvent(this.#db, row.id, "authorization_failed", JSON.stringify({ stage: failure.stage, kind: failure.kind, code }), iso(this.#now()));
   }
 
   // 过期的流程标成 expired；结束超过 10 分钟的从内存里删掉。
   #sweepFlows(): void {
     const now = this.#now();
     for (const flow of this.#flows.values()) {
-      if (flow.state === "pending" && flow.expiresAt <= now) this.#failFlow(flow, "expired", this.#m().flowTimedOut);
+      if (flow.state === "pending" && flow.expiresAt <= now) this.#failFlow(flow, "expired", this.#m().flowTimedOut, { stage: "waiting", kind: "expired" });
       if (flow.expiresAt + FLOW_TTL_MS <= now) {
         this.#flows.delete(flow.id);
         if (flow.kind === "browser") this.#flowByState.delete(flow.stateHash);
@@ -1003,7 +1022,7 @@ export class ConnectionHub {
   async #pollDevice(flow: DeviceFlow, entry: CatalogEntry): Promise<void> {
     if (flow.state !== "pending") return;
     if (flow.expiresAt <= this.#now()) {
-      this.#failFlow(flow, "expired", githubMessages(this.#locale()).deviceExpired);
+      this.#failFlow(flow, "expired", githubMessages(this.#locale()).deviceExpired, { stage: "device_poll", kind: "expired" });
       this.#onChange(flow.key);
       return;
     }
@@ -1014,7 +1033,7 @@ export class ConnectionHub {
       return;
     }
     if (result.state === "failed") {
-      this.#failFlow(flow, result.reason === "expired" ? "expired" : "failed", result.message);
+      this.#failFlow(flow, result.reason === "expired" ? "expired" : "failed", result.message, { stage: "device_poll", kind: result.reason });
       this.#onChange(flow.key);
       return;
     }

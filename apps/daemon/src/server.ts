@@ -16,7 +16,8 @@ import {
   listLookupCandidates, withExternalContent, type LeadSystemEventKind, type LeadTurnOrigin,
 } from "@pi-lead-child/lead";
 import {
-  assertConfiguredLeadModel, leadModelCatalog, loadLeadModelConfig, setLeadModelChainInConfig, setLeadModelInConfig, type LeadCatalogModel,
+  assertConfiguredLeadModel, leadModelCatalog, loadLeadModelConfig, setLeadModelChainInConfig, setLeadModelInConfig, setLeadProviderKeySource,
+  type LeadCatalogModel,
 } from "@pi-lead-child/lead";
 import { overflowLimits, overflowReached, overflowReminder, queueNotice, queueNoticeMs, waitingText, type WaitingConversation } from "@pi-lead-child/lead";
 import {
@@ -109,7 +110,7 @@ import { defaultWebRoot, gatewayBaseUrl } from "@pi-lead-child/gateway";
 import { bindingScopes, channelOwnerBinding, createCliBinding, getBinding } from "@pi-lead-child/store";
 import {
   classifyLeadModelError, isLeadRestartInterruption, isLeadTransportFailure, isLocalSocketCommand, isSystemTurnOrigin, LEAD_DRAIN_TIMEOUT_MS,
-  LEAD_RESTART_INTERRUPTED_ERROR, leadOutageCause, leadOutageHeadline, markUpstreamFailure,
+  LEAD_RESTART_INTERRUPTED_ERROR, leadModelFailureNeedsUser, leadOutageCause, leadOutageHeadline, markUpstreamFailure,
   partialUiSurface,
   PRESENCE_IDLE_MS, QUIET_REPLY, redactAndCap, redactSecretText, userFacingBacklogText,
   plainObjectLinks,
@@ -191,7 +192,7 @@ import { repairStoppedRunCrashCheckpoints } from "@pi-lead-child/engine";
 import { repairOutcomeSnapshots } from "@pi-lead-child/engine";
 import { reregisterFinishedRuns } from "@pi-lead-child/engine";
 import { claimInstanceLock, daemonLockPath, readKeychainSecret, supervisorRequest } from "@pi-lead-child/supervisor";
-import type { InstanceLock, MaintenanceRequest } from "@pi-lead-child/supervisor";
+import type { InstanceLock, MaintenanceFailureKind, MaintenanceRequest, SupervisorStatus } from "@pi-lead-child/supervisor";
 import {
   ConnectionError,
   ConnectionHub,
@@ -771,9 +772,34 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
   let leadSilentSince: number | null = null;
   // 用户最后一次在看会话的时间（Jarvis 模式：Lead 据此判断现在推还是等他回来；审批据此算送到）。
   let lastAttendedAt: number | null = null;
-  // 带着事的那一轮失败以后，下一次叫醒 Lead 的时间和已经失败的次数。
-  let leadWakeRetry: { at: number; failures: number } | null = null;
+  // 带着事的那一轮失败以后，下一次叫醒 Lead 的时间和已经失败的次数。epoch 见 leadWakeEpoch；setup 见 WakeAfterFailure。
+  type LeadWakeRetry = { at: number; failures: number; epoch: number; setup: boolean };
+  let leadWakeRetry: LeadWakeRetry | null = null;
   const leadWakeRetryBaseMs = Number(process.env.PLC_LEAD_WAKE_RETRY_MS ?? 15_000);
+  // 认证、配置这类失败（没有 key、key 错、模型名不对），又没有马上要换的模型时，退避最长 30 分钟
+  // （以前最长 5 分钟，三天失败了几百轮）。不完全停：OAuth 在断网时、代理包着上游 403 的 503 也分成认证失败，它们会自己好。
+  const leadSetupWakeCapMs = Number(process.env.PLC_LEAD_SETUP_WAKE_CAP_MS ?? 30 * 60_000);
+  // 一轮失败以后怎样再叫醒 Lead（runTurnNow 的 catch 定，随这一轮的结果交回）：normal 按平常的退避（最长 5 分钟）；
+  // setup 按上面的长退避，但不超过模型切换换回的时间；stale：这一轮开始以后模型设置改了，失败是旧设置的，不退避。
+  type WakeAfterFailure = { kind: "normal" | "setup" | "stale"; capMs: number };
+  const NORMAL_WAKE: WakeAfterFailure = { kind: "normal", capMs: 5 * 60_000 };
+  // 模型设置改了（服务商、key、分工、换模型）、正在用的服务商拉到了目录：加一。
+  // 旧的 epoch 下排的退避作废；一轮开始时记下它，失败时不一样就是 stale。
+  let leadWakeEpoch = 0;
+  function nextWakeRetry(previous: LeadWakeRetry | null, wake: WakeAfterFailure): LeadWakeRetry | null {
+    if (wake.kind === "stale") return null;
+    const failures = (previous?.epoch === leadWakeEpoch ? previous.failures : 0) + 1;
+    const delay = Math.min(leadWakeRetryBaseMs * 2 ** (failures - 1), wake.capMs);
+    log(`lead wake backoff (${wake.kind}): next try in ${Math.round(delay / 1000)} s`);
+    return { at: Date.now() + delay, failures, epoch: leadWakeEpoch, setup: wake.kind === "setup" };
+  }
+  function backingOff(retry: LeadWakeRetry | null): boolean {
+    return retry !== null && retry.epoch === leadWakeEpoch && retry.at > Date.now();
+  }
+  function modelSettingsChanged(why: string): void {
+    leadWakeEpoch += 1;
+    log(`lead wake backoff cleared: ${why}`);
+  }
   // 正在跑的这一轮是谁发起的（system: 来源；用户的回合为 null）。整理笔记那一轮不接 inbox。
   let runningSystemOrigin: SystemTurnOrigin | null = null;
   // 正在跑的这一轮的来历（lead 的 turn-origin.ts，用户 2026-10-27）：读进了外部来源的原文没有；是不是只为用户本人设的
@@ -832,6 +858,8 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     deferred?: true;
     // 这一轮作为消息交给 Lead 的事件对应的 inbox 行（工单 04）。
     inboxIds?: number[];
+    // 失败时：怎样再叫醒 Lead（WakeAfterFailure）。
+    wake?: WakeAfterFailure;
   }
 
   interface ActiveChannelTurn {
@@ -2708,7 +2736,8 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
   const factory = opts.sessionFactory ?? createLeadSession;
   const {
     session, modelName, syncToolAccess, reloadExtensions, models: leadModels, switchModel: switchLeadModel,
-    reportsInputDelivery, smartModel: leadSmartModel, complete: leadComplete, smartModelLlm, refreshProviders, brainReady,
+    reportsInputDelivery, smartModel: leadSmartModel, complete: leadComplete, smartModelLlm, refreshProviders, brainReady, modelUnavailable,
+    providersUnavailable,
   } = await factory({
     memory,
     // 直觉的整条分工（设置 → 模型，2026-10-29）：SmartModel 按顺序问，都失败时问 LLM。
@@ -2941,6 +2970,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       modelFailover.clearBlocked(spec);
       setLeadModelInConfig(spec, opts.dataDir);
       rebuildModelFailover();
+      modelSettingsChanged("the user chose another model");
       pendingModelSwitch = { reason: "用户在输入框里换了模型", restoreAt: null, manual: true };
       log(`lead model chosen by the user: ${previousSpec} -> ${spec}`);
       // Lead 正在回答：这一轮结束以后，下一轮开始前换（runTurnNow 的 syncLeadModel）。
@@ -2956,6 +2986,53 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     },
   };
   uiActionServices.leadModels = leadModelService;
+
+  // 重新注册 Lead 的服务商（设置 → 模型改了服务商，或者按退避重拉），正在用的模型再挂一次。成功注册时返回 true。
+  // 分工里还有服务商拉不到目录（本机代理还没起来、key 错、地址错）时按退避再拉，拉到为止：
+  // 拉不到时那个服务商的模型只按缺省（128K、只看文字）注册。按退避重拉时只拉还缺目录的（missingProviders）。
+  const providerRetryBaseMs = Number(process.env.PLC_LEAD_PROVIDER_RETRY_MS ?? 30_000);
+  let providerRetry: NodeJS.Timeout | null = null;
+  let missingProviders = new Set(providersUnavailable ?? []);
+  async function reloadLeadProviders(attempt = 0): Promise<boolean> {
+    leadCatalogCache = null;
+    if (!refreshProviders) return false;
+    const retrying = attempt > 0;
+    let still: string[] = [];
+    try {
+      still = (await refreshProviders(retrying ? [...missingProviders] : undefined)) ?? [];
+    } catch (error: any) {
+      log(`lead providers refresh failed: ${error?.message ?? String(error)}`);
+      // 还缺目录的照旧按退避再拉：抛错的可能只是这一次（例如 config.json 正被手改）。
+      if (missingProviders.size) retryLeadProviders(attempt);
+      return false;
+    }
+    const current = parseLeadModelSpec(appliedLeadModel).provider;
+    const currentBack = missingProviders.has(current) && !still.includes(current);
+    missingProviders = new Set(still);
+    if (still.length) retryLeadProviders(attempt);
+    // 按退避重拉：正在用的模型的服务商拉到了目录才再挂（窗口、看图这些信息才对），模型可能又能用了，旧的退避作废。
+    // 只是备用的服务商还缺目录时照样再挂（以前要等全部拉到）。
+    if (retrying && !currentBack) return true;
+    if (retrying) modelSettingsChanged(`${current}'s catalog is back`);
+    if (busy || draining || systemTurnStarting) {
+      rebindLeadModel = true;
+      return true;
+    }
+    try {
+      await switchLeadModel?.(appliedLeadModel);
+    } catch (error: any) {
+      log(`lead model rebind after a provider change failed: ${error?.message ?? String(error)}`);
+    }
+    return true;
+  }
+  function retryLeadProviders(attempt: number): void {
+    if (providerRetry || leadQueueStopped) return;
+    providerRetry = setTimeout(() => {
+      providerRetry = null;
+      void reloadLeadProviders(attempt + 1);
+    }, Math.min(providerRetryBaseMs * 2 ** attempt, 10 * 60_000));
+    providerRetry.unref();
+  }
 
   // 设置 → 模型（方案 B，2026-10-29，.scratch/model-settings/spec.md）。大脑的分工整条写进 lead.models，主用变了才换模型：
   // 只改备用的顺序时不动正在用的（模型自动切换可能正用着备用）。
@@ -2980,6 +3057,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
         setLeadModelChainInConfig(specs, opts.dataDir);
         rebuildModelFailover();
         leadCatalogCache = null;
+        modelSettingsChanged("the user changed the model chain");
         if (!switching || primary === leadModelName) return "unchanged";
         // 你点名要用它：它的额度封禁不再挡着。它真的还不能用时，模型自动切换会再换走。
         modelFailover!.clearBlocked(primary);
@@ -2995,23 +3073,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
         return "now";
       },
       async providersChanged() {
-        leadCatalogCache = null;
-        if (!refreshProviders) return;
-        try {
-          await refreshProviders();
-        } catch (error: any) {
-          log(`lead providers refresh failed: ${error?.message ?? String(error)}`);
-          return;
-        }
-        if (busy || draining || systemTurnStarting) {
-          rebindLeadModel = true;
-          return;
-        }
-        try {
-          await switchLeadModel?.(appliedLeadModel);
-        } catch (error: any) {
-          log(`lead model rebind after a provider change failed: ${error?.message ?? String(error)}`);
-        }
+        if (await reloadLeadProviders()) modelSettingsChanged("the user changed a model provider");
       },
     },
   });
@@ -3134,6 +3196,13 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     leadName: () => leadDisplayName(db),
     locale: () => getLocale(db),
   });
+  // 分工里在用的服务商启动时拉不到目录（key 错、地址错）：daemon 照常起来，Lead 一开始就是降级，原因写在顶栏。
+  // 以前这里抛错，daemon 退出，被反复重启，网页和 Slack 都连不上。
+  if (modelUnavailable) {
+    log(`lead model unavailable at start: ${redactSecretText(modelUnavailable)}`);
+    leadHealth.failed(modelUnavailable);
+  }
+  if (providersUnavailable?.length) retryLeadProviders(0);
   // 断网不是模型的问题（2026-10-16）：系统回合叫醒 Lead 之前先探网络，不通时等它恢复，恢复后马上接着做。
   const network = new NetworkMonitor({
     probe: opts.networkProbe ?? (opts.sessionFactory
@@ -3753,6 +3822,8 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     currentTurn = new Promise<void>((resolve) => { settleTurn = resolve; });
     busy = true;
     publishLeadQueue();
+    const turnEpoch = leadWakeEpoch;
+    let wake = NORMAL_WAKE;
     // 新回合开始，上一回合遗留的插话锚（受理了但 lead 一直没再开口）作废——
     // 否则它会去接下一回合的水，把答非所问的文本挂到一条早已过去的消息下面。
     // 必须在下面两个等待之前清：等待期间 daemon 已经忙，用户发来的消息走插话，它的锚属于这一轮，要留着
@@ -3903,6 +3974,9 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
         // 用户停下的一轮说明不了模型好不好。
         if (!userStopRequested) modelFailover?.turnSucceeded();
         succeeded = true;
+        // 模型能用了：认证失败排的长退避作废。
+        if (leadWakeRetry?.setup) leadWakeRetry = null;
+        if (digestRetry?.setup) digestRetry = null;
       }
     } catch (err: any) {
       // 系统回合失败（例如模型连不上）也要让在听的人看到：没开口的这时落成一轮，再收口为失败。
@@ -3926,8 +4000,23 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
           leadHealth.reclassify(error);
         }
       }
+      // pi 发 prompt 前的检查失败（没有 key、凭据过期）时不调模型，也没有 message_end：上面没记进健康状态，顶栏一直是绿点
+      // （缺省模型没有 key 时失败了三天，用户看不出来）。认证、配置这类失败在这里记上。
+      if (!interrupted && !networkFailure && activeTurnError === null && leadModelFailureNeedsUser(classifyLeadModelError(error))) {
+        leadHealth.failed(error);
+      }
       // 限流或者连续溢出：下一轮换模型（spec D9）。断网和被重启打断不是模型的问题。
-      if (!interrupted && !networkFailure) noteLeadModelFailure(error);
+      if (!interrupted && !networkFailure) {
+        noteLeadModelFailure(error);
+        // 下一轮要换的模型已经定了（pendingModelSwitch）：按平常的退避去试它。否则按长退避，
+        // 但不等过模型切换换回的时间（换回、额度到期只在一轮开始时生效）。
+        if (leadModelFailureNeedsUser(classifyLeadModelError(error)) && pendingModelSwitch === null) {
+          const returnAt = modelFailover?.returnAt() ?? null;
+          const untilReturn = returnAt === null ? leadSetupWakeCapMs : Math.max(0, returnAt - Date.now());
+          wake = { kind: "setup", capMs: Math.min(leadSetupWakeCapMs, untilReturn) };
+        }
+      }
+      if (turnEpoch !== leadWakeEpoch) wake = { kind: "stale", capMs: 0 };
       // 被重启打断、还没落成一轮的系统回合也一样：不留失败卡片，灌进去的事下面交回 pending，下一个 daemon 接着做。
       // 上下文满了的系统回合也不留（2026-10-28）：每次按退避再试都会失败一次，顶栏的降级和停摆通知已经告诉用户。
       const quietNotes = options.system === SYSTEM_TURN_ORIGINS.precipitate && !activeChannelTurn
@@ -3978,6 +4067,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
         voiced: Boolean(systemEntry?.assistantText.trim()),
         systemTurnId: systemEntry?.turn.id ?? null,
         ...(offline ? { offline: true as const } : {}),
+        ...(succeeded ? {} : { wake }),
       };
       systemEntryThisTurn = null;
       pendingSystemReuseTurnId = null;
@@ -4003,12 +4093,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       if (digested) log(`digest: ${digested} event(s) digested`);
       if (deliveredInboxIds.length) outcome.inboxIds = deliveredInboxIds;
       if (carriedEvents && !offline && !interrupted) {
-        if (succeeded) {
-          leadWakeRetry = null;
-        } else {
-          const failures = (leadWakeRetry?.failures ?? 0) + 1;
-          leadWakeRetry = { at: Date.now() + Math.min(leadWakeRetryBaseMs * 2 ** (failures - 1), 5 * 60_000), failures };
-        }
+        leadWakeRetry = succeeded ? null : nextWakeRetry(leadWakeRetry, wake);
       }
       busy = false;
       publishLeadQueue();
@@ -4234,7 +4319,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
   };
   scheduledLeadAttempts.push(() => {
     const times = [...voicingRetries.values()].map((retry) => retry.at);
-    if (leadWakeRetry) times.push(leadWakeRetry.at);
+    if (leadWakeRetry && leadWakeRetry.epoch === leadWakeEpoch) times.push(leadWakeRetry.at);
     return times.length ? Math.min(...times) : null;
   });
   // 工作区 TTL 清扫不跟着通知轮询每一轮都跑：TTL 是 7 天和 14 天，用不着 3 秒一次，
@@ -4779,7 +4864,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     }
     retryWaitingUserTurn();
     if (busy || !network.online) return;
-    if (leadInput.pendingMessages().length && !(leadWakeRetry && leadWakeRetry.at > Date.now())) {
+    if (leadInput.pendingMessages().length && !backingOff(leadWakeRetry)) {
       wakeForEvents();
       return;
     }
@@ -5167,16 +5252,16 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
   // 上一次判断时，按等待时间该叫醒的时间（顶栏的「下一次自动调用」）。
   let digestDueAt: number | null = null;
   // 摘要的那一轮失败了（模型的问题）：按退避再叫，不在每次轮询时重来。成功时清掉。
-  let digestRetry: { at: number; failures: number } | null = null;
-  scheduledLeadAttempts.push(() => (digestRetry && digestRetry.at > Date.now() ? digestRetry.at : digestDueAt));
+  let digestRetry: LeadWakeRetry | null = null;
+  scheduledLeadAttempts.push(() => (backingOff(digestRetry) ? digestRetry!.at : digestDueAt));
   const DIGEST_WAKE_TEXT = "（摘要：上面当前局面（kind=\"situation\"）里「上一轮以后的变化」是这一批积压的事。请消化处理——需要跟进的工单用工具跟进，"
     + "纯知悉的简要记录即可。同一个根因合并进来的几件事说一次就够了。"
     + `处理完如果没有需要用户知道的事，只回复 ${QUIET_REPLY}（不写别的字），会话里不会留下这一轮；有要告诉用户的事才正常说。）`;
   function maybeWakeForDigest(options: { patrol?: boolean } = {}): void {
     if (busy || systemTurnStarting || draining || !network.online) return;
     // 带着事的那一轮刚失败过、还在退避：也等到点，不另外再调模型（发布评审 f796c1c 的 B1）。
-    if (leadWakeRetry && leadWakeRetry.at > Date.now()) return;
-    if (digestRetry && digestRetry.at > Date.now()) return;
+    if (backingOff(leadWakeRetry)) return;
+    if (backingOff(digestRetry)) return;
     const decision = digestBatch(db, {
       now: new Date(), pending: leadInput.pendingDigest(), lastWakeAt: new Date(lastDigestWakeAt), userReturnedAt,
     });
@@ -5201,8 +5286,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
         leadHealth.patrolled();
         return;
       }
-      const failures = (digestRetry?.failures ?? 0) + 1;
-      digestRetry = { at: Date.now() + Math.min(leadWakeRetryBaseMs * 2 ** (failures - 1), 5 * 60_000), failures };
+      digestRetry = nextWakeRetry(digestRetry, outcome.wake ?? NORMAL_WAKE);
     });
   }
   const heartbeat = setNodeInterval(() => {
@@ -5493,6 +5577,36 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       bound ? null : "cannot bind the wildcard address; listening on loopback only (see the daemon log)");
   }
 
+  // 一次已接受的维护在停机前失败了（supervisor 发 maintenance_failed）。请求方（Lead、换模型后的重启）只拿到过「已接受」：
+  // 向 supervisor 核对确实是这次维护失败了，写一条叫醒 Lead 的 inbox，由它转告用户。
+  // inbox 只写失败的类别：error 里有构建输出（可能引用源码），不当成系统事实给 Lead（二审 2026-11-02）。
+  // 同一次维护只报一次：能连上 plc.sock 的进程反复发同一个 id，也只叫醒 Lead 一次。
+  const reportedMaintenance = new Set<string>();
+  const MAINTENANCE_FAILURE_TEXT: Record<MaintenanceFailureKind, string> = {
+    build_failed: "从 HEAD 重新构建 dist 失败",
+    build_mismatch: "构建出来的不是请求时的 HEAD（构建期间 HEAD 变了）",
+    backup_failed: "停机前备份数据库失败",
+    deploy_refused: "停机前复查部署闸门没有通过",
+    swap_failed: "停机前把新构建换进 dist 失败",
+  };
+  async function reportMaintenanceFailure(maintenanceId: string): Promise<void> {
+    try {
+      const maintenance = (await supervisorRequest<SupervisorStatus>({ type: "status" }, { dataDir: opts.dataDir })).supervisor?.maintenance;
+      if (!maintenance || maintenance.id !== maintenanceId || maintenance.state !== "failed" || closing) return;
+      if (reportedMaintenance.has(maintenance.id)) return;
+      reportedMaintenance.add(maintenance.id);
+      const what = maintenance.failureKind ? MAINTENANCE_FAILURE_TEXT[maintenance.failureKind] : "停机前的一步失败了";
+      addInbox(db, {
+        dedupScope: `maintenance-failed:${maintenance.id}`, severity: "attention", source: "structural",
+        summary: `${maintenance.action === "upgrade" ? "升级" : "重启"} daemon 的维护没有完成：${what}。daemon 没有重启，还在跑原来的构建。`
+          + "详细原因在 supervisor 的日志里，get_runtime_health 里这次维护的 error 也有。",
+        payload: { inboxKind: "maintenance_failed", wakeLead: true, needsUser: true },
+      });
+    } catch (error) {
+      log(`maintenance ${maintenanceId} failure not recorded: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
   // plc.sock：本机自举和运维（0600）。plc 在这里换一个网关凭证，supervisor 用它探活和停机。
   // 聊天、事项动作、授权和重检都走网关，这里一条都没有：plc 和 companion 走同一条路。
   // 连接不算"有客户端在听"，也收不到广播。
@@ -5532,6 +5646,11 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
             (data) => sendTo(sock, { type: "response", id: cmd.id, success: true, data }),
             (error: any) => sendTo(sock, { type: "response", id: cmd.id, success: false, error: String(error?.message ?? error) }),
           );
+          break;
+        }
+        case "maintenance_failed": {
+          sendTo(sock, { type: "response", id: cmd.id, success: true });
+          void reportMaintenanceFailure(cmd.maintenanceId);
           break;
         }
         case "shutdown": {
@@ -5698,6 +5817,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     await channelMemory?.stop();
     network.stop();
     if (livenessTimer) clearTimeout(livenessTimer);
+    if (providerRetry) clearTimeout(providerRetry);
     clearNodeInterval(schedTimer); clearNodeInterval(orchestratorTimer);
     healthRecovery.stop();
     preflight.stop();

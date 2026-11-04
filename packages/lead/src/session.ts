@@ -221,17 +221,24 @@ export async function createLeadSession(opts: {
   complete: SmartTextComplete | null;
   // SmartModel 的 LLM 后端缺省用的模型（设置页没选、或者选的注册不到时用它）。没有 LLM 后端时为 null。
   smartModelLlm: string | null;
-  // 按 config.json 现在的 lead.providers 重新注册（设置 → 模型改了服务商）。
-  refreshProviders: () => Promise<void>;
+  // 按 config.json 现在的 lead.providers 重新注册（设置 → 模型改了服务商）。only：只重新注册这几个服务商。
+  // 返回分工里还拉不到目录的服务商的名字（原因写进日志）。
+  refreshProviders: (only?: readonly string[]) => Promise<string[]>;
   // 大脑现在能不能用（首次启动引导，.scratch/onboarding）：正在用的模型有认证。
   brainReady: () => Promise<boolean>;
+  // 启动时正在用的模型的服务商拉不到目录的原因（registerLeadProviders 的 unavailable）。拉到了时为 null。
+  // 只是备用模型的服务商拉不到时不算：Lead 照常能用，原因只写进日志。
+  modelUnavailable: string | null;
+  // 启动时分工里拉不到目录的服务商的名字（包括备用模型的）。daemon 按退避再拉（refreshProviders），拉到为止。
+  providersUnavailable: string[];
 }> {
   const modelRuntime = await ModelRuntime.create({
     allowModelNetwork: false,
     refreshOnCreate: false,
   });
   const leadModels = loadLeadModelConfig(opts.dataDir);
-  for (const note of await registerLeadProviders(modelRuntime, leadModels)) {
+  const registered = await registerLeadProviders(modelRuntime, leadModels);
+  for (const note of registered.notes) {
     console.error(`[lead] ${note}`);
   }
   const spec = selectedLeadModelSpec(leadModels);
@@ -535,7 +542,7 @@ export async function createLeadSession(opts: {
     switchModel: async (next: string) => {
       const { provider, id } = parseModelName(next);
       if (!modelRuntime.getModel(provider, id)) {
-        for (const note of await registerLeadProviders(modelRuntime, loadLeadModelConfig(opts.dataDir))) {
+        for (const note of (await registerLeadProviders(modelRuntime, loadLeadModelConfig(opts.dataDir))).notes) {
           console.error(`[lead] ${note}`);
         }
       }
@@ -548,10 +555,14 @@ export async function createLeadSession(opts: {
     complete,
     smartModelLlm,
     // 设置 → 模型改了服务商（2026-10-29）：照 config.json 现在的样子重新注册。正在用的模型由 daemon 再挂一次（switchModel）。
-    refreshProviders: async () => {
-      for (const note of await registerLeadProviders(modelRuntime, loadLeadModelConfig(opts.dataDir))) {
+    refreshProviders: async (only?: readonly string[]) => {
+      const refreshed = await registerLeadProviders(
+        modelRuntime, loadLeadModelConfig(opts.dataDir), process.env, fetch, only ? { only: new Set(only) } : {},
+      );
+      for (const note of refreshed.notes) {
         console.error(`[lead] ${note}`);
       }
+      return refreshed.unavailable.map((entry) => entry.provider);
     },
     // 和 pi 发 prompt 前的检查一样（agent-session 的 hasConfiguredAuth / checkAuth）：环境变量里的 key 也算。
     brainReady: async () => {
@@ -559,5 +570,7 @@ export async function createLeadSession(opts: {
       if (!current) return false;
       return modelRuntime.hasConfiguredAuth(current.provider) || (await modelRuntime.checkAuth(current.provider)) !== undefined;
     },
+    modelUnavailable: registered.unavailable.find((entry) => entry.provider === model.provider)?.reason ?? null,
+    providersUnavailable: registered.unavailable.map((entry) => entry.provider),
   };
 }

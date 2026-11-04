@@ -105,6 +105,22 @@ describe('the memory switch card', () => {
     expect(screen.queryByTestId('surface-memory-switch-approve')).toBeNull();
   });
 
+  // 凭证做不了决定（网关按来历去掉了 approvals:respond），同意回 403：卡上说下一步去哪里做，不显示网关的英文原话。
+  it('says where to decide instead of the gateway refusal when this credential cannot decide', async () => {
+    const { runtime } = runtimeWith({
+      memorySwitch: vi.fn(async () => memorySwitch()),
+      confirmMemorySwitch: vi.fn(async () => {
+        throw new ControlPlaneClientError('missing scope: approvals:respond. Only the user decides, in the web page or on the paired phone', 'forbidden', 403);
+      }),
+    });
+    (runtime as unknown as { scopes: Set<string> }).scopes.delete('approvals:respond');
+    await act(async () => { renderWithRuntime(<SurfaceView surface={surface()} />, runtime); });
+    await act(async () => { fireEvent.click(screen.getByTestId('surface-memory-switch-approve')); });
+    const card = screen.getByTestId(`surface-memory-switch-${SWITCH_ID}`);
+    expect(card.textContent).toContain('This device\'s credential cannot make decisions.');
+    expect(card.textContent).not.toContain('missing scope');
+  });
+
   it('says an older switch was already handled', async () => {
     const { runtime } = runtimeWith({
       memorySwitch: vi.fn(async () => { throw new ControlPlaneClientError('没有这个切换', 'not_found', 404); }),

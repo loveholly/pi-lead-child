@@ -14,9 +14,12 @@ if (!claimInstanceLock(daemonLockPath(dataDir))) {
 const sockPath = join(dataDir, "plc.sock");
 const activePath = join(dataDir, "fake-active-items.json");
 // 启动途中退出：测试据此检查 supervisor 不再等一个已经退出的 daemon。只生效一次。
+// 退出前像真实 daemon 那样往 stderr 写原因（其中一行带个假令牌）：测试检查 supervisor.log 带上了它，并且盖掉了令牌。
 const exitOnStartPath = join(dataDir, "fake-exit-on-start");
 if (existsSync(exitOnStartPath)) {
   unlinkSync(exitOnStartPath);
+  process.stderr.write("fake daemon: cannot open the ledger\n");
+  process.stderr.write("fake daemon: token=fake0token0value0abcdef123456\n");
   process.exit(1);
 }
 // 启动慢：拿到 daemon.lock 以后先不监听，等测试删掉 fake-hold-start。真实 daemon 也是先拿锁、做完启动工作再监听。

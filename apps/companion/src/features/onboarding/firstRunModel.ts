@@ -1,4 +1,5 @@
 import type { BrainModel, Locale, ModelProvider, ModelProviderApi, ModelSettingsDto } from '@pi-lead-child/protocol';
+import { normalizeServiceUrl } from '@pi-lead-child/protocol';
 
 import { onboardingMessages } from './onboarding.messages';
 
@@ -69,10 +70,13 @@ export interface FirstRunProviderForm {
   api: ModelProviderApi;
 }
 
-/** 接入请求（save_provider 的 input）。填得不对时返回原因。 */
+/**
+ * 接入请求（save_provider 的 input）。填得不对时返回原因。
+ * 其他服务：已有服务商的地址和这次一样（规范化后比）时用它的名字，连接失败后重试是覆盖它，不再新增一个带编号的。
+ */
 export function firstRunProviderRequest(
   form: FirstRunProviderForm,
-  existing: readonly string[],
+  existing: readonly Pick<ModelProvider, 'name' | 'baseUrl'>[],
   locale: Locale,
 ): { ok: true; input: { name: string; baseUrl: string; api: ModelProviderApi; apiKey?: string } } | { ok: false; problem: string } {
   const m = onboardingMessages(locale);
@@ -84,7 +88,10 @@ export function firstRunProviderRequest(
   }
   const baseUrl = form.baseUrl.trim().replace(/\/+$/, '');
   if (!/^https?:\/\/[^\s]+$/.test(baseUrl)) return { ok: false, problem: m.badUrl };
-  return { ok: true, input: { name: customProviderName(baseUrl, existing), baseUrl, api: form.api, ...(apiKey ? { apiKey } : {}) } };
+  const normalized = normalizeServiceUrl(baseUrl);
+  const same = normalized ? existing.find((provider) => normalizeServiceUrl(provider.baseUrl) === normalized) : undefined;
+  const name = same ? same.name : customProviderName(baseUrl, existing.map((provider) => provider.name));
+  return { ok: true, input: { name, baseUrl, api: form.api, ...(apiKey ? { apiKey } : {}) } };
 }
 
 /** 刚接入的服务商（按名字找）。还没出现在模型设置里时为 null。 */

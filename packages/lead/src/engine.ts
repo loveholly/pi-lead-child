@@ -41,5 +41,10 @@ export interface LeadEngineFactoryResult {
   // 大脑现在能不能用：正在用的模型有认证（首次启动引导，.scratch/onboarding）。没有时 daemon 当作能用。
   brainReady?: () => Promise<boolean>;
   // 按 config.json 现在的 lead.providers 重新注册（设置 → 模型改了服务商）。没有时要重启 daemon 才生效。
-  refreshProviders?: () => Promise<void>;
+  // only：只重新注册这几个服务商（按退避重拉还缺目录的）。返回分工里还拉不到目录的服务商的名字（没有返回值时当作都拉到了）。
+  refreshProviders?: (only?: readonly string[]) => Promise<string[] | void>;
+  // 启动时正在用的模型的服务商拉不到目录的原因（服务商名字和错误原文，不带 key）。daemon 照常起来，把它记成 Lead 的模型失败。
+  modelUnavailable?: string | null;
+  // 启动时分工里拉不到目录的服务商的名字（包括备用模型的）。daemon 按退避用 refreshProviders 再拉，拉到为止。
+  providersUnavailable?: string[];
 }

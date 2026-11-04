@@ -30,9 +30,10 @@ export function supervisorRequest<T = unknown>(
 ): Promise<T> {
   return new Promise((resolve, reject) => {
     const socket = connect(supervisorSockPath(opts?.dataDir));
+    // 超时带 code "timeout"：调用方据此区分「supervisor 还没回答」和「supervisor 拒绝了」（例如 plc daemon start 等 daemon 就绪）。
     const timeout = setTimeout(() => {
       socket.destroy();
-      reject(new Error("supervisor request timed out"));
+      reject(Object.assign(new Error("supervisor request timed out"), { code: "timeout" }));
     }, opts?.timeoutMs ?? 15_000);
     socket.once("error", (error) => {
       clearTimeout(timeout);

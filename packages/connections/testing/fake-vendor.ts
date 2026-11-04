@@ -44,6 +44,8 @@ export class FakeVendor {
   revoked: string[] = [];
   // 下一次刷新时的故障：network（fetch 抛错）、server（500）、invalid_grant。
   failNextRefresh: Array<"network" | "server" | "invalid_grant"> = [];
+  // 下一次用授权码换令牌时的回复：状态码和正文。
+  failNextExchange: Array<{ status: number; body: Record<string, unknown> }> = [];
   // 刷新请求到达时先跑的钩子（模拟另一条路径在这时换了令牌）。
   onRefresh: (() => void) | null = null;
   now: () => number;
@@ -145,6 +147,8 @@ export class FakeVendor {
       const entry = this.codes.get(form.get("code") ?? "");
       if (!entry) return json(400, { error: "invalid_grant" });
       this.codes.delete(form.get("code")!);
+      const failure = this.failNextExchange.shift();
+      if (failure) return json(failure.status, failure.body);
       const verifier = form.get("code_verifier") ?? "";
       if (createHash("sha256").update(verifier).digest("base64url") !== entry.challenge) return json(400, { error: "invalid_grant", error_description: "PKCE" });
       if (form.get("resource") !== entry.resource || form.get("redirect_uri") !== entry.redirectUri) return json(400, { error: "invalid_grant" });
