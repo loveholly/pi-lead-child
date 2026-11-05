@@ -159,7 +159,8 @@ export function createChannelCardTools(cards: LeadChannelCards | undefined, db?:
         + "不要抄对方的原话。权限清单由代码按这条消息的权限上限算：你只能收窄，可以补上仓库、选定 PR，超出上限的部分会被丢掉并告诉你。"
         + "要 PR 的意图不写 pull_request 时用代码从消息里认出的那个；消息里没有链接时先看上下文包和 read_channel_conversation。"
         + "能做什么按交接说明里起作用的那一句的能力（消息事件里写着「派活能用：……」）；这一句没有派活的能力时，只能派只读的 knowledge 或 progress。"
-        + "派出去以后通道在来源里回一句「正在处理」，结果回到通道，由信心模型决定代用户回复还是交回给你。"
+        + "派出去以后通道在来源里回一句「正在处理」，结果回到通道，由信心模型决定代用户回复还是交回给你；"
+        + "「自动代你处理」关着时不回「正在处理」，结果交回给你。"
         + "一张工单只管一个 PR：消息里有几个 PR，每个 PR 调一次（pull_request 写那一个），可以同时调。"
         + "子 agent 的结果交回给你以后（失败了或者信心不够），可以用同一个 event 再派一次，summary 写清这次要改的做法。",
       parameters: Type.Object({

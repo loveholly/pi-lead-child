@@ -290,9 +290,10 @@ export interface ChannelCardActionService {
   // 这张卡现在能做的动作（和页面上的按钮是同一份）。
   actionsFor(cardId: number): ChannelCardAction[];
   // forUser：你本人（页面）或者 Lead 在你这一轮里代你做。false 是 Lead 自己做的：回复带 auto-reply 署名（engine 的 ChannelHub.act）。
+  // drafted：Lead 自己的发送因为「自动代你处理」关着放到了卡上，写着给 Lead 的下一步（只给 Lead，不进卡的 DTO）。
   act(cardId: number, action: ChannelCardAction, options: {
     by: string; forUser: boolean; expectedVersion?: number; text?: string; note?: string; emoji?: string; react?: boolean;
-  }): Promise<ChannelCardDto>;
+  }): Promise<ChannelCardDto & { drafted?: string }>;
 }
 
 export interface UiActionEnv {

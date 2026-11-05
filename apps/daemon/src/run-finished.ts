@@ -13,7 +13,7 @@
 import type { Db } from "@pi-lead-child/store";
 import {
   addActivity, addInbox, getItem, getRun, inboxWakesLead, isLightTask, itemEntityKey, mergeIntoPendingInbox, transition,
-  watchCheckOfItem, watchOrigin, type InboxRow,
+  watchCheckOfItem, watchOrigin, watchSetBy, type InboxRow,
 } from "@pi-lead-child/store";
 import { settleWatchAgentCheck } from "@pi-lead-child/engine";
 import { estimateTextTokens, formatTokenCount } from "@pi-lead-child/lead";
@@ -98,6 +98,8 @@ export function recordRunFinished(
   // 后台检查开的子 agent（.scratch/lead-watch/spec.md D2）：说明里写是哪个检查、Lead 设它时写的话；外部来源的检查按外部的一轮算。
   const watched = run?.purpose === "execution" ? watchCheckOfItem(db, args.itemId) : null;
   const watchExternal = watched !== null && watchOrigin(watched.watch).kind === "external";
+  // 用户本人设的检查交回：叫醒的那一轮算用户的一轮（timer:<inbox 编号>，和检查结果的 watch_result 一样，维护者 2026-11-04 定）。
+  const watchSetByUser = watched ? watchSetBy(watched.watch) : null;
   const readExternal = Boolean(light && run && readExternalSystems(db, run.id));
   const external = readExternal || watchExternal;
   const watchLine = watched
@@ -121,6 +123,7 @@ export function recordRunFinished(
     error: args.error?.message ?? null, wakeLead: true, needsUser: false, routine: true,
     ...(light ? { lightTask: true } : {}),
     ...(external ? { external: true } : {}),
+    ...(watchSetByUser ? { setBy: watchSetByUser } : {}),
   };
   const blocker = run && !args.error && !external && current?.stage === "blocked"
     ? sameRunBlocker(db, args.itemId, run.id)

@@ -8,7 +8,7 @@ import type { BashOperations } from "@earendil-works/pi-coding-agent";
 import { localIso } from "@pi-lead-child/core";
 import {
   abandonWatchCheck, addInbox, agentWatchTokensSince, attachWatchCheckItem, dueWatches, finishWatchCheck, getItem, publishGatewayEvent,
-  runningWatchChecks, startWatchCheck, watchAgentDailyTokens, watchCheckOfItem, watchOrigin, WATCH_LIMITS,
+  runningWatchChecks, startWatchCheck, watchAgentDailyTokens, watchCheckOfItem, watchOrigin, watchSetBy, WATCH_LIMITS,
   type Db, type FinishedWatchCheck, type Watch, type WatchStatus, type WatchWake,
 } from "@pi-lead-child/store";
 
@@ -99,7 +99,10 @@ export function agentCheckTask(watch: Watch): WatchAgentTask {
   };
 }
 
-/** 叫醒 Lead：写一条 inbox（tell 级，事件日志马上叫醒它）。外部来源的检查按外部的一轮算。 */
+/**
+ * 叫醒 Lead：写一条 inbox（tell 级，事件日志马上叫醒它）。外部来源的检查按外部的一轮算。
+ * 用户本人设的检查带上 setBy：叫醒的那一轮算用户的一轮（timer:<inbox 编号>，store 的 user-turn-authority.ts，维护者 2026-11-04 定）。
+ */
 export function wakeLeadForWatch(db: Db, finished: FinishedWatchCheck, wake: WatchWake): void {
   const { watch, check } = finished;
   const how = watch.check_kind === "command" ? `命令 \`${clip(watch.command ?? "", 300)}\`` : "子代理检查";
@@ -116,6 +119,7 @@ export function wakeLeadForWatch(db: Db, finished: FinishedWatchCheck, wake: Wat
       : "这个检查已经结束。",
   ].filter(Boolean);
   const external = watchOrigin(watch).kind === "external";
+  const setBy = watchSetBy(watch);
   addInbox(db, {
     ...(watch.item_id !== null ? { itemId: watch.item_id } : {}),
     dedupScope: `watch:${watch.id}:${check.id}`,
@@ -124,7 +128,7 @@ export function wakeLeadForWatch(db: Db, finished: FinishedWatchCheck, wake: Wat
     summary: lines.join("\n"),
     payload: {
       kind: "watch_result", watch: watch.id, check: check.id, reason: wake, state: watch.state,
-      wakeLead: true, needsUser: false, ...(external ? { external: true } : {}),
+      wakeLead: true, needsUser: false, ...(external ? { external: true } : {}), ...(setBy ? { setBy } : {}),
     },
     lossless: true,
   });

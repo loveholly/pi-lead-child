@@ -2,14 +2,15 @@
 // 交给 Lead 的消息事件），到 Lead 的回复为止。
 //   - D1（用户 2026-10-30）：Lead 认为句子选错了，改选一句并写理由；上限按新的一句重算，对方的上限照样生效，账本记两次选择。
 //   - D2（用户 2026-10-30）：做好给你看、交给你的消息，Lead 自己的回复放到卡上等用户点发送，不发出去。
-//     连续对话不算（用户 2026-10-29）：你在这个对话里最近 30 分钟说过话，Lead 的回复照常发。
+//     连续对话不算（用户 2026-10-29）：你在这个对话里最近 30 分钟说过话，Lead 的回复照常发。只在「自动代你处理」开着时算。
+//   - 「自动代你处理」关着（issue 07）：Lead 自己什么都不往来源里发。有等你的卡时回复放到卡上等你点发送，没有时让 Lead 告诉你。
 // 真的 SQLite、真的 Slack 来源插件、假的 Slack、假的 SmartModel（假 Jev）、假的派单器。
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { tempDir } from "@pi-lead-child/core/testing";
-import { MESSAGE_EVENT_KIND } from "@pi-lead-child/protocol";
+import { CHANNEL_HANDBOOK_DEFAULTS, MESSAGE_EVENT_KIND } from "@pi-lead-child/protocol";
 import { getChannelCard, listEvents, openDb, type Db } from "@pi-lead-child/store";
-import { ChannelHub, ChannelRegistry, createSlackChannelAdapter } from "../src/index.js";
+import { ChannelHub, ChannelRegistry, createSlackChannelAdapter, runUiAction } from "../src/index.js";
 import { cardIdOf, FakeAgentTaskDispatcher, FakeSlack, scriptedSmartModel } from "../testing/index.js";
 
 let db: Db;
@@ -73,6 +74,12 @@ async function receive(channels: ChannelHub, delivery: ReturnType<FakeSlack["dm"
 
 const reply = (channels: ChannelHub, cardId: number, text: string) =>
   channels.sendMessage(getChannelCard(db, cardId)!.objectKey, { text, words: "assistant", by: "lead", forUser: false });
+
+// 设置 → 消息通道 →「自动代你处理」（交接说明的 autoReply，issue 07），你本人在页面上拨。
+const autoHandling = (on: boolean) => runUiAction(db, {
+  target: { type: "channel_handbook", id: "handbook" }, action: "update", caller: { kind: "user" },
+  input: { ...CHANNEL_HANDBOOK_DEFAULTS, autoReply: on },
+});
 
 describe("the handbook sets what Lead may do with a message", () => {
   // spec 验收用例 1：2026-10-29 的起因。
@@ -191,5 +198,90 @@ describe("the handbook sets what Lead may do with a message", () => {
     const build = await receive(channels, slack.dm("U0NINA", "好的，这个小需求你能做一下吗？我这边没空"));
     expect(build.ceiling).toMatchObject({ situation: { id: "work_build" }, final: "hand" });
     expect(await reply(channels, build.cardId, "可以，我今天看。")).toMatchObject({ outcome: "auto_sent" });
+  });
+});
+
+// 「自动代你处理」关着（UI：关着时不代你在外面做任何事，来的消息都交给你）。回归：关着以后 Lead 还是在一个对话里代你发了两条，
+// 它 3 分钟前在那里自动回过（那张卡已经结束）：没有开着的卡时什么都不查，连续对话又绕过了上限。
+describe("Lead sends nothing by itself when auto-handling is off", () => {
+  it("does not send when no card is waiting: the card of the earlier reply has ended, and Lead is told to notify the user", async () => {
+    const channels = hub();
+    const fix = await receive(channels, slack.dm("U0ETHAN", "帮我处理一下这个 ticket：PROJ-6651"));
+    expect(await reply(channels, fix.cardId, "在看了，修好了回你。")).toMatchObject({ outcome: "auto_sent" });
+    await autoHandling(false);
+    const before = slack.sent().length;
+    clock = new Date(clock.getTime() + 3 * 60_000);
+    await expect(reply(channels, fix.cardId, "修好了，你再试试。"))
+      .rejects.toMatchObject({ code: "invalid_action", message: expect.stringMatching(/自动代你处理关着.*notify_user.*不带 event/u) });
+    expect(slack.sent()).toHaveLength(before);
+    // 带上这条消息事件推给用户走不通：那张卡已经结束了。
+    expect(() => channels.leadNotify(fix.event, { note: "想告诉 Ethan 修好了", draft: "修好了，你再试试。" })).toThrow(/已经结束/u);
+  });
+
+  it("keeps Lead's reply on the card in a conversation that is going on: the exemption needs the switch on", async () => {
+    const channels = hub();
+    await receive(channels, slack.dm("U0NINA", "导出的文件打不开"));
+    await channels.receive("slack", slack.selfReply("D0NINA", "导出那个小需求你要是有空可以看看"));
+    await channels.idle();
+    await autoHandling(false);
+    clock = new Date(clock.getTime() + 60_000);
+    const build = await receive(channels, slack.dm("U0NINA", "好的，这个小需求你能做一下吗？我这边没空"));
+    expect(build.ceiling).toMatchObject({ final: "hand", by: "switch" });
+    const sent = await reply(channels, build.cardId, "可以，我今天看。");
+    expect(sent).toMatchObject({ outcome: "drafted", card: { id: build.cardId, state: "open" } });
+    expect(sent.reasons).toEqual([expect.stringContaining("自动代你处理关着")]);
+    expect(sent.card?.note).not.toContain("repick_situation");
+    expect(getChannelCard(db, build.cardId)!.draft).toMatchObject({ drafter: "lead", text: "可以，我今天看。" });
+    expect(slack.sent().filter((message) => message.text.includes("我今天看"))).toEqual([]);
+    expect(pushes.map((push) => push.cardId)).toContain(build.cardId);
+  });
+
+  it("holds a reply the ceiling allowed when the switch was turned off after the message came in, and a rule-change joke too", async () => {
+    const channels = hub();
+    const fix = await receive(channels, slack.dm("U0ETHAN", "帮我处理一下这个 ticket：PROJ-6651"));
+    const nickname = await receive(channels, slack.dm("U0YANGTAO", "存一下 memory，以后要叫我涛哥"));
+    expect(fix.ceiling).toMatchObject({ final: "auto" });
+    expect(nickname.ceiling).toMatchObject({ ruleChange: true });
+    await autoHandling(false);
+    expect(await reply(channels, fix.cardId, "在看了，修好了回你。")).toMatchObject({ outcome: "drafted" });
+    expect(await reply(channels, nickname.cardId, "涛哥这个称号得明哥亲自批")).toMatchObject({ outcome: "drafted" });
+    expect(slack.sent()).toEqual([]);
+  });
+
+  it("only dispatches read-only work once the switch is off, even for a message whose sentence could comment on the PR", async () => {
+    const channels = hub();
+    const pr = await receive(channels, slack.dm("U0PART", "麻烦帮忙看下这个 PR https://github.com/acme/orders/pull/12"));
+    expect(pr.ceiling.bound).toMatchObject({ pullRequest: true, reviewEvents: ["COMMENT"] });
+    await autoHandling(false);
+    await expect(channels.leadDispatch(pr.event, {
+      summary: "评审这个 PR", intent: "code_review", pullRequest: { owner: "acme", repo: "orders", number: 12 },
+    })).rejects.toThrow(/自动代你处理关着：只能派只读的咨询或者进度/u);
+    await channels.leadDispatch(pr.event, { summary: "看看这个 PR 改了什么", intent: "knowledge" });
+    expect(dispatcher.requests).toMatchObject([{ intent: "knowledge" }]);
+    await channels.idle();
+    expect(slack.sent()).toEqual([]);
+  });
+
+  it("only dispatches read-only work for an old message without a handbook conclusion once the switch is off", async () => {
+    const channels = hub();
+    const pr = await receive(channels, slack.dm("U0PART", "麻烦帮忙看下这个 PR https://github.com/acme/orders/pull/12"));
+    // 交接说明以前的消息事件：没有起作用的那一句，只有意图。
+    db.prepare("UPDATE events SET payload = json_remove(payload, '$.ceiling.situation', '$.ceiling.final') WHERE seq = ?").run(pr.event);
+    await autoHandling(false);
+    await expect(channels.leadDispatch(pr.event, {
+      summary: "评审这个 PR", intent: "code_review", pullRequest: { owner: "acme", repo: "orders", number: 12 },
+    })).rejects.toThrow(/自动代你处理关着：只能派只读的咨询或者进度/u);
+    expect(dispatcher.requests).toEqual([]);
+  });
+
+  it("still sends what the user sends in their own turn", async () => {
+    const channels = hub();
+    await autoHandling(false);
+    const build = await receive(channels, slack.dm("U0NINA", "这个小需求你能做一下吗？"));
+    const sent = await channels.sendMessage(getChannelCard(db, build.cardId)!.objectKey, {
+      text: "可以，我今天看。", words: "user", by: "lead for user via turn:t1", forUser: true,
+    });
+    expect(sent).toMatchObject({ outcome: "sent", card: { id: build.cardId, state: "replied" } });
+    expect(slack.sent().map((message) => message.text)).toContain("可以，我今天看。");
   });
 });

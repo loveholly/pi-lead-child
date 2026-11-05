@@ -4422,7 +4422,10 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
         const card = getChannelCard(db, cardId);
         return card ? hub.actionsFor(card) : [];
       },
-      act: async (cardId, action, options) => hub.cardDto(await hub.act(cardId, action, options)),
+      act: async (cardId, action, options) => {
+        const card = await hub.act(cardId, action, options);
+        return card.drafted ? { ...hub.cardDto(card), drafted: card.drafted } : hub.cardDto(card);
+      },
     };
     // Lead 代用户直接往一个对话里发消息、回表情，不经过卡片（用户 2026-10-23、10-26）。等你的卡跟着结束；发完给 Lead 还开着的卡自查。
     uiActionServices.channelMessages = {
@@ -4846,8 +4849,8 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       void runTurn(REMINDER_WAKE_TEXT, { system: SYSTEM_TURN_ORIGINS.reminder, deliverEvents: true, respondTo: [reminder] });
       return;
     }
-    // 用户本人设的跟进到点也单独一轮（2026-10-28）：只有它的一轮才算用户的一轮（userTimerOf），和别的事一起交时，
-    // 那一轮只有 Lead 自己的权限，设下一次跟进也不再算用户的。
+    // 用户本人设的跟进到点、用户本人设的后台检查叫醒 Lead，也单独一轮（2026-10-28）：这一轮算用户的一轮（userTimerOf）。
+    // 和外部消息合在同一轮时也算（维护者 2026-11-04 定）。
     const userTimer = leadInput.pendingMessages().find(isUserFollowUpFire);
     const only = userTimer ? { only: [userTimer] } : {};
     log(`system event: waking lead (${userTimer ? `the user's follow-up #${userTimer.seq}` : `${leadInput.pendingMessages().length} event(s)`}`
@@ -4880,15 +4883,21 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     }, origin);
   }
 
-  // 用户本人设的跟进到点（timer.fired 带 setByUser）。
+  // 用户本人设的跟进到点（timer.fired 带 setByUser），和用户本人设的后台检查叫醒 Lead（检查结果 watch_result、
+  // 子代理检查交回的 run_finished，inbox 的 payload 带 setBy；维护者 2026-11-04 定）。
   function isUserFollowUpFire(event: EventRecord): boolean {
-    return event.kind === "timer.fired" && event.payload.setByUser === true;
+    if (event.kind === "timer.fired") return event.payload.setByUser === true;
+    const inbox = event.payload.payload as { setBy?: unknown } | undefined;
+    return event.kind === "inbox.attention" && (event.payload.inboxKind === "watch_result" || event.payload.inboxKind === "run_finished")
+      && Boolean(inbox?.setBy);
   }
 
-  // 只为用户本人设的跟进开的一轮：交给这一轮的事全是这种跟进到点（timer.fired 带 setByUser），取第一条的 inbox 编号。
+  // 算用户一轮的定时器：交给这一轮的事里有用户本人设的跟进到点或者检查叫醒，取第一条的 inbox 编号。和外部消息合在同一轮时也算
+  // （维护者 2026-11-04 定）。
   function userTimerOf(events: readonly EventRecord[]): number | null {
-    if (!events.length || !events.every(isUserFollowUpFire)) return null;
-    const inboxId = Number(events[0]!.payload.inboxId);
+    const fire = events.find(isUserFollowUpFire);
+    if (!fire) return null;
+    const inboxId = Number(fire.payload.inboxId);
     return Number.isSafeInteger(inboxId) ? inboxId : null;
   }
 
@@ -5074,9 +5083,8 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     const events = leadInput.pendingInterrupts({ origin: runningSystemOrigin });
     if (!events.length) return;
     const taken = leadInput.takeMessages({ events, steered: true });
-    // 插进来的事也算这一轮的输入：带外部原文的，这一轮算读过外部原文；不再是只为用户的跟进开的一轮。
+    // 插进来的事也算这一轮的输入：带外部原文的，这一轮算读过外部原文。用户的跟进开的一轮照旧算用户的（维护者 2026-11-04 定）。
     runOrigin = withExternalEvents(runOrigin, taken.events);
-    if (taken.events.length) runOrigin = { ...runOrigin, timer: null };
     const text = [
       leadSystemEvent("system", "紧急：下面的事插进了你正在做的这一轮。先看它，再接着做原来的事。", { topic: "interrupt" }),
       taken.text,

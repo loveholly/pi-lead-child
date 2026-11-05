@@ -42,6 +42,8 @@
 // 外部通道的出站扩展（spec D9）：Lead 不在你这一轮里写的话（卡上的发送、往对话发消息、reply_to_source 都一样）由 Lead 自己判断，
 //   直接代你发，带 auto-reply 署名，回复卡的留撤回窗口。不过信心检验，不变成卡上的草稿（用户 2026-10-29：「我期望它就能自己做判断」）。
 //   你这一轮明确要发的带 confirmed by 署名。
+//   自动代你处理关着（交接说明的 autoReply，issue 07）：Lead 不在你这一轮里什么都不往来源里发（回复、回表情、改消息、「已处理」的 ✅、
+//   「正在处理」、子 agent 结果的代发），按现在的开关算。有等你的卡时回复放到卡上等你点发送，没有时让 Lead 告诉你。
 // 子 agent 工单结束（agentTaskFinished，派单器的回调）：问请求 B（reply-check.ts），信心模型（confidence-model.ts）决定：
 //   代你回（改写「正在处理」那一条，带披露署名，留撤回窗口），或者问你、交给你（channel.task.finished 交回 Lead）。
 // 每一拍（tick）：「稍后」到点的卡重新打开并提醒；没发成的回复用同一个幂等键再发；还没定开不开卡的消息补上；
@@ -1587,7 +1589,9 @@ export class ChannelHub {
     }
     // 派活的上限（issue 04）：有交接说明的结论时按这一句的能力（abilitiesGrantBound）；这一句没有派活的能力（例如交给你、
     // 兜底的自己判断）时，和以前一样只能派只读的咨询或者进度，帮你拟草稿。没有交接说明的旧消息按意图。
-    const sentenceBound = ceiling ? abilitiesGrantBound(ceiling.abilities) : null;
+    // 收件以后才关掉自动代你处理（issue 07）：按现在的开关，和收件时就关着一样，只能派只读的。
+    const off = !this.handbookNow().autoReply;
+    const sentenceBound = ceiling && !off ? abilitiesGrantBound(ceiling.abilities) : null;
     const reviewIntent = (bound: IntentGrantBound): GrantIntent => (bound.reviewEvents.includes("APPROVE") ? "approve" : "code_review");
     const intent = input.intent ?? (sentenceBound
       ? sentenceBound.pullRequest ? reviewIntent(sentenceBound) : sentenceBound.connections.includes(ATLASSIAN_CONNECTION) ? "progress" : "knowledge"
@@ -1598,8 +1602,8 @@ export class ChannelHub {
       throw new ChannelActionError("invalid_action", `交接说明里的「${ceiling!.situation.text}」不能在 PR 上评论或批准：派 knowledge 或 progress，`
         + "或者认为句子选错了，用 repick_situation 改选一句");
     }
-    if (!sentenceBound && !(request.intent && isGrantIntent(request.intent) && !ceiling) && intent !== "knowledge" && intent !== "progress") {
-      throw new ChannelActionError("invalid_action", "这条消息没有派活的能力（看交接说明里的这一句）：只能派只读的咨询或者进度，帮用户拟草稿");
+    if (!sentenceBound && !(request.intent && isGrantIntent(request.intent) && !ceiling && !off) && intent !== "knowledge" && intent !== "progress") {
+      throw new ChannelActionError("invalid_action", `${off ? "自动代你处理关着" : "这条消息没有派活的能力（看交接说明里的这一句）"}：只能派只读的咨询或者进度，帮用户拟草稿`);
     }
     const adapter = this.options.registry.get(request.channel);
     if (!adapter) throw new ChannelActionError("unavailable", `来源 ${request.channel} 现在没有接上`);
@@ -1700,7 +1704,8 @@ export class ChannelHub {
       }
       this.recordTaskStart(adapter, card, request, input.intent, input.scope, dispatched, text);
       // 回一句「正在处理」：结果出来以后的回复改写它（落地计划 A3）。只有 Lead 派活时才发（统一消息事件 spec D9）。
-      this.sendStatusNotice(adapter, card, request.forSeq, text, input.intent === "code_review" || input.intent === "approve" ? "review" : "lookup");
+      // 自动代你处理关着（issue 07）时不发：结果也不代你发，交回 Lead。
+      if (this.handbookNow().autoReply) this.sendStatusNotice(adapter, card, request.forSeq, text, input.intent === "code_review" || input.intent === "approve" ? "review" : "lookup");
       this.cardsChanged([card.id]);
       return dispatched;
     } finally {
@@ -1815,6 +1820,8 @@ export class ChannelHub {
    * 卡正在发别的回复时抛 conflict。reasons：没发出去时写原因（系统会用同一个幂等键再试）。
    */
   private async leadReply(adapter: ChannelAdapter, card: ChannelCard, text: string): Promise<{ card: ChannelCard; reasons: string[] }> {
+    // 自动代你处理关着（issue 07）：Lead 自己不代你发。两个入口（sendMessage、act）关着时都先放到卡上，这里只兜底。
+    if (!this.handbookNow().autoReply) throw new ChannelActionError("invalid_action", LEAD_OFF_NEXT("不代你发"));
     // 派了活还没交回：子 agent 的结果交回以后由出站检验定代你回还是交给你，「正在处理」已经告诉了对方。现在回会让卡提前结束。
     const task = this.awaitingTask(card.id);
     if (task) throw new ChannelActionError("conflict", `${awaitingTaskNote(card.id, task)}，现在不用回复对方`);
@@ -1909,6 +1916,7 @@ export class ChannelHub {
    * cardId 是另一个对话里的卡时，这条消息做的是那张卡上的事（卡「已处理」，在对方的消息上回 ✅）。
    * seenBefore：你这一轮开始的时间（毫秒）。卡上最新的消息不早于它时，你说话时还没见过，卡不结束，card.note 写明。
    * refusal：Lead 用固定的话拒绝（回复到来源的固定拒绝，refuseForLead），不走上面这些。
+   * 不在你这一轮里、自动代你处理关着时：有等你的卡放到卡上（outcome 是 drafted），没有时抛 invalid_action（issue 07）。
    */
   async sendMessage(
     conversationId: string,
@@ -1931,13 +1939,19 @@ export class ChannelHub {
     // 交接说明的上限（用户 2026-10-30 定 D2）：Lead 自己的回复（不是替用户发的）落在一张开着的卡上时，按这张卡最新一条消息的
     // 上限：放手照常发；做好给你看、交给你、只告诉你、婉拒，回复放到卡上等用户点发送，不发出去。固定的拒绝走它自己的检查。
     // 连续对话不算（用户 2026-10-29：「连续对话和互动哪来那么多傻逼死锁机制」）：你或 Lead 在这个对话里最近 30 分钟说过话，
-    // 对方在接着说，Lead 的回复按 Lead 自己的判断发。交接说明管的是别人找你的新消息。
+    // 对方在接着说，Lead 的回复按 Lead 自己的判断发。交接说明管的是别人找你的新消息。这个例外只在自动代你处理开着时算。
+    // 自动代你处理关着（issue 07）：Lead 自己什么都不发，按现在的开关算（收件以后才关的也算）。有开着的卡时回复放到卡上等你点发送
+    // （连续对话、底线 4 的玩笑也一样）；没有卡时不发，让 Lead 告诉你。
     if (!input.forUser && !input.refusal) {
       const open = getOpenChannelCard(this.db, place.objectKey);
+      const off = !this.handbookNow().autoReply;
+      if (!open && off) throw new ChannelActionError("invalid_action", LEAD_OFF_NEXT("不代你发"));
       const ceiling = open ? this.replyCeilingOf(open.id) : null;
+      const where = { conversation: conversationId, label: place.label, objectKey: place.objectKey };
+      if (open && off) return this.draftForUser(adapter, open, input.text.trim(), null, where);
       // 底线 4：对方在要求改规则、记忆或偏好：Lead 的回复（玩笑或者拒绝）可以直接发，它不做任何事。
       if (open && ceiling && !replyAllowed(ceiling.final) && !ceiling.ruleChange && !this.inConversation(adapter, open)) {
-        return this.draftForUser(adapter, open, input.text.trim(), ceiling, { conversation: conversationId, label: place.label, objectKey: place.objectKey });
+        return this.draftForUser(adapter, open, input.text.trim(), ceiling, where);
       }
     }
     if (input.refusal) return this.refuseForLead(adapter, conversationId, place, input);
@@ -2079,6 +2093,7 @@ export class ChannelHub {
   ): Promise<ChannelEditedMessage> {
     const text = input.text.trim();
     if (!text) throw new ChannelActionError("invalid_action", "新的文字是空的");
+    if (!input.forUser && !this.handbookNow().autoReply) throw new ChannelActionError("invalid_action", LEAD_OFF_NEXT("不代你改消息"));
     const source = conversationId.split(":")[0] ?? "";
     const adapter = this.options.registry.get(source);
     if (!adapter?.capabilities.edit || !adapter.history || !adapter.capabilities.history || !adapter.resolveConversation) {
@@ -2133,6 +2148,10 @@ export class ChannelHub {
   ): Promise<ChannelReaction> {
     if (!new RegExp(CHANNEL_EMOJI_NAME_PATTERN).test(input.emoji)) {
       throw new ChannelActionError("invalid_action", `表情名不对：${input.emoji}。要写来源里的名字，不带冒号，例如 white_check_mark、+1`);
+    }
+    // 自动代你处理关着（issue 07）：Lead 自己（by 是 lead，不在你这一轮里）不回表情。撤掉回过的表情不算代你做事。
+    if (input.by === "lead" && !input.remove && !this.handbookNow().autoReply) {
+      throw new ChannelActionError("invalid_action", LEAD_OFF_NEXT("不代你回表情"));
     }
     const source = conversationId.split(":")[0] ?? "";
     const adapter = this.options.registry.get(source);
@@ -2352,25 +2371,26 @@ export class ChannelHub {
   }
 
   // Lead 的回复不能直接发（D2）：放到卡上当草稿，推送这张卡，告诉 Lead 下一步。不抛错：这是交接说明的正常结果，不是失败。
+  // ceiling 是 null：自动代你处理关着（issue 07），改选句子也没用，不提它。
   private draftForUser(
-    adapter: ChannelAdapter, card: ChannelCard, text: string, ceiling: NonNullable<LeadRequest["handbook"]>,
+    adapter: ChannelAdapter, card: ChannelCard, text: string, ceiling: NonNullable<LeadRequest["handbook"]> | null,
     sent: { conversation: string; label: string; objectKey: string },
   ): ChannelSentMessage {
     if (!text) throw new ChannelActionError("invalid_action", "回复是空的");
     this.updateDraftByLead(card.id, text);
-    const why = `交接说明：按「${ceiling.situation.text}」，${HANDBOOK_MODE_LABELS[ceiling.final]}`;
+    const why = ceiling ? `交接说明：按「${ceiling.situation.text}」，${HANDBOOK_MODE_LABELS[ceiling.final]}` : "自动代你处理关着：不代你发";
     const note = clipEventText(`${why}。Lead 写的回复放在卡上，等你点发送`, 300);
     this.decidePending(card.id, "push", note);
     const after = getChannelCard(this.db, card.id)!;
     this.pushCard(adapter, after, "new", note);
     this.cardsChanged([card.id]);
-    this.log(`[channels] ${adapter.id}: Lead's reply on card #${card.id} kept as a draft (${ceiling.final})`);
+    this.log(`[channels] ${adapter.id}: Lead's reply on card #${card.id} kept as a draft (${ceiling?.final ?? "auto-handling off"})`);
     return {
       ...sent, text, outcome: "drafted", reasons: [why],
       card: {
         id: after.id, state: after.state,
-        note: `${why}：回复没有发出去，放到了卡 #${card.id} 上等用户点发送。下一步：在用户的对话里说一声卡上有你的草稿，不要换个办法再发；`
-          + "认为句子选错了，用 repick_situation 改选一句并写理由",
+        note: `${why}：回复没有发出去，放到了卡 #${card.id} 上等用户点发送。下一步：在用户的对话里说一声卡上有你的草稿，不要换个办法再发`
+          + (ceiling ? "；认为句子选错了，用 repick_situation 改选一句并写理由" : ""),
       },
     };
   }
@@ -2743,7 +2763,8 @@ export class ChannelHub {
    * 本该代你发的按比例抽查，照样放到卡上问你，原因里写明是抽查。
    */
   private scoreDraft(channel: string, input: Omit<ConfidenceModelInput, "calibration">): ScoredDraft {
-    const params = this.confidenceParamsFor(channel);
+    // 信心模型的开关是旧授权表的（channel.authority）；设置页拨的是交接说明的（issue 07），关着时一律不代你发。
+    const params = this.handbookNow().autoReply ? this.confidenceParamsFor(channel) : { ...this.confidenceParamsFor(channel), autoReply: false };
     const model = evaluateConfidenceModel({ ...input, calibration: channelCalibration(this.db, channel) }, params);
     const gate = channelReplyDecision(model, params);
     const rate = this.options.audit?.rate ?? CHANNEL_REPLY_AUDIT_RATE;
@@ -3011,7 +3032,7 @@ export class ChannelHub {
   async act(
     cardId: number, action: ChannelCardAction,
     options: { by: string; forUser?: boolean; expectedVersion?: number; text?: string; note?: string; emoji?: string; react?: boolean },
-  ): Promise<ChannelCard> {
+  ): Promise<ChannelCard & { drafted?: string }> {
     const card = getChannelCard(this.db, cardId);
     if (!card) throw new ChannelActionError("not_found", `没有通道卡 #${cardId}`);
     if (options.expectedVersion !== undefined && options.expectedVersion !== card.version) {
@@ -3028,6 +3049,12 @@ export class ChannelHub {
     if ((action === "send_draft" || action === "send_edited") && options.forUser === false) {
       const text = action === "send_draft" ? card.draft?.text ?? "" : options.text?.trim() ?? "";
       if (!text) throw new ChannelActionError("invalid_action", action === "send_draft" ? `卡 #${cardId} 上没有草稿` : "「改一下再发」要带要发的文字");
+      // 自动代你处理关着（issue 07，2026-11-04 定）：和 sendMessage 一样放到卡上等你点发送，不抛错。drafted 是给 Lead 的下一步。
+      if (!this.handbookNow().autoReply) {
+        const label = getChannelLaneById(this.db, card.laneId)?.label ?? card.objectKey;
+        const kept = this.draftForUser(adapter, card, text, null, { conversation: card.objectKey, label, objectKey: card.objectKey });
+        return { ...getChannelCard(this.db, card.id)!, drafted: kept.card!.note! };
+      }
       return (await this.leadReply(adapter, card, text)).card;
     }
     const now = this.now();
@@ -3103,7 +3130,9 @@ export class ChannelHub {
       case "handled": {
         const note = options.note?.trim() ?? "";
         if (!note) throw new ChannelActionError("invalid_action", "「已处理」要写一句做了什么（note）");
-        const reaction = options.react === false ? null : await this.acknowledge(adapter, card, options.emoji ?? CHANNEL_HANDLED_EMOJI);
+        // 自动代你处理关着（issue 07）：Lead 自己定的「已处理」只结束卡，不在对方的消息上回 ✅。
+        const quiet = options.react === false || (options.forUser === false && !this.handbookNow().autoReply);
+        const reaction = quiet ? null : await this.acknowledge(adapter, card, options.emoji ?? CHANNEL_HANDLED_EMOJI);
         result = simple({
           state: "handled", snoozedUntil: null, resolvedAt: at, resolution: { by: options.by, action, at, detail: { note, reaction } },
         }, "handled", `卡上的事做完了：${note}`, { note, reaction });
@@ -4144,6 +4173,11 @@ export class ChannelHub {
           timeoutMs: Math.max(this.options.intakeTimeoutMs ?? CHANNEL_INTAKE_TIMEOUT_MS, 1),
         });
         const notice = handlingNotice(this.assistantFor(adapter), isHandlingVerb(verb) ? verb : defaultHandlingVerb(playbook));
+        // 想措辞的时候自动代你处理被关掉了（issue 07）：按现在的开关，不发。
+        if (!this.handbookNow().autoReply) {
+          this.log(`[channels] ${adapter.id}: auto-handling was turned off; the handling notice on card #${card.id} was not sent`);
+          return;
+        }
         const context = await this.context(adapter);
         if (!context) {
           this.log(`[channels] ${adapter.id}: no connection; the handling notice on card #${card.id} was not sent`);
@@ -4550,6 +4584,10 @@ function handbookOfCeiling(ceiling: Record<string, unknown>): LeadRequest["handb
 
 // Lead 自己写的回复能不能直接发（用户 2026-10-30 定 D2）：只有放手可以。婉拒只能发固定的拒绝（refuseForLead 另有检查）。
 const replyAllowed = (final: HandbookMode): boolean => final === "auto";
+
+// 自动代你处理关着时 Lead 自己（不在你这一轮里）往来源里做事被拦下（issue 07）：为什么，和下一步。notify_user 带 event 时
+// 那张卡要还开着（leadNotify），所以写明没有等用户的卡时不带 event。
+const LEAD_OFF_NEXT = (what: string) => `自动代你处理关着，${what}：用 notify_user 告诉用户，写上你本来想怎么做（这个对话没有等用户的卡时不带 event）`;
 
 // 交给 Lead 的消息事件里写的下一步（按授权表的结论，只是建议）：Lead 能用的通用工具（统一消息事件 spec D6、D8，工单 05）。
 function leadNextStep(action: string): string {

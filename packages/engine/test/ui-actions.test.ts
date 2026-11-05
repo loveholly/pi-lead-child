@@ -564,6 +564,21 @@ describe("channel cards", () => {
     await expect(runUiAction(db, { target, action: "dismiss", caller: { kind: "user" } })).rejects.toMatchObject({ code: "unavailable" });
   });
 
+  // 「自动代你处理」关着时 hub 把 Lead 的发送放到卡上（drafted）：Lead 拿到的结果和 reply_to_source 一样有 outcome=drafted 和下一步。
+  it("tells Lead its send went onto the card when the hub kept it as a draft", async () => {
+    const opened = card(new Date(Date.now() - 60_000));
+    const note = "自动代你处理关着：不代你发：回复没有发出去，放到了卡上等用户点发送";
+    const channelCards: ChannelCardActionService = {
+      actionsFor: () => ["send_draft"],
+      act: async (cardId) => ({ id: cardId, state: "open", sentText: null, actions: ["send_draft"], drafted: note }) as unknown as ChannelCardDto,
+    };
+    const outcome = await runUiAction(db, {
+      target: { type: "channel_card", id: opened.id }, action: "send_draft", reason: "张三在等回复",
+      caller: { kind: "lead", turnId: null }, services: { channelCards },
+    });
+    expect(outcome.forLead).toEqual({ card: { id: opened.id, state: "open", sentText: null, actions: ["send_draft"] }, outcome: "drafted", note });
+  });
+
   it("does not count it as the user's when the other person wrote again after the user started talking", async () => {
     const opened = card(new Date());
     const { channelCards, acts } = fakeCards();
