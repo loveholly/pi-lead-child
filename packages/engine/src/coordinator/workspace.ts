@@ -2,7 +2,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { execFile, execFileSync } from "node:child_process";
 import { existsSync, lstatSync, mkdirSync, readdirSync, realpathSync, renameSync } from "node:fs";
 import { mkdtemp, readFile, rm, rmdir, stat, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { promisify } from "node:util";
@@ -293,10 +293,12 @@ function safeBranchHint(value: string): string {
   return branch;
 }
 
+// 工单的 workdir 可以写成 ~/...（Lead 和用户都这样写），先展开成家目录再判断。
 function assertAbsolutePath(value: string, field: string): string {
-  const path = resolve(value.trim());
-  if (!value.trim() || !isAbsolute(value.trim())) throw new Error(`${field} must be absolute`);
-  return path;
+  const trimmed = value.trim();
+  const expanded = trimmed === "~" ? homedir() : trimmed.startsWith("~/") ? join(homedir(), trimmed.slice(2)) : trimmed;
+  if (!expanded || !isAbsolute(expanded)) throw new Error(`${field} must be absolute`);
+  return resolve(expanded);
 }
 
 function sourceWorkspace(db: Db, input: ProvisionWorkspaceInput): Workspace {

@@ -54,6 +54,20 @@ describe("coordinator workspace provisioning", () => {
     expect(listWorkspaces(db, { ownerItemId: itemId })).toHaveLength(2);
   });
 
+  it("expands a workdir written under ~ before creating the shared workspace", () => {
+    const home = process.env.HOME;
+    process.env.HOME = dir;
+    try {
+      const itemId = createItem(db, {
+        title: "coding", brief: "worktree", createdBy: "user", workflowKind: "coding", workdir: "~/repo",
+      });
+      expect(provisionWorkspace(db, { itemId, mode: "shared" }).path).toBe(repoDir);
+      expect(provisionWorkspace(db, { itemId, mode: "isolated" }).repo_root).toBe(realpathSync(repoDir));
+    } finally {
+      process.env.HOME = home;
+    }
+  });
+
   it("requires an explicit merge decision before releasing isolated work", async () => {
     const itemId = item();
     provisionWorkspace(db, { itemId, mode: "shared" });
