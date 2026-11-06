@@ -140,6 +140,14 @@ describe('the card when a reminder fires', () => {
     expect(within(screen.getByTestId('reminder-fire-5')).getByTestId('reminder-fire-lead').textContent).toContain('我看了，还有余票。');
   });
 
+  // 按钮在 listUiActions 回来以前是禁用的（SurfaceControls 的 useAvailability）。以前一找到按钮就点：
+  // 整套跑时机器一忙，点下去时按钮还禁用，这一下就丢了，performUiAction 永远等不到（2026-11-06，#279）。
+  // 现在先等按钮可以按，再点。
+  async function enabled(button: HTMLElement): Promise<HTMLElement> {
+    await vi.waitFor(() => expect(button.getAttribute('aria-disabled')).toBeNull(), { timeout: 5_000 });
+    return button;
+  }
+
   it('confirms with 知道了, and moves it 10 minutes on from the panel', async () => {
     const runtime = setup();
     const runTicketAction = vi.spyOn(runtime, 'runTicketAction').mockResolvedValue(undefined as never);
@@ -150,14 +158,14 @@ describe('the card when a reminder fires', () => {
       { id: 'reschedule', label: '改时间', permission: 'lead_allowed', available: true, reason: null, irreversible: false, where: '', params: [] } as never,
     ]);
     push(runtime, { reminder: reminder() });
-    fireEvent.click(await screen.findByRole('button', { name: 'Got it' }));
+    fireEvent.click(await enabled(await screen.findByRole('button', { name: 'Got it' })));
     await waitFor(() => expect(performUiAction).toHaveBeenCalledWith('reminder', '5', 'ack', { input: {} }));
     expect(runTicketAction).not.toHaveBeenCalled();
     performUiAction.mockClear();
     fireEvent.click(screen.getByTestId('surface-disclosure-reminder-5-summary'));
     fireEvent.click(await screen.findByRole('radio', { name: 'In 10 minutes' }));
     const before = Date.now();
-    fireEvent.click(screen.getByRole('button', { name: /^Move to/ }));
+    fireEvent.click(await enabled(screen.getByRole('button', { name: /^Move to/ })));
     await waitFor(() => expect(performUiAction).toHaveBeenCalled());
     const [type, id, action, options] = performUiAction.mock.calls[0]! as [string, string, string, { input: { remindAt: string } }];
     expect([type, id, action]).toEqual(['reminder', '5', 'reschedule']);

@@ -78,6 +78,13 @@ function parts(runtime: ReturnType<typeof emptyRuntime>) {
   return (state.partIdsByMessage[ASSISTANT] ?? []).map((id) => state.messagePartsById[id]!);
 }
 
+// 操作按钮（SurfaceControls 的 ActionButton）在 listUiActions 回来以前是禁用的。一找到按钮就点，整套跑时机器一忙，
+// 点下去时按钮还禁用，这一下就丢了（2026-11-06，#279）。先等按钮可以按，再点。
+async function enabled(button: HTMLElement): Promise<HTMLElement> {
+  await vi.waitFor(() => expect(button.getAttribute('aria-disabled')).toBeNull(), { timeout: 5_000 });
+  return button;
+}
+
 describe('a surface in the conversation', () => {
   it('becomes a part of the turn, and the render_ui call stays out of the tool summary', () => {
     const runtime = applyLive(emptyRuntime(), [
@@ -440,7 +447,8 @@ describe('a reminder card built only from blocks', () => {
     expect(screen.queryByTestId('surface-field-pick-preview')).toBeNull();
     expect(screen.getAllByText(/^\d+ minutes left$|^1 hour left$/).length).toBeGreaterThan(0);
     const before = Date.now();
-    await act(async () => { fireEvent.click(await screen.findByRole('button', { name: '改时间' })); });
+    const save = await enabled(await screen.findByRole('button', { name: '改时间' }));
+    await act(async () => { fireEvent.click(save); });
     expect(perform).toHaveBeenCalledTimes(1);
     const [type, id, action, request] = perform.mock.calls[0]!;
     expect([type, id, action]).toEqual(['reminder', '83', 'reschedule']);

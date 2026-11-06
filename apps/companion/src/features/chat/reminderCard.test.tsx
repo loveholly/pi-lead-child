@@ -126,14 +126,24 @@ describe('a reminder Lead created in the conversation', () => {
   });
 
   // 提醒到点（scheduled → fired）时 daemon 不推事件：挂着的卡片在提醒时刻之后自己重取一次（调度器每分钟走一次）。
+  // 卡片在提醒时刻之后 70 秒重取，延迟在挂上卡片时按 Date.now() 算（src/state/hooks.ts 的 useConversationItemDetail）。
+  // 以前这里用真时钟、只留 100ms 余量：整套跑时机器一忙，从算 remindAt 到挂上卡片超过 100ms，延迟变成负数，
+  // 卡片就不排重取，「Due」永远等不到；第二次的返回值也要赶在定时器之前换上（2026-11-06，#279）。
+  // 现在冻住 Date.now()，延迟固定是 1 秒；两次的返回值一开始就排好，不和定时器抢。
   it('reads the reminder again after its time, so a fired reminder does not keep counting down', async () => {
-    const remindAt = new Date(Date.now() - 69_900).toISOString();
-    const getTicket = vi.fn(async () => ({ ...detail(reminder()), remindAt }));
-    render(getTicket);
-    expect(await screen.findByText(/ ago$/)).toBeTruthy();
-    getTicket.mockImplementation(async () => ({ ...detail(reminder({ stage: 'fired', status: 'fired' })), remindAt }));
-    expect(await screen.findByText('Due', {}, { timeout: 2_000 })).toBeTruthy();
-    expect(getTicket).toHaveBeenCalledTimes(2);
+    const now = Date.now();
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(now);
+    try {
+      const remindAt = new Date(now - 69_000).toISOString();
+      const getTicket = vi.fn(async () => ({ ...detail(reminder({ stage: 'fired', status: 'fired' })), remindAt }));
+      getTicket.mockImplementationOnce(async () => ({ ...detail(reminder()), remindAt }));
+      render(getTicket);
+      expect(await screen.findByText(/ ago$/)).toBeTruthy();
+      expect(await screen.findByText('Due', {}, { timeout: 5_000 })).toBeTruthy();
+      expect(getTicket).toHaveBeenCalledTimes(2);
+    } finally {
+      clock.mockRestore();
+    }
   });
 
   // 审查发现（3688968）：事件取的是最后一个操作，不看它的状态。取消失败或者还在跑时，卡片写「Lead 取消了它」，
@@ -153,6 +163,13 @@ describe('a reminder Lead created in the conversation', () => {
     expect(screen.queryByText('正在同步工单。')).toBeNull();
   });
 });
+
+// 操作按钮（SurfaceControls 的 ActionButton）在 listUiActions 回来以前是禁用的。一找到按钮就点，整套跑时机器一忙，
+// 点下去时按钮还禁用，这一下就丢了（2026-11-06，#279）。先等按钮可以按，再点。
+async function enabled(button: HTMLElement): Promise<HTMLElement> {
+  await vi.waitFor(() => expect(button.getAttribute('aria-disabled')).toBeNull(), { timeout: 5_000 });
+  return button;
+}
 
 // 改时间、取消走操作层（提醒的 reschedule、工单的 cancel），和 Lead 的工具是同一个函数。
 describe('changing and cancelling a reminder from its card', () => {
@@ -178,7 +195,7 @@ describe('changing and cancelling a reminder from its card', () => {
     fireEvent.click(screen.getByRole('radio', { name: 'In 1 hour' }));
     const panel = within(screen.getByTestId('reminder-card-83-open'));
     expect(panel.getByTestId('reminder-page-open-value').textContent).toBe(String(new Date(Date.now() + 3_600_000).getDate()));
-    const button = await screen.findByRole('button', { name: /^Move to [A-Z][a-z]{2} / });
+    const button = await enabled(await screen.findByRole('button', { name: /^Move to [A-Z][a-z]{2} / }));
     const before = Date.now();
     await act(async () => { fireEvent.click(button); });
     const [type, id, action, request] = reschedule.mock.calls[0]!;

@@ -3,7 +3,8 @@
 # - root-tests（macos-15）：根 vitest（后端各包、apps/daemon、apps/cli、scripts/、desktop/）。这些测试按 macOS 写：
 #   沙箱测试在 Linux 上要 bubblewrap、socat 和 ripgrep，还有 Keychain、launchd、代码签名的测试。产品也只有 macOS 版。
 #   所以放在 macOS 上跑，不排除任何测试。
-# - apps/companion 自己的 expo lint 不在这里：它现在一跑就崩溃（TypeError: Cannot read properties of undefined (reading 'Intrinsic')），要先修好才能放进来。
+# - lint 全仓库只用根目录的 .oxlintrc.json。npm run lint 从仓库根跑，apps/companion 的文件也在里面，所以不再单独跑
+#   companion 的 lint（它的 lint 脚本也是用同一份配置的 oxlint）。expo lint 写死了 ESLint，换不成 oxlint。
 # - 用 pull_request，不用 pull_request_target：fork 的代码拿不到写权限，也拿不到 secret。这里不读任何 secret。
 # - 只有 contents: read；第三方 action 固定到 commit SHA；不用 ${{ }} 把 PR 的内容拼进脚本。
 # - 同一个 PR 推了新提交，旧的那次运行会被取消。
