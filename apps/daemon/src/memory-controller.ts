@@ -173,6 +173,17 @@ function switchDto(stored: StoredSwitch): MemorySwitch {
   const { desired: _desired, ...dto } = stored;
   return { ...dto, dataFlows: dto.dataFlows ?? [], parts: dto.parts ?? ["embedding"] };
 }
+// pg0 的密码从 URL 里来：hindsight_api/pg0.py 把它交给 pg0-embedded，后者拼成命令行 `pg0 start ... --password <值>`。
+// 以前用 base64url，字母表有 `-`：密码以 `-` 开头（约 1/64）时 pg0 的 CLI（clap）把它当成选项，报 `unexpected argument`
+// 或 `a value is required for '--password'`，PostgreSQL 起不来。现在只用 hex（[0-9a-f]）：24 字节 = 48 位，熵和以前一样是 192 位。
+// hex 在 URL 里也不用编码（Hindsight 不解码 URL 里的密码），放进 pg0 建用户的 SQL 字符串也安全。
+export const newDatabasePassword = (): string => randomBytes(24).toString("hex");
+
+// 以 `-` 开头的旧密码从来没让 pg0 启动成功：命令行解析在 initdb 之前就失败了，所以没有用它初始化过的数据目录，
+// 直接换新密码不会连不上，也不用重建数据目录。不以 `-` 开头的旧密码（含中间有 `-`、`_` 的）能正常启动，数据目录可能已经用它初始化，
+// 保留不动：pg0 只在用户不存在时建用户（CREATE USER ... PASSWORD），不改已有用户的密码，换了就连不上自己的数据。
+export const isUsableDatabasePassword = (value: string): boolean => value.length > 0 && !value.startsWith("-");
+
 const digest = (secrets: HindsightSecrets) => createHash("sha256").update(json(secrets)).digest("hex");
 const rerankHost = (reranker: HindsightReranker) => reranker.provider === "typesafe" ? serviceUrlHost(reranker.baseUrl) : null;
 const embeddingHost = (embedding: HindsightEmbedding | null) =>
@@ -231,9 +242,13 @@ export class MemoryController implements MemoryService {
   // daemon 启动时调一次：接着下没下完的模型（关掉 Hindsight 时不下），让 Hindsight 处在期望状态。
   async start(): Promise<void> {
     if (!this.off()) this.downloads.resume();
-    await this.serial(() => this.reconcile("startup"));
-    this.healthTimer = setInterval(() => void this.checkHealth(), this.healthIntervalMs());
-    this.healthTimer.unref?.();
+    try {
+      await this.serial(() => this.reconcile("startup"));
+    } finally {
+      // Hindsight 在启动时没起来（apply 抛错）也要开健康检查：重试靠它（this.retry）。
+      this.healthTimer = setInterval(() => void this.checkHealth(), this.healthIntervalMs());
+      this.healthTimer.unref?.();
+    }
   }
 
   stop(): void {
@@ -531,9 +546,11 @@ export class MemoryController implements MemoryService {
     return { embedding: service.embedding, reranker: service.reranker };
   }
 
-  private generated(name: "hindsight.apiKey" | "hindsight.databasePassword", make: () => string): string {
+  // usable 不通过时（现存的值不合法）换成新生成的。
+  private generated(name: "hindsight.apiKey" | "hindsight.databasePassword", make: () => string, usable: (value: string) => boolean = () => true): string {
     const existing = this.secrets.get(name);
-    if (existing) return existing.value;
+    if (existing && usable(existing.value)) return existing.value;
+    if (existing) this.options.log(`[memory] replaced the stored ${name}: the old value cannot be used`);
     const value = make();
     this.secrets.set(name, { value, host: null });
     return value;
@@ -563,7 +580,7 @@ export class MemoryController implements MemoryService {
     return {
       // daemon 第一次初始化 Hindsight 时生成（2026-10-16 用户决定）。之后连接和启动都用它。
       apiKey: this.generated("hindsight.apiKey", () => randomUUID()),
-      databasePassword: this.generated("hindsight.databasePassword", () => randomBytes(24).toString("base64url")),
+      databasePassword: this.generated("hindsight.databasePassword", newDatabasePassword, isUsableDatabasePassword),
       ...(embeddingApiKey ? { embeddingApiKey } : {}),
       ...(decisionApiKey ? { decisionApiKey } : {}),
       ...(llmApiKey ? { llmApiKey } : {}),

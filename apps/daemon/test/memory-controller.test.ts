@@ -3,7 +3,7 @@
 // launchd、下载、网络都是替身（memory-fakes.ts），ensureHindsightService 是真的。
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { randomBytes } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tempDir } from "@pi-lead-child/core/testing";
 import { loadPlcConfig, writePlcConfig } from "@pi-lead-child/core";
@@ -14,9 +14,10 @@ import { readServiceFile, type HindsightSecrets } from "@pi-lead-child/superviso
 import { MemorySwitchSchema } from "@pi-lead-child/protocol";
 import { Value } from "typebox/value";
 import {
-  DEFAULT_LOCAL_EMBEDDING, DEFAULT_LOCAL_RERANKER, HINDSIGHT_SECRETS_AAD, hindsightSecretsPath, MemoryController,
-  PINNED_MODEL_REVISIONS, type MemoryControllerHooks,
+  DEFAULT_LOCAL_EMBEDDING, DEFAULT_LOCAL_RERANKER, HINDSIGHT_SECRETS_AAD, hindsightSecretsPath, isUsableDatabasePassword,
+  MemoryController, newDatabasePassword, PINNED_MODEL_REVISIONS, type MemoryControllerHooks,
 } from "../src/memory-controller.js";
+import { SealedSecrets } from "../src/sealed-secrets.js";
 import type { SummaryModels } from "../src/memory-backend.js";
 import { memoryHarness, type MemoryHarness } from "./memory-fakes.js";
 
@@ -141,6 +142,104 @@ describe("MemoryController: nothing runs or downloads until the user chooses", (
   });
 });
 
+// 2026-11-02：密码以 `-` 开头时 `pg0 start --password -a...` 被 clap 当成选项，Hindsight 起不来。
+describe("pg0 database password", () => {
+  it("only uses hex, never starts with `-`, over many draws", () => {
+    for (let i = 0; i < 2000; i++) {
+      const password = newDatabasePassword();
+      expect(password).toMatch(/^[0-9a-f]{48}$/);
+      expect(isUsableDatabasePassword(password)).toBe(true);
+    }
+  });
+
+  it("rejects only passwords that clap would read as an option", () => {
+    expect(isUsableDatabasePassword("-abc")).toBe(false);
+    expect(isUsableDatabasePassword("")).toBe(false);
+    // 中间有 `-`、`_` 的旧密码能启动，数据目录可能已经用它初始化，要保留。
+    expect(isUsableDatabasePassword("ab-c_d")).toBe(true);
+  });
+
+  it("replaces a stored password that starts with `-`, and keeps a usable one", async () => {
+    const enable = async (t: ReturnType<typeof setup>) => {
+      await t.controller.start();
+      await t.controller.update({ embedding: { mode: "local" } });
+      t.harness.downloads().finish(DEFAULT_LOCAL_EMBEDDING);
+      await vi.waitFor(() => expect(t.controller.get().service.embedding).toBe("本地 intfloat/multilingual-e5-large"));
+    };
+    const bad = setup();
+    new SealedSecrets<"hindsight.databasePassword">(bad.db, bad.vault).set("hindsight.databasePassword", { value: "-aBadPassword", host: null });
+    await enable(bad);
+    expect(bad.sealed().databasePassword).toMatch(/^[0-9a-f]{48}$/);
+
+    const good = setup();
+    new SealedSecrets<"hindsight.databasePassword">(good.db, good.vault).set("hindsight.databasePassword", { value: "ok-pass_word", host: null });
+    await enable(good);
+    expect(good.sealed().databasePassword).toBe("ok-pass_word");
+  });
+
+  // 升级前的安装：service.json、secrets.sealed 和 kv 里都是 `-` 开头的密码，Hindsight 在 launchd 下反复起不来。
+  const installWithDashPassword = async () => {
+    const t = setup();
+    await runningLocal(t);
+    const old = "-oldPassword0123456789";
+    new SealedSecrets<"hindsight.databasePassword">(t.db, t.vault).set("hindsight.databasePassword", { value: old, host: null });
+    writeFileSync(hindsightSecretsPath(t.dataDir), t.vault.seal({ ...t.sealed(), databasePassword: old }, HINDSIGHT_SECRETS_AAD));
+    t.controller.stop();
+    return { t, old };
+  };
+  const storedPassword = (t: ReturnType<typeof setup>) =>
+    new SealedSecrets<"hindsight.databasePassword">(t.db, t.vault).get("hindsight.databasePassword")?.value;
+
+  it("replaces it when the upgraded daemon reconnects, restarts Hindsight once, and logs no password", async () => {
+    const { t, old } = await installWithDashPassword();
+    const version = readServiceFile(t.dataDir)!.secretsVersion;
+    const before = t.harness.launchctl.length;
+
+    const again = setup({ dataDir: t.dataDir, db: t.db, vault: t.vault, harness: t.harness });
+    await again.controller.start();
+    const replaced = again.sealed().databasePassword;
+    expect(replaced).toMatch(/^[0-9a-f]{48}$/);
+    expect(storedPassword(again)).toBe(replaced);
+    expect(readServiceFile(t.dataDir)!.secretsVersion).toBe(version + 1);
+    expect(t.harness.launchctl.slice(before)).toEqual(["print", "bootout", "print", "bootstrap"]);
+    expect(again.logs.join("\n")).toMatch(/replaced the stored hindsight\.databasePassword/);
+    expect(again.logs.join("\n")).not.toContain(old);
+    expect(again.logs.join("\n")).not.toContain(replaced);
+    again.controller.stop();
+
+    // 再重启 daemon：不再换密码，也不再重启 Hindsight。
+    const third = setup({ dataDir: t.dataDir, db: t.db, vault: t.vault, harness: t.harness });
+    const mark = t.harness.launchctl.length;
+    await third.controller.start();
+    expect(third.sealed().databasePassword).toBe(replaced);
+    expect(t.harness.launchctl.slice(mark)).toEqual(["print"]);
+  });
+
+  // 换了密码、但重启 Hindsight 失败（launchctl 出错）：健康检查接着重试，用的还是换好的那一个。
+  it("keeps the replaced password and keeps retrying when Hindsight fails to come up at daemon start", async () => {
+    const { t } = await installWithDashPassword();
+    const ensure = t.harness.hooks.ensure!;
+    let broken = true;
+    const controller = new MemoryController({
+      db: t.db, dataDir: t.dataDir, vault: t.vault, memory: t.notes as unknown as NotesMemory, log: (line) => t.logs.push(line),
+      publish: () => {}, externalSecret: () => null, summaryModels: async () => NO_MODELS, programArguments: ["/node", "/hindsight.mjs"],
+      ...t.harness.hooks,
+      healthIntervalMs: 20,
+      ensure: async (options) => { if (broken) throw new Error("launchctl bootstrap failed"); return ensure(options); },
+    });
+    controllers.push(controller);
+    await expect(controller.start()).rejects.toMatchObject({ code: "unavailable" });
+    const replaced = t.sealed().databasePassword;
+    expect(replaced).toMatch(/^[0-9a-f]{48}$/);
+    expect(controller.get().service.state).toBe("down");
+
+    broken = false;
+    await vi.waitFor(() => expect(controller.get().service.state).toBe("healthy"));
+    expect(t.sealed().databasePassword).toBe(replaced);
+    expect(storedPassword(t)).toBe(replaced);
+  });
+});
+
 describe("MemoryController: local models download in the background, pinned and safetensors-only", () => {
   it("starts the download only when the user enables it, at the pinned commit, and switches automatically with no index", async () => {
     const t = setup();
@@ -164,7 +263,7 @@ describe("MemoryController: local models download in the background, pinned and 
     });
     // daemon 第一次初始化 Hindsight 时生成 key（randomUUID）和 pg0 的密码，加密存放；service.json 里没有。
     expect(t.sealed().apiKey).toMatch(/^[0-9a-f-]{36}$/);
-    expect(t.sealed().databasePassword).toMatch(/^[A-Za-z0-9_-]{32}$/);
+    expect(t.sealed().databasePassword).toMatch(/^[0-9a-f]{48}$/);
     expect(readFileSync(join(t.dataDir, "hindsight", "service.json"), "utf8")).not.toContain(t.sealed().databasePassword);
     expect(t.memoryInbox()).toMatchObject([{ payload: { kind: "memory_switch", state: "applied", wakeLead: false } }]);
   });
