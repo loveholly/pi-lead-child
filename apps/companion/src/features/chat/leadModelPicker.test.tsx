@@ -131,15 +131,15 @@ describe('the model picker in the composer', () => {
     await open();
     const rail = Array.from(screen.getByTestId('lead-model-providers').querySelectorAll('[data-testid^="lead-model-provider-"]'))
       .map((element) => element.getAttribute('data-testid')!.slice('lead-model-provider-'.length));
-    expect(rail).toEqual(['all', 'vibeproxy', 'magpie']);
+    expect(rail).toEqual(['all', 'vibeproxy', 'deepseek']);
     expect(screen.getByTestId('lead-model-provider-all').getAttribute('aria-pressed')).toBe('true');
-    // 全部模型：有两个 provider，标题前面写 provider。
-    expect(groupTitles()).toEqual(['vibeproxy · as1 · anthropic', 'vibeproxy · as4 · anthropic', 'vibeproxy · anthropic', 'vibeproxy · antigravity', 'magpie']);
-    await act(async () => { fireEvent.click(screen.getByTestId('lead-model-provider-magpie')); });
-    expect(screen.getByTestId('lead-model-provider-magpie').getAttribute('aria-pressed')).toBe('true');
-    expect(screen.getByTestId('lead-model-provider-magpie').getAttribute('aria-label')).toBe('magpie, 1 model');
-    // 只画 magpie：标题不再写 provider，它只有一种通道，分段没有标题。
-    expect(groupTitles()).toEqual(['']);
+    // 全部模型：左栏是上游供应商（magpie 网关下的 deepseek），标题前面写供应商，后面写网关。
+    expect(groupTitles()).toEqual(['vibeproxy · as1 · anthropic', 'vibeproxy · as4 · anthropic', 'vibeproxy · anthropic', 'vibeproxy · antigravity', 'deepseek · magpie']);
+    await act(async () => { fireEvent.click(screen.getByTestId('lead-model-provider-deepseek')); });
+    expect(screen.getByTestId('lead-model-provider-deepseek').getAttribute('aria-pressed')).toBe('true');
+    expect(screen.getByTestId('lead-model-provider-deepseek').getAttribute('aria-label')).toBe('deepseek, 1 model');
+    // 只画 deepseek：标题不再写供应商，只写来源网关。
+    expect(groupTitles()).toEqual(['magpie']);
     expect(screen.getByTestId('lead-model-option-magpie/deepseek/deepseek-v4')).toBeTruthy();
     // 这个 provider 里搜不到：空状态，不跳回全部。
     await act(async () => { fireEvent.change(screen.getByTestId('lead-model-search'), { target: { value: 'sonnet' } }); });

@@ -22,8 +22,27 @@ export interface LeadModelProvider {
   count: number;
 }
 
+/**
+ * 上游供应商：magpie 这类网关下 id 的第一段（deepseek、asin、bailian-token-plan、codex…），
+ * 没有子路径时（asin/gemini-4-argon、auto/deepseek-flash）就是 provider 本身。
+ * 2026-11-06 用户要求：左栏按供应商分类，不按网关实例（local-3425 / local-3425-2）。
+ */
+export function upstreamProvider(model: LeadModelOption): string {
+  // 账号前缀（vibeproxy 的 as1/、as4/）不是供应商：先去掉，剩下的 id 还有斜杠才取第一段。
+  const id = model.prefix && model.id.startsWith(`${model.prefix}/`) ? model.id.slice(model.prefix.length + 1) : model.id;
+  const slash = id.indexOf('/');
+  return slash > 0 ? id.slice(0, slash) : model.provider;
+}
+
 function grouped(models: readonly LeadModelOption[], keep?: (model: LeadModelOption) => boolean) {
-  return groupModelsByProvider(models.map((model) => ({ ...model, group: model.prefix })), keep ? { keep } : {});
+  return groupModelsByProvider(
+    models.map((model) => {
+      const upstream = upstreamProvider(model);
+      // 左栏按上游供应商分组；provider 被换掉时，原 provider（网关实例）落到 group 里，分段标题上还看得到来源。
+      return { ...model, provider: upstream, group: model.prefix ?? (upstream === model.provider ? null : model.provider) };
+    }),
+    keep ? { keep } : {},
+  );
 }
 
 // 搜索和设置页的模型库一样：按完整的 provider/id 和显示名，不分大小写。
@@ -46,7 +65,7 @@ export function groupLeadModels(
   const providers = grouped(models, query ? (model) => matchesLeadModel(model, query) : undefined);
   const provider = options.provider ?? null;
   // 只画一个 provider 时标题不写它（左栏已经写了）；画全部时有多个 provider 才写。
-  const withProvider = provider === null && new Set(models.map((model) => model.provider)).size > 1;
+  const withProvider = provider === null && new Set(models.map(upstreamProvider)).size > 1;
   return flatModelSections(providers.filter((entry) => provider === null || entry.provider === provider)).map((section) => ({
     key: section.key,
     title: modelSectionTitle(section, withProvider),
