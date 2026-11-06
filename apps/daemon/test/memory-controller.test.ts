@@ -12,6 +12,7 @@ import { HindsightBackend, updateDesignPreferences, type MemoryBackend, type Not
 import { listInbox, openDb, type Db } from "@pi-lead-child/store";
 import { readServiceFile, type HindsightSecrets } from "@pi-lead-child/supervisor";
 import { MemorySwitchSchema } from "@pi-lead-child/protocol";
+import { SealedSecrets } from "../src/sealed-secrets.js";
 import { Value } from "typebox/value";
 import {
   DEFAULT_LOCAL_EMBEDDING, DEFAULT_LOCAL_RERANKER, HINDSIGHT_SECRETS_AAD, hindsightSecretsPath, MemoryController,
@@ -586,6 +587,55 @@ describe("MemoryController: connection tests", () => {
     await t.controller.updateDecisionModel({ apiKey: "dec-1" });
     expect(await t.controller.testDecisionModel()).toMatchObject({ ok: true });
     expect(t.harness.requests.at(-1)).toMatchObject({ url: "https://api.typesafe.ai/v1/systemone", authorization: "Bearer dec-1" });
+  });
+});
+
+// 2026-11-06：公司的 LLM 网关要自定义的鉴权头，值是 key 原文。测试连接走同一个头；记忆服务的重排只会用 Authorization: Bearer，
+// 所以主用要自定义头时重排不用它，设置页说明原因。
+describe("MemoryController: a decision model behind a custom auth header", () => {
+  function withGateway(t: ReturnType<typeof setup>) {
+    const file = loadPlcConfig(t.dataDir);
+    writePlcConfig({
+      ...file,
+      decision: {
+        models: [{ id: "gw", name: "decision-1", baseUrl: "http://llm-gateway.example.com/gw", model: "decision-1", authHeader: "x-gateway-key" }],
+        chain: ["gw"],
+      },
+    }, t.dataDir);
+    new SealedSecrets<string>(t.db, t.vault).set("decision.apiKey.gw", { value: "gw-key-0123456789", host: "llm-gateway.example.com" });
+  }
+
+  it("tests the connection with the key in that header and no Authorization", async () => {
+    const t = setup();
+    withGateway(t);
+    await t.controller.start();
+    expect(await t.controller.testDecisionEntry("gw")).toMatchObject({ ok: true });
+    const request = t.harness.requests.at(-1)!;
+    expect(request.url).toBe("http://llm-gateway.example.com/gw/v1/systemone");
+    expect(request.headers["x-gateway-key"]).toBe("gw-key-0123456789");
+    expect(request.authorization).toBeNull();
+    expect(t.controller.decisionChainCredentials()).toEqual([{
+      baseUrl: "http://llm-gateway.example.com/gw", model: "decision-1", apiKey: "gw-key-0123456789",
+      keyHost: "llm-gateway.example.com", authHeader: "x-gateway-key",
+    }]);
+
+    t.harness.failNext(new Error("gateway refused x-gateway-key: gw-key-0123456789"));
+    const failed = await t.controller.testDecisionEntry("gw");
+    expect(failed.ok).toBe(false);
+    expect(failed.message).not.toContain("gw-key-0123456789");
+    expect(t.logs.join("\n")).not.toContain("gw-key-0123456789");
+  });
+
+  it("does not hand that key to the memory reranker, and says why", async () => {
+    const t = setup();
+    withGateway(t);
+    await runningLocal(t);
+    expect(readServiceFile(t.dataDir)?.reranker).toEqual({ provider: "none" });
+    const memory = t.controller.get();
+    expect(memory.reranker).toMatchObject({ mode: "decision", effective: "none", external: null });
+    expect(memory.pendingSwitch).toBeNull();
+    expect(memory.service.message).toContain("decision-1 用自定义头传 key。记忆服务只会用 Authorization: Bearer 传 key，所以重排不用它");
+    expect(t.sealed().decisionApiKey).toBeUndefined();
   });
 });
 

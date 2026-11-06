@@ -9,7 +9,8 @@
 //     一个服务商第一次拉目录时就有的那些不知道什么时候出的：不记时间，排在最后。以后新出现的才有「首见」时间。
 // 直觉（决策模型）：config.json 的 decision（decision-models.ts）。改了以后记忆的重排跟着主用换（MemoryController）。
 import {
-  leadModelSpec, MODEL_MAX_BACKUPS, MODEL_MAX_CHAIN, modelChainProblem, parseLeadModelSpec, normalizeServiceUrl,
+  fastModelAuthHeaderMessages, fastModelAuthHeaderProblem, leadModelSpec, MODEL_MAX_BACKUPS, MODEL_MAX_CHAIN, modelChainProblem,
+  normalizeFastModelAuthHeader, parseLeadModelSpec, normalizeServiceUrl,
   serviceUrlHost, serviceUrlMessages, serviceUrlProblem, type Locale,
   type BrainModel, type FastModel, type LeadModelChoice, type MemoryTestResponse, type ModelKeySource, type ModelProvider,
   type ModelProviderApi, type ModelSettingsDto, type SaveFastModelRequest, type SaveModelProviderRequest, type SetBrainChainRequest,
@@ -297,7 +298,7 @@ export class ModelSettings implements ModelSettingsService {
       return {
         id: entry.id, name: entry.name, baseUrl: entry.baseUrl, model: entry.model,
         apiKeySet: key !== null, apiKeySource: key ? (key.source === "settings" ? "settings" : "env") : null,
-        apiKeyHost: key?.host ?? storedHost, problem: entry.problem,
+        apiKeyHost: key?.host ?? storedHost, problem: entry.problem, authHeader: entry.authHeader,
       };
     });
     return {
@@ -423,7 +424,14 @@ export class ModelSettings implements ModelSettingsService {
         id = fastModelId(request.name, new Set(inputs.map((entry) => entry.id)));
         added = true;
       }
-      const entry: DecisionEntryInput = { id, name: request.name.trim(), baseUrl, model: request.model };
+      // 鉴权头：不给时不变（新加的是缺省），null、空的和 Authorization 是缺省。
+      let authHeader: string | null = added ? null : inputs.find((candidate) => candidate.id === id)?.authHeader ?? null;
+      if (request.authHeader !== undefined) {
+        const headerProblem = request.authHeader === null ? null : fastModelAuthHeaderProblem(request.authHeader);
+        if (headerProblem) invalid(fastModelAuthHeaderMessages(locale)[headerProblem]);
+        authHeader = normalizeFastModelAuthHeader(request.authHeader);
+      }
+      const entry: DecisionEntryInput = { id, name: request.name.trim(), baseUrl, model: request.model, authHeader };
       const next = added ? [...inputs, entry] : inputs.map((candidate) => (candidate.id === id ? entry : candidate));
       // 还没有主用时，第一条加进来就是主用：刚开始配的人不用再去选一次。
       const chain = added && current.chain.length === 0 ? [id] : current.chain;

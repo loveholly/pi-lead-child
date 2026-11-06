@@ -89,8 +89,8 @@ export interface MemoryHarness {
   // start（run.json 第一次写下）、restart（期望状态的指纹变了）、uninstall（stopService）。期望状态没变时什么也不记。
   service: string[];
   downloads(): FakeDownloads;
-  // Hindsight 和远程 embedding 收到的请求（不含 /health）。redirect 是请求带的重定向策略。
-  requests: Array<{ url: string; authorization: string | null; body: unknown; redirect: RequestRedirect | undefined }>;
+  // Hindsight 和远程 embedding 收到的请求（不含 /health）。redirect 是请求带的重定向策略。headers 是全部的头（名字是小写）。
+  requests: Array<{ url: string; authorization: string | null; headers: Record<string, string>; body: unknown; redirect: RequestRedirect | undefined }>;
   // 下一个请求（不含 /health）抛这个错误。
   failNext(error: Error): void;
   setExternalSecret(name: string, value: string | null): void;
@@ -108,7 +108,7 @@ export function memoryHarness(dataDir: string): MemoryHarness {
     const url = String(input);
     if (url.endsWith("/health")) return new Response("{}", { status: loaded ? 200 : 503 });
     const headers = new Headers(init?.headers);
-    requests.push({ url, authorization: headers.get("authorization"), body: init?.body ? JSON.parse(String(init.body)) : null, redirect: init?.redirect });
+    requests.push({ url, authorization: headers.get("authorization"), headers: Object.fromEntries(headers), body: init?.body ? JSON.parse(String(init.body)) : null, redirect: init?.redirect });
     if (failure) {
       const error = failure;
       failure = null;

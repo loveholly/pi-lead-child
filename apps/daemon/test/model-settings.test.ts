@@ -141,7 +141,7 @@ describe("ModelSettings: the page's data", () => {
     expect(dto.fast).toEqual({
       models: [{
         id: "jev", name: "jev", baseUrl: "https://api.typesafe.ai", model: "jev-latest",
-        apiKeySet: false, apiKeySource: null, apiKeyHost: null, problem: null,
+        apiKeySet: false, apiKeySource: null, apiKeyHost: null, problem: null, authHeader: null,
       }],
       chain: ["jev"], llmFallback: null, effectiveLlm: "vibeproxy/as4/claude-haiku-5-5",
     });
@@ -317,6 +317,57 @@ describe("ModelSettings: the fast models (decision models)", () => {
     await t.settings.removeFastModel("decision-1");
     expect(loadDecisionModels(t.dataDir).entries.map((entry) => entry.id)).toEqual(["jev"]);
     expect(t.secrets().get("decision.apiKey.decision-1")).toBeNull();
+  });
+
+  // 2026-11-06：公司的 LLM 网关（http）要 x-gateway-key 头。鉴权头存进 config.json 的 decision.models[]，不改时保留，null 改回缺省。
+  it("saves a custom auth header for a decision model, keeps it on edits that leave it out, and resets it with null", async () => {
+    const t = setup();
+    const added = await t.settings.saveFastModel({
+      name: "decision-1", baseUrl: "http://llm-gateway.example.com/gw", model: "decision-1", apiKey: "gw-key-0123456789", authHeader: " x-gateway-key ",
+    });
+    const id = added.id!;
+    expect(loadPlcConfig(t.dataDir).decision?.models?.find((entry) => entry.id === id)).toMatchObject({ authHeader: "x-gateway-key" });
+    expect(loadDecisionModels(t.dataDir).entries.find((entry) => entry.id === id)).toMatchObject({
+      authHeader: "x-gateway-key", baseUrl: "http://llm-gateway.example.com/gw", problem: null,
+    });
+    expect((await t.settings.get()).fast.models.find((model) => model.id === id)?.authHeader).toBe("x-gateway-key");
+    expect(readFileSync(envConfigPath(t.dataDir), "utf8")).not.toContain("gw-key-0123456789");
+
+    await t.settings.saveFastModel({ id, name: "decision-1", baseUrl: "http://llm-gateway.example.com/gw", model: "decision-2" });
+    expect(loadDecisionModels(t.dataDir).entries.find((entry) => entry.id === id)?.authHeader).toBe("x-gateway-key");
+    // 换鉴权头不换主机：key 留着。
+    expect(t.secrets().get(`decision.apiKey.${id}`)).toEqual({ value: "gw-key-0123456789", host: "llm-gateway.example.com" });
+
+    await t.settings.saveFastModel({ id, name: "decision-1", baseUrl: "http://llm-gateway.example.com/gw", model: "decision-2", authHeader: "Authorization" });
+    expect(loadDecisionModels(t.dataDir).entries.find((entry) => entry.id === id)?.authHeader).toBeNull();
+    expect(loadPlcConfig(t.dataDir).decision?.models?.find((entry) => entry.id === id)).not.toHaveProperty("authHeader");
+    await t.settings.saveFastModel({ id, name: "decision-1", baseUrl: "http://llm-gateway.example.com/gw", model: "decision-2", authHeader: "x-gateway-key" });
+    await t.settings.saveFastModel({ id, name: "decision-1", baseUrl: "http://llm-gateway.example.com/gw", model: "decision-2", authHeader: null });
+    expect(loadDecisionModels(t.dataDir).entries.find((entry) => entry.id === id)?.authHeader).toBeNull();
+  });
+
+  it("refuses an auth header that is not a header name or that the request itself uses", async () => {
+    const t = setup();
+    await expectRefused(t.settings.saveFastModel({ name: "x", baseUrl: "https://x.example.com", model: "m", authHeader: "am api key" }), "invalid_input", /letters, digits, - and _/);
+    await expectRefused(t.settings.saveFastModel({ name: "x", baseUrl: "https://x.example.com", model: "m", authHeader: "Content-Type" }), "invalid_input", /used by the request itself/);
+    expect(loadDecisionModels(t.dataDir).entries.map((entry) => entry.id)).toEqual(["jev"]);
+  });
+
+  // 已有的配置：没有 authHeader，读出来是缺省；手改出来的坏头名让这一条不能用，并说明原因。
+  it("reads old entries as Authorization and marks a hand-edited bad header as a problem", async () => {
+    const t = setup({ decision: { models: [
+      { id: "jev", name: "jev", baseUrl: "https://api.typesafe.ai", model: "jev-latest" },
+      { id: "bad", name: "bad", baseUrl: "https://bad.example.com", model: "jev-latest", authHeader: "Host" },
+    ], chain: ["jev"] } });
+    const [jev, bad] = loadDecisionModels(t.dataDir).entries;
+    expect(jev).toMatchObject({ authHeader: null, problem: null, host: "api.typesafe.ai" });
+    expect(bad).toMatchObject({ baseUrl: null, host: null, authHeader: null, problem: expect.stringContaining("bad 的鉴权头") });
+    // 别的条目保存时，坏的那一条原样留着。
+    await t.settings.saveFastModel({ id: "jev", name: "jev", baseUrl: "https://api.typesafe.ai", model: "jev-latest" });
+    expect(loadPlcConfig(t.dataDir).decision?.models).toEqual([
+      { id: "jev", name: "jev", baseUrl: "https://api.typesafe.ai", model: "jev-latest" },
+      { id: "bad", name: "bad", baseUrl: "https://bad.example.com", model: "jev-latest", authHeader: "Host" },
+    ]);
   });
 
   it("drops a decision model's key when its address moves to another host", async () => {

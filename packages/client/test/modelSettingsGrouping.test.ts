@@ -48,6 +48,25 @@ describe('model settings with the grouping fields', () => {
     expect(Value.Check(ModelSettingsResponseSchema, { modelSettings: withoutModelGrouping(grouped) })).toBe(true);
   });
 
+  // 直觉的鉴权头（2026-11-06）也只给带 grouping=1 的客户端。
+  it('drops the fast model auth header for an old client', () => {
+    const withHeader: ModelSettingsDto = {
+      ...grouped,
+      fast: {
+        ...grouped.fast,
+        models: [{
+          id: 'gw', name: 'decision-1', baseUrl: 'http://llm-gateway.example.com/gw', model: 'decision-1',
+          apiKeySet: true, apiKeySource: 'settings', apiKeyHost: 'llm-gateway.example.com', problem: null, authHeader: 'x-gateway-key',
+        }],
+      },
+    };
+    expect(Value.Check(ModelSettingsResponseSchema, { modelSettings: withHeader })).toBe(true);
+    expect(Value.Check(LegacyModelSettingsResponseSchema, { modelSettings: withHeader })).toBe(false);
+    const legacy = withoutModelGrouping(withHeader);
+    expect(legacy.fast.models[0]).not.toHaveProperty('authHeader');
+    expect(Value.Check(LegacyModelSettingsResponseSchema, { modelSettings: legacy })).toBe(true);
+  });
+
   it('asks for the grouping fields and reads them', async () => {
     const credentials = createJsonCredentialStore(new MemoryKeyValueStorage());
     await credentials.save({ baseUrl: 'http://daemon.test', accessToken: 'secret', binding, lastSeq: 0 });

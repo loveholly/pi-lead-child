@@ -62,7 +62,7 @@ let replies: Reply[];
 
 // 决策模型的配置：baseUrl 是桩服务器，createSmartModel 在后面接 /v1/systemone。
 // keyHost 缺省是 baseUrl 的主机：daemon 只交出绑定当前主机的 key。
-function decision(overrides: { baseUrl?: string; model?: string; apiKey?: string; keyHost?: string } = {}) {
+function decision(overrides: { baseUrl?: string; model?: string; apiKey?: string; keyHost?: string; authHeader?: string | null } = {}) {
   return () => {
     const credentials = { baseUrl: endpoint.replace(/\/v1\/systemone$/, ""), model: "jev-latest", apiKey: KEY, ...overrides };
     return { ...credentials, keyHost: overrides.keyHost ?? new URL(credentials.baseUrl).host };
@@ -185,6 +185,38 @@ describe("Jev backend", () => {
       type: "score", level: 1, label: "Frustrated", score: 1.05, confidence: 0.92, probabilities: [0, 0.95, 0.05],
     });
     expect(decision.answers.urgent).toEqual({ type: "yes_no", probability: 0.9 });
+  });
+
+  // 2026-11-06：公司的 LLM 网关要自定义的鉴权头，值是 key 原文。这时不带 Authorization。
+  it("sends the key raw in a custom auth header and leaves out Authorization", async () => {
+    const jev = createJevSmartModel({ apiKey: KEY, endpoint, authHeader: "x-gateway-key" });
+    const decided = await jev.decide(STATE, QUESTIONS);
+    expect(decided.backend).toBe("jev");
+    const [request] = recorded;
+    expect(request!.headers["x-gateway-key"]).toBe(KEY);
+    expect(request!.headers.authorization).toBeUndefined();
+    expect(request!.headers["content-type"]).toBe("application/json");
+    expect(JSON.stringify(request!.body)).not.toContain(KEY);
+  });
+
+  // 已有的配置没有 authHeader：照旧是 Authorization: Bearer。写成 Authorization（不分大小写）、空的或 null 也一样。
+  it.each([undefined, null, "", "Authorization", "authorization"])("keeps Authorization: Bearer for the auth header %j", async (authHeader) => {
+    const jev = createJevSmartModel({ apiKey: KEY, endpoint, ...(authHeader === undefined ? {} : { authHeader }) });
+    await jev.decide(STATE, QUESTIONS);
+    expect(recorded[0]!.headers.authorization).toBe(`Bearer ${KEY}`);
+    expect(Object.keys(recorded[0]!.headers).filter((name) => recorded[0]!.headers[name] === KEY)).toEqual([]);
+  });
+
+  it.each(["am api key", "Content-Type", "host", "x".repeat(65), "1-key"])("refuses the auth header %j", (authHeader) => {
+    expect(() => createJevSmartModel({ apiKey: KEY, endpoint, authHeader })).toThrow(/auth header name is not valid/);
+  });
+
+  it("reports a 401 behind a custom auth header without the key", async () => {
+    replies.push({ status: 401, body: { error: { type: KEY, message: `bad key ${KEY}` } } });
+    const jev = createJevSmartModel({ apiKey: KEY, endpoint, authHeader: "x-gateway-key" });
+    const error = await jev.decide(STATE, QUESTIONS).catch((caught: unknown) => caught) as SmartModelBackendError;
+    expect(error).toMatchObject({ kind: "http", status: 401 });
+    expect(error.message).not.toContain(KEY);
   });
 
   it("shuffles choice options on every call", async () => {
@@ -537,6 +569,29 @@ describe("createSmartModel picks backends", () => {
     expect(decided.backend).toBe("jev");
     expect(llm.prompts).toHaveLength(0);
     expect(recorded[0]!.headers.authorization).toBe(`Bearer ${KEY}`);
+  });
+
+  it("passes the decision model's auth header through the factory", async () => {
+    const llm = fakeComplete();
+    const model = createSmartModel({ decisionModel: decision({ authHeader: "x-gateway-key" }), complete: llm.complete })!;
+    expect((await model.decide(STATE, QUESTIONS)).backend).toBe("jev");
+    expect(recorded[0]!.headers["x-gateway-key"]).toBe(KEY);
+    expect(recorded[0]!.headers.authorization).toBeUndefined();
+    // 改回缺省：下一次调用照旧用 Authorization（换了配置就换一个后端）。
+    const back = createSmartModel({ decisionModel: decision({ authHeader: null }), complete: llm.complete })!;
+    await back.decide(STATE, QUESTIONS);
+    expect(recorded[1]!.headers.authorization).toBe(`Bearer ${KEY}`);
+    expect(recorded[1]!.headers["x-gateway-key"]).toBeUndefined();
+  });
+
+  it("does not use a decision model with a bad auth header, and says so without the key", async () => {
+    const notes: string[] = [];
+    const llm = fakeComplete();
+    const model = createSmartModel({ decisionModel: decision({ authHeader: "Cookie" }), complete: llm.complete, onNote: (n) => notes.push(n) })!;
+    expect((await model.decide(STATE, QUESTIONS)).backend).toBe("llm");
+    expect(recorded).toEqual([]);
+    expect(notes).toEqual([expect.stringContaining("auth header name is not valid")]);
+    expect(notes.join(" ")).not.toContain(KEY);
   });
 
   // 2026-10-16 发布评审：key 绑定主机。daemon 交出来的 keyHost 和 baseUrl 的主机对不上时，不发这个 key。

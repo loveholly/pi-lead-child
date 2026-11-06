@@ -2,7 +2,7 @@
 // 页面（ModelSection.tsx、ModelPicker.tsx、ModelLibrary.tsx）只管画。
 import {
   MODEL_MAX_BACKUPS, parseLeadModelSpec, groupModelsByProvider, flatModelSections,
-  DEFAULT_LOCALE,
+  DEFAULT_LOCALE, fastModelAuthHeaderMessages, fastModelAuthHeaderProblem,
   type BrainModel, type ModelSection, type FastModel, type LeadModelChoice, type Locale, type ModelProvider, type ModelRelease, type ModelSettingsDto,
 } from '@pi-lead-child/protocol';
 
@@ -268,13 +268,18 @@ export function providerFormProblem(
   return urlProblem;
 }
 
-export function fastFormProblem(form: { name: string; baseUrl: string; model: string }, urlProblem: string | null, locale: Locale): string | null {
+export function fastFormProblem(
+  form: { name: string; baseUrl: string; model: string; authHeader?: string }, urlProblem: string | null, locale: Locale,
+): string | null {
   const m = modelMessages(locale);
   if (!form.name.trim()) return m.nameRequired;
   if (form.name.trim().length > 40) return m.nameTooLong;
   if (!form.baseUrl.trim()) return m.addressRequired;
   if (urlProblem) return urlProblem;
   if (!/^[A-Za-z0-9._-]{1,64}$/.test(form.model.trim())) return m.modelNameInvalid;
+  // 鉴权头（2026-11-06）：和 daemon 同一个规则（protocol 的 fast-model-auth.ts）。
+  const headerProblem = fastModelAuthHeaderProblem(form.authHeader ?? '');
+  if (headerProblem) return fastModelAuthHeaderMessages(locale)[headerProblem];
   return null;
 }
 

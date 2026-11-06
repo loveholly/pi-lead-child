@@ -431,6 +431,7 @@ function FastModelForm({ dto, model, onDone }: { dto: ModelSettingsDto; model: F
   const isNew = model === null;
   const { form, setForm, field } = useServerForm({
     name: model?.name ?? '', baseUrl: model?.baseUrl ?? 'https://api.typesafe.ai', model: model?.model ?? 'jev-latest', apiKey: '',
+    authHeader: model?.authHeader ?? '',
   });
   const [message, setMessage] = useState<{ text: string; error: boolean } | null>(null);
   const [tested, setTested] = useState<{ text: string; ok: boolean } | null>(null);
@@ -447,6 +448,8 @@ function FastModelForm({ dto, model, onDone }: { dto: ModelSettingsDto; model: F
       ...(facts.id !== null ? { id: facts.id } : {}),
       name: form.name.trim(), baseUrl: form.baseUrl.trim(), model: form.model.trim(),
       ...(form.apiKey.trim() ? { apiKey: form.apiKey.trim() } : {}),
+      // 鉴权头：填了，或者原来有、现在清空（改回 Authorization）时才发。都没有时不发，旧版 daemon 的严格 schema 照样接受。
+      ...(form.authHeader.trim() || model?.authHeader ? { authHeader: form.authHeader.trim() || null } : {}),
     });
     if (!outcome.ok) {
       setMessage({ text: outcome.error, error: true });
@@ -507,6 +510,11 @@ function FastModelForm({ dto, model, onDone }: { dto: ModelSettingsDto; model: F
           autoCorrect={false}
         />
       </Field>
+      <Field label={m.authHeader}>
+        <TextField testID="model-fast-auth-header" value={form.authHeader} onChangeText={field('authHeader')} placeholder="Authorization"
+          variant="filled" size="sm" mono autoComplete="off" autoCapitalize="none" autoCorrect={false} />
+      </Field>
+      <Text testID="model-fast-auth-header-hint" size="note" tone="secondary">{m.authHeaderHint}</Text>
       {hostChange ? <Text testID="model-fast-host-change" size="note" tone="warning-dark">{keyHostChangeNote(hostChange, source, locale)}</Text> : null}
       <Text testID="model-fast-data-note" size="note" tone="secondary">
         {m.fastDataNote(savedHost ?? (form.baseUrl.trim() ? urlHost(form.baseUrl.trim()) : m.thisAddress))}

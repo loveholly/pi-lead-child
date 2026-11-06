@@ -193,6 +193,59 @@ describe("settings → models through the gateway", () => {
     expect(read.body.modelSettings.fast.models.map((model: any) => [model.id, model.apiKeySet])).toEqual([["jev", false], ["decision-1", true]]);
   });
 
+  // 2026-11-06：公司的 LLM 网关只有 http，要 x-gateway-key 头，值是 key 原文。页面存了以后，「测试」按这个头发，不带 Authorization。
+  it("saves a decision model behind an http gateway with a custom auth header, and tests it with that header", async () => {
+    const seen: Array<{ url: string; headers: Record<string, string | string[] | undefined> }> = [];
+    const gateway = createServer((req, res) => {
+      seen.push({ url: req.url ?? "", headers: req.headers });
+      req.resume();
+      req.on("end", () => {
+        res.writeHead(req.headers["x-gateway-key"] === "gw-key-0123456789" ? 200 : 401, { "content-type": "application/json" });
+        res.end(JSON.stringify({ answers: { ok: { type: "noul", noul: 0.9 } } }));
+      });
+    });
+    await new Promise<void>((resolve) => gateway.listen(0, "127.0.0.1", resolve));
+    try {
+      const logs: string[] = [];
+      daemon = await startDaemon({ dataDir: dir, dbPath, sessionFactory: stubLead().factory as never, log: (line) => logs.push(line), notifyDesktop: () => {} });
+      const issued = redeemPairing(db, createPairing(db, { name: "app", kind: "companion", scopes: ["chat", "tickets:view", "tickets:create"] }).code);
+      const http = async (method: string, path: string, body?: unknown) => {
+        const response = await fetch(`http://127.0.0.1:${daemon!.pairedPort}${path}`, {
+          method,
+          headers: { authorization: `Bearer ${issued.accessToken}`, ...(body ? { "content-type": "application/json" } : {}) },
+          ...(body ? { body: JSON.stringify(body) } : {}),
+        });
+        return { status: response.status, body: await response.json() as any };
+      };
+      const baseUrl = `http://127.0.0.1:${(gateway.address() as { port: number }).port}/gw`;
+      const added = await http(...act("save_fast_model", { name: "decision-1", baseUrl, model: "decision-1", apiKey: "gw-key-0123456789", authHeader: "x-gateway-key" }));
+      expect(added.status).toBe(200);
+      const id = added.body.result.id;
+      expect(config().decision.models.find((entry: any) => entry.id === id)).toMatchObject({ authHeader: "x-gateway-key" });
+
+      const tested = await http(...act("test_fast_model", { id }));
+      expect(tested.status).toBe(200);
+      expect(tested.body.result).toMatchObject({ ok: true });
+      expect(seen.at(-1)!.url).toBe("/gw/v1/systemone");
+      expect(seen.at(-1)!.headers["x-gateway-key"]).toBe("gw-key-0123456789");
+      expect(seen.at(-1)!.headers.authorization).toBeUndefined();
+
+      // 新的页面带 grouping=1，拿到鉴权头；旧版 Companion 不带，收到原来的形状。
+      const read = await http("GET", "/v1/models/settings?grouping=1");
+      expect(Value.Check(ModelSettingsDtoSchema, read.body.modelSettings)).toBe(true);
+      expect(read.body.modelSettings.fast.models.find((model: any) => model.id === id).authHeader).toBe("x-gateway-key");
+      const legacy = await http("GET", "/v1/models/settings");
+      expect(Value.Check(LegacyModelSettingsResponseSchema, legacy.body)).toBe(true);
+
+      expect(readFileSync(join(dir, "config.json"), "utf8")).not.toContain("gw-key-0123456789");
+      expect(JSON.stringify(added.body) + JSON.stringify(tested.body) + JSON.stringify(read.body)).not.toContain("gw-key-0123456789");
+      expect(logs.join("\n")).not.toContain("gw-key-0123456789");
+    } finally {
+      gateway.closeAllConnections();
+      await new Promise<void>((resolve) => gateway.close(() => resolve()));
+    }
+  });
+
   // Lead 模型分组（2026-11-05）：这台假的 vibeproxy 没有详细目录（client_version 回 404），所以 as4/ 先不算账号。
   // 「高级」里把 accountPrefix 打开、保存以后，下一次读设置就按账号分组（目录缓存清掉了）。
   it("sends the grouping fields only on request, and regroups at once after the advanced settings are saved", async () => {

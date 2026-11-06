@@ -10,6 +10,7 @@
 // /v1/decision-model（直觉的主用）和 /v1/lead/models（输入框的模型选择）照旧：它们的 DTO 是严格的契约，这里不往里加字段。
 import { Type, type Static, type TProperties, type TSchema } from "typebox";
 import { DEFAULT_LOCALE, defineMessages, type Locale } from "./i18n.ts";
+import { FAST_MODEL_AUTH_HEADER_PATTERN } from "./fast-model-auth.ts";
 import { LeadModelChoiceSchema } from "./lead-models.ts";
 
 const StrictObject = <T extends TProperties>(properties: T) =>
@@ -33,6 +34,8 @@ export const ModelProviderNameSchema = Type.String({ pattern: MODEL_PROVIDER_NAM
 export const FastModelIdSchema = Type.String({ pattern: "^[a-z0-9][a-z0-9_-]{0,31}$" });
 export const FastModelNameSchema = Type.String({ minLength: 1, maxLength: 40 });
 export const FastModelModelSchema = Type.String({ pattern: "^[A-Za-z0-9._-]{1,64}$" });
+// 直觉的鉴权头名（fast-model-auth.ts）。null 是缺省：key 以 Bearer 放进 Authorization。
+export const FastModelAuthHeaderSchema = Type.String({ pattern: FAST_MODEL_AUTH_HEADER_PATTERN });
 
 // 服务商的接口格式（packages/lead 的 OPENAI_COMPATIBLE_APIS）。
 export const ModelProviderApiSchema = Type.Union([
@@ -128,6 +131,8 @@ export const FastModelSchema = StrictObject({
   apiKeySource: ModelKeySourceSchema,
   apiKeyHost: KeyHostSchema,
   problem: Nullable(Type.String({ maxLength: 500 })),
+  // 鉴权头（2026-11-06）。null：Authorization。可选，只在 grouping=1 时给：旧版 Companion 的严格 schema 不认它。
+  authHeader: Type.Optional(Nullable(FastModelAuthHeaderSchema)),
 });
 export type FastModel = Static<typeof FastModelSchema>;
 
@@ -155,10 +160,11 @@ export type ModelSettingsResponse = Static<typeof ModelSettingsResponseSchema>;
 // 客户端要分组字段时，GET /v1/models/settings 带的查询参数。
 export const MODEL_SETTINGS_GROUPING_QUERY = "grouping=1";
 
-/** 去掉分组的字段：给不带 grouping=1 的客户端（旧版 Companion 的严格 schema 不认这些字段）。 */
+/** 去掉分组的字段和直觉的鉴权头：给不带 grouping=1 的客户端（旧版 Companion 的严格 schema 不认这些字段）。 */
 export function withoutModelGrouping(dto: ModelSettingsDto): ModelSettingsDto {
   return {
     ...dto,
+    fast: { ...dto.fast, models: dto.fast.models.map(({ authHeader: _h, ...model }) => model) },
     brain: {
       ...dto.brain,
       providers: dto.brain.providers.map(({ accountPrefix: _a, accountPrefixActive: _b, capabilities: _c, catalog: _d, ...provider }) => ({
@@ -192,12 +198,14 @@ export const RemoveModelProviderRequestSchema = StrictObject({ name: ModelProvid
 export type RemoveModelProviderRequest = Static<typeof RemoveModelProviderRequestSchema>;
 
 // 添加（不给 id）或修改（给 id）一条直觉。apiKey 的写法同服务商。
+// authHeader：key 放在哪个头里。null、空字符串和 Authorization 都是缺省；不给时不变（新加的是缺省）。
 export const SaveFastModelRequestSchema = StrictObject({
   id: Type.Optional(FastModelIdSchema),
   name: FastModelNameSchema,
   baseUrl: HttpUrlSchema,
   model: FastModelModelSchema,
   apiKey: Type.Optional(Nullable(ApiKeySchema)),
+  authHeader: Type.Optional(Nullable(Type.String({ maxLength: 64 }))),
 });
 export type SaveFastModelRequest = Static<typeof SaveFastModelRequestSchema>;
 

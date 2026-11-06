@@ -7,6 +7,8 @@ export const memoryControllerMessages = defineMessages({
   en: {
     slot: { default: "The default summary model", consolidation: "The model that consolidates observations" },
     noPrimaryDecision: "Intuition has no primary model (Settings → Models).",
+    rerankNeedsBearer: (name: string) =>
+      `${name} sends the key in a custom header. The memory service can send the key only as Authorization: Bearer, so reranking does not use it.`,
     remoteEmbeddingUrl: (problem: string) => `The remote embedding address in config.json: ${problem}`,
     reasonSendNotes: (notes: number, host: string) =>
       `${notes === 1 ? "The 1 note" : `All ${notes} notes`} will go to ${host}`,
@@ -62,6 +64,7 @@ export const memoryControllerMessages = defineMessages({
   zh: {
     slot: { default: "缺省摘要模型", consolidation: "整理观察的模型" },
     noPrimaryDecision: "直觉没有主用（设置 → 模型）",
+    rerankNeedsBearer: (name: string) => `${name} 用自定义头传 key。记忆服务只会用 Authorization: Bearer 传 key，所以重排不用它`,
     remoteEmbeddingUrl: (problem) => `config.json 的远程 embedding 地址：${problem}`,
     reasonSendNotes: (notes, host) => `全部 ${notes} 条笔记会发给 ${host}`,
     reasonReindex: (notes) => `要为 ${notes} 条笔记重建索引：每条一次 LLM 调用，重建完之前按意思召回不完整`,

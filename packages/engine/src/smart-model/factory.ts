@@ -66,6 +66,8 @@ export interface DecisionModelCredentials {
   model: string;
   apiKey: string;
   keyHost: string;
+  /** key 放在哪个头里。不给或 null 时是 Authorization: Bearer。 */
+  authHeader?: string | null;
 }
 
 export interface CreateSmartModelOptions {
@@ -160,6 +162,7 @@ export function createSmartModel(options: CreateSmartModelOptions = {}): SmartMo
         apiKey: credentials.apiKey,
         model,
         endpoint: `${credentials.baseUrl.replace(/\/+$/, "")}/v1/systemone`,
+        ...(credentials.authHeader ? { authHeader: credentials.authHeader } : {}),
         ...(options.jevTimeoutMs ? { timeoutMs: options.jevTimeoutMs } : {}),
         ...(options.fetch ? { fetch: options.fetch } : {}),
         ...(options.random ? { random: options.random } : {}),

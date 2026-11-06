@@ -1,13 +1,16 @@
 // 决策模型（设置 → 模型的「直觉」，2026-10-29，.scratch/model-settings/spec.md D5、D6）在 config.json 和保险库里怎样存。
 //
 // config.json 的 decision：
-//   - models：一条一项，{ id, name, baseUrl, model }。没有 models 时，把旧的 decision.baseUrl、decision.model 读成一条，id 是 jev。
+//   - models：一条一项，{ id, name, baseUrl, model, authHeader? }。authHeader（2026-11-06）是 key 放的头，不写时是 Authorization: Bearer。没有 models 时，把旧的 decision.baseUrl、decision.model 读成一条，id 是 jev。
 //   - chain：分工，第一个主用，后面最多 3 个备用。没有 chain 时只用第一条（和以前一样）。写成空数组：不用直觉，判断都问 LLM。
 //   - llmFallback：都用不了时问 Lead 的哪个模型（provider/model，可以带推理强度）。没有时由 SmartModel 自己选。
 //   写的时候同时写 baseUrl、model（主用的）：退回旧版本的 daemon 时，它读到的还是主用。
 // key 存保险库（sealed-secrets.ts）：jev 用原来的 decision.apiKey（已经存的 key 不用搬），别的用 decision.apiKey.<id>。
 // key 绑定存它时的主机，只发给这个主机。Keychain 或环境变量里的 TYPESAFE_API_KEY 只给主机是 api.typesafe.ai 的条目。
-import { MODEL_MAX_CHAIN, normalizeServiceUrl, SERVICE_URL_MESSAGES, serviceUrlHost, serviceUrlProblem } from "@pi-lead-child/protocol";
+import {
+  fastModelAuthHeaderMessages, fastModelAuthHeaderProblem, MODEL_MAX_CHAIN, normalizeFastModelAuthHeader, normalizeServiceUrl,
+  SERVICE_URL_MESSAGES, serviceUrlHost, serviceUrlProblem,
+} from "@pi-lead-child/protocol";
 import { loadPlcConfig, writePlcConfig } from "@pi-lead-child/core";
 import type { SealedSecrets } from "./sealed-secrets.js";
 
@@ -28,6 +31,8 @@ export interface DecisionEntry {
   baseUrl: string | null;
   host: string | null;
   model: string;
+  // key 放在哪个头里。null 是缺省（Authorization: Bearer）。
+  authHeader: string | null;
   problem: string | null;
 }
 
@@ -44,6 +49,8 @@ export interface DecisionEntryInput {
   name: string;
   baseUrl: string;
   model: string;
+  // 规范化过的头名。null 或不写是缺省。
+  authHeader?: string | null;
 }
 
 export type DecisionSecretName = "decision.apiKey" | `decision.apiKey.${string}`;
@@ -52,10 +59,19 @@ export function decisionSecretName(id: string): DecisionSecretName {
   return id === LEGACY_DECISION_ID ? "decision.apiKey" : `decision.apiKey.${id}`;
 }
 
-function entryOf(id: string, name: string, rawBaseUrl: string, model: string): DecisionEntry {
+function entryOf(id: string, name: string, rawBaseUrl: string, model: string, rawAuthHeader: unknown = undefined): DecisionEntry {
   const problem = serviceUrlProblem(rawBaseUrl);
-  if (problem) return { id, name, baseUrl: null, host: null, model, problem: `${name} 的地址：${SERVICE_URL_MESSAGES[problem]}` };
-  return { id, name, baseUrl: normalizeServiceUrl(rawBaseUrl), host: serviceUrlHost(rawBaseUrl), model, problem: null };
+  if (problem) return { id, name, baseUrl: null, host: null, model, authHeader: null, problem: `${name} 的地址：${SERVICE_URL_MESSAGES[problem]}` };
+  // 手改出来的坏头名：这一条不用（地址当作没有），不悄悄退回 Authorization 把 key 用错误的方式发出去。
+  const headerProblem = typeof rawAuthHeader === "string" ? fastModelAuthHeaderProblem(rawAuthHeader)
+    : rawAuthHeader === undefined || rawAuthHeader === null ? null : "invalid";
+  if (headerProblem) {
+    return { id, name, baseUrl: null, host: null, model, authHeader: null, problem: `${name} 的鉴权头：${fastModelAuthHeaderMessages("zh")[headerProblem]}` };
+  }
+  return {
+    id, name, baseUrl: normalizeServiceUrl(rawBaseUrl), host: serviceUrlHost(rawBaseUrl), model,
+    authHeader: normalizeFastModelAuthHeader(rawAuthHeader as string | null | undefined), problem: null,
+  };
 }
 
 /** 读 config.json 的 decision。config.json 是用户能直接改的文件：不合法的条目跳过，分工里不认识的编号去掉。 */
@@ -65,11 +81,11 @@ export function loadDecisionModels(dataDir: string): DecisionModels {
   if (Array.isArray(decision.models)) {
     for (const raw of decision.models) {
       if (!raw || typeof raw !== "object") continue;
-      const { id, name, baseUrl, model } = raw as Partial<DecisionEntryInput>;
+      const { id, name, baseUrl, model, authHeader } = raw as Partial<DecisionEntryInput>;
       if (typeof id !== "string" || !ID_PATTERN.test(id) || entries.some((entry) => entry.id === id)) continue;
       if (typeof baseUrl !== "string") continue;
       const label = typeof name === "string" && name.trim() ? name.trim().slice(0, 40) : id;
-      entries.push(entryOf(id, label, baseUrl, typeof model === "string" && MODEL_PATTERN.test(model) ? model : DEFAULT_DECISION_MODEL));
+      entries.push(entryOf(id, label, baseUrl, typeof model === "string" && MODEL_PATTERN.test(model) ? model : DEFAULT_DECISION_MODEL, authHeader));
     }
   } else {
     entries.push(entryOf(
@@ -103,7 +119,10 @@ export function writeDecisionModels(
     ...file,
     decision: {
       ...(primary ? { baseUrl: primary.baseUrl, model: primary.model } : {}),
-      models: next.models.map((entry) => ({ id: entry.id, name: entry.name, baseUrl: entry.baseUrl, model: entry.model })),
+      models: next.models.map((entry) => ({
+        id: entry.id, name: entry.name, baseUrl: entry.baseUrl, model: entry.model,
+        ...(entry.authHeader ? { authHeader: entry.authHeader } : {}),
+      })),
       chain: [...next.chain],
       llmFallback: next.llmFallback,
     },
@@ -122,7 +141,10 @@ export function decisionEntryInputs(dataDir: string): DecisionEntryInput[] {
   const loaded = new Set(loadDecisionModels(dataDir).entries.map((entry) => entry.id));
   return decision.models
     .filter((entry) => loaded.has(entry.id))
-    .map((entry) => ({ id: entry.id, name: entry.name || entry.id, baseUrl: entry.baseUrl, model: entry.model || DEFAULT_DECISION_MODEL }));
+    .map((entry) => ({
+      id: entry.id, name: entry.name || entry.id, baseUrl: entry.baseUrl, model: entry.model || DEFAULT_DECISION_MODEL,
+      ...(typeof entry.authHeader === "string" ? { authHeader: entry.authHeader } : {}),
+    }));
 }
 
 export interface DecisionKey {

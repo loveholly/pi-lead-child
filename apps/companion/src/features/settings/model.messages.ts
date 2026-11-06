@@ -125,6 +125,9 @@ export const modelMessages = defineMessages({
     testSaved: 'Test the saved settings',
     deleteFast: 'Delete this intuition model',
     fastInChain: (name: string) => `${name} is still in the intuition assignment. Remove it above first.`,
+    authHeader: 'Auth header',
+    authHeaderHint: 'Empty or Authorization: the key goes in the Authorization header as "Bearer <key>". Another name, such as x-gateway-key: the key goes in that header as it is, and no Authorization header is sent.',
+
     // Lead 模型分组（2026-11-05）：服务商的「高级」和模型库的分段。
     advanced: 'Advanced',
     advancedSummary: (account: boolean, capabilities: string) => `Prefix is account: ${account ? 'yes' : 'no'} · capabilities: ${capabilities}`,
@@ -254,6 +257,9 @@ export const modelMessages = defineMessages({
     testSaved: '测试已保存的配置',
     deleteFast: '删除这条直觉',
     fastInChain: (name) => `${name} 还在直觉的分工里，先在上面移出。`,
+    authHeader: '鉴权头',
+    authHeaderHint: '留空或填 Authorization：key 以「Bearer <key>」放进 Authorization 头。填别的头名（例如 x-gateway-key）：key 原样放进这个头，不再带 Authorization。',
+
     advanced: '高级',
     advancedSummary: (account, capabilities) => `前缀是账号：${account ? '是' : '不是'} · capabilities：${capabilities}`,
     accountPrefix: '前缀是账号',

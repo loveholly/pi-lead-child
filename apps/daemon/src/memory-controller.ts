@@ -48,6 +48,7 @@ import {
   type MemoryTestResponse,
   type SetSummaryModelRequest,
   type SummaryModelSlot,
+  fastModelAuthHeaders,
 } from "@pi-lead-child/protocol";
 import { loadPlcConfig, writePlcConfig, type PlcMemoryConfig } from "@pi-lead-child/core";
 import {
@@ -122,6 +123,10 @@ interface DecisionConfig {
   baseUrl: string | null;
   host: string | null;
   model: string;
+  // key 放在哪个头里。null 是 Authorization: Bearer。
+  authHeader: string | null;
+  // 直觉主用的名字，提示里用。
+  name: string;
   problem: string | null;
 }
 
@@ -267,15 +272,15 @@ export class MemoryController implements MemoryService {
     const first = models.entries[0];
     if (first) return { entry: first, inChain: false };
     return {
-      entry: { id: "jev", name: "jev", baseUrl: DEFAULT_DECISION_BASE_URL, host: serviceUrlHost(DEFAULT_DECISION_BASE_URL), model: "jev-latest", problem: null },
+      entry: { id: "jev", name: "jev", baseUrl: DEFAULT_DECISION_BASE_URL, host: serviceUrlHost(DEFAULT_DECISION_BASE_URL), model: "jev-latest", authHeader: null, problem: null },
       inChain: false,
     };
   }
 
   private decision(): DecisionConfig {
     const { entry, inChain } = this.decisionEntry();
-    if (!inChain) return { baseUrl: null, host: null, model: entry.model, problem: this.m().noPrimaryDecision };
-    return { baseUrl: entry.baseUrl, host: entry.host, model: entry.model, problem: entry.problem };
+    if (!inChain) return { baseUrl: null, host: null, model: entry.model, authHeader: null, name: entry.name, problem: this.m().noPrimaryDecision };
+    return { baseUrl: entry.baseUrl, host: entry.host, model: entry.model, authHeader: entry.authHeader, name: entry.name, problem: entry.problem };
   }
 
   // 主用的 key：设置页存的（绑定 host），否则 Keychain / 环境变量里的（只给 api.typesafe.ai）。
@@ -313,9 +318,11 @@ export class MemoryController implements MemoryService {
   }
 
   // 用决策模型做 reranker：有 key 时才用，否则不用。
+  // 主用要自定义鉴权头（2026-11-06）时也不用：hindsight-api 1.0.0 的 TypeSafe reranker 只会发 Authorization: Bearer，
+  // 没有改头名的设置；交给它只会每次召回都 401。
   private decisionReranker(): HindsightReranker {
     const decision = this.decision();
-    return decision.baseUrl && this.decisionKey(decision.host)
+    return decision.baseUrl && !decision.authHeader && this.decisionKey(decision.host)
       ? { provider: "typesafe", baseUrl: decision.baseUrl, model: decision.model, maxCandidates: this.rerankMaxCandidates() }
       : { provider: "none" };
   }
@@ -747,6 +754,7 @@ export class MemoryController implements MemoryService {
     const m = this.m();
     const problems = [
       this.serviceMessage, remote.problem, reranker.mode !== "none" ? decision.problem : null,
+      (reranker.mode ?? "decision") === "decision" && decision.baseUrl && decision.authHeader ? m.rerankNeedsBearer(decision.name) : null,
       writes.failed ? m.failedWrites(writes.failed, writes.lastError ?? null) : null,
     ].filter((problem): problem is string => Boolean(problem));
     return {
@@ -832,14 +840,19 @@ export class MemoryController implements MemoryService {
   }
 
   // 发一次请求测试连接：不跟随重定向（key 不能被带到别的主机），错误信息里盖掉像密钥的字符串。
-  private async probe(url: string, key: string | null, body: unknown, check: (res: Response) => Promise<MemoryTestResponse>): Promise<MemoryTestResponse> {
+  // key 是字符串时放进 Authorization: Bearer；带 header 时按直觉的鉴权头放（fast-model-auth.ts）。
+  private async probe(
+    url: string, auth: string | { value: string; header: string | null } | null, body: unknown,
+    check: (res: Response) => Promise<MemoryTestResponse>,
+  ): Promise<MemoryTestResponse> {
     const started = Date.now();
+    const key = typeof auth === "string" ? auth : auth?.value ?? null;
     try {
       const res = await (this.options.fetch ?? fetch)(url, {
         method: "POST",
         redirect: "error",
         signal: AbortSignal.timeout(15_000),
-        headers: { "content-type": "application/json", ...(key ? { authorization: `Bearer ${key}` } : {}) },
+        headers: { "content-type": "application/json", ...(key ? fastModelAuthHeaders(typeof auth === "string" ? null : auth?.header, key) : {}) },
         body: json(body),
       });
       if (!res.ok) return { ok: false, message: `HTTP ${res.status}`, latencyMs: Date.now() - started };
@@ -944,7 +957,9 @@ export class MemoryController implements MemoryService {
   decisionCredentials(): DecisionModelCredentials | null {
     const decision = this.decision();
     const key = this.decisionKey(decision.host);
-    return decision.baseUrl && key ? { baseUrl: decision.baseUrl, model: decision.model, apiKey: key.value, keyHost: key.host } : null;
+    return decision.baseUrl && key
+      ? { baseUrl: decision.baseUrl, model: decision.model, apiKey: key.value, keyHost: key.host, ...(decision.authHeader ? { authHeader: decision.authHeader } : {}) }
+      : null;
   }
 
   // 直觉的整条分工（主用在前）。SmartModel 按这个顺序问，都失败时问 LLM。没有 key 或者地址不合法的那一条跳过。
@@ -955,7 +970,11 @@ export class MemoryController implements MemoryService {
       const entry = models.entries.find((candidate) => candidate.id === id);
       if (!entry?.baseUrl) continue;
       const key = decisionKeyFor(entry, this.secrets, this.options.externalSecret);
-      if (key) credentials.push({ baseUrl: entry.baseUrl, model: entry.model, apiKey: key.value, keyHost: key.host });
+      if (!key) continue;
+      credentials.push({
+        baseUrl: entry.baseUrl, model: entry.model, apiKey: key.value, keyHost: key.host,
+        ...(entry.authHeader ? { authHeader: entry.authHeader } : {}),
+      });
     }
     return credentials;
   }
@@ -1028,7 +1047,7 @@ export class MemoryController implements MemoryService {
       throw new MemoryError("invalid_request", m.noKey(entry.name));
     }
     const started = Date.now();
-    return this.probe(`${entry.baseUrl}/v1/systemone`, key.value,
+    return this.probe(`${entry.baseUrl}/v1/systemone`, { value: key.value, header: entry.authHeader },
       { state: "This is a connection test.", model: entry.model, questions: { ok: { type: "noul", instructions: "Is this a connection test?" } } },
       async () => ({ ok: true, message: m.decisionWorks, latencyMs: Date.now() - started }));
   }

@@ -1,7 +1,9 @@
 // Jev 后端：TypeSafe 托管的类型化判断模型（https://docs.typesafe.ai/api.md）。
 // 一次请求 POST /v1/systemone，带 state、model 和一组问题。三种问题对应 choice、score、noul。
-// 用 fetch 直接调，不加 SDK 依赖。密钥只放在 Authorization 头里，不进错误信息和日志。
-import { redactSecretText, serviceUrlProblem, type ServiceUrlProblem } from "@pi-lead-child/protocol";
+// 用 fetch 直接调，不加 SDK 依赖。密钥只放在鉴权头里（缺省 Authorization，也可以是网关要的头），不进错误信息和日志。
+import {
+  fastModelAuthHeaderProblem, fastModelAuthHeaders, redactSecretText, serviceUrlProblem, type ServiceUrlProblem,
+} from "@pi-lead-child/protocol";
 import { deadline, backendFailure, errorText, raceAbort } from "./deadline.js";
 import { argmax, validateSmartAnswers, validateSmartInput } from "./questions.js";
 import {
@@ -28,8 +30,13 @@ const ERROR_CODE = /^[A-Za-z0-9_.-]{1,64}$/;
 export interface JevSmartModelOptions {
   apiKey: string;
   model?: string;
-  /** 只给测试用：本机的桩服务器。只接受 http 或 https。 */
+  /** 端点。不给时是 TypeSafe 的。只接受 http 或 https。 */
   endpoint?: string;
+  /**
+   * key 放在哪个头里（2026-11-06，公司的 LLM 网关要自定义的鉴权头）。不给、null 或 Authorization 时是 `Authorization: Bearer <key>`；
+   * 别的头名时这个头的值是 key 原文，不带 Authorization。
+   */
+  authHeader?: string | null;
   timeoutMs?: number;
   fetch?: typeof fetch;
   /** 打乱选项顺序用的随机数。测试注入它来固定顺序。 */
@@ -198,6 +205,8 @@ export function createJevSmartModel(options: JevSmartModelOptions): SmartModel {
   const model = options.model?.trim() || DEFAULT_JEV_MODEL;
   if (!isValidJevModelName(model)) throw new Error("the Jev model name is not valid");
   const endpoint = checkedEndpoint(options.endpoint ?? JEV_ENDPOINT);
+  if (options.authHeader && fastModelAuthHeaderProblem(options.authHeader)) throw new Error("the Jev auth header name is not valid");
+  const authHeaders = fastModelAuthHeaders(options.authHeader, apiKey);
   const fetchImpl = options.fetch ?? fetch;
   const random = options.random ?? Math.random;
   const defaultTimeout = options.timeoutMs ?? DEFAULT_JEV_TIMEOUT_MS;
@@ -212,7 +221,7 @@ export function createJevSmartModel(options: JevSmartModelOptions): SmartModel {
         const response = await raceAbort(fetchImpl(endpoint, {
           method: "POST",
           headers: {
-            Authorization: `Bearer ${apiKey}`,
+            ...authHeaders,
             "Content-Type": "application/json",
             Accept: "application/json",
           },

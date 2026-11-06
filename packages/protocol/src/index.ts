@@ -1296,6 +1296,7 @@ export * from "./object-links.ts";
 export * from "./conversation-tool-calls.ts";
 export * from "./redaction.ts";
 export * from "./service-url.ts";
+export * from "./fast-model-auth.ts";
 export * from "./web-build.ts";
 export * from "./needs-user.ts";
 export * from "./inbox-notices.ts";

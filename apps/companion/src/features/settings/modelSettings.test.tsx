@@ -323,6 +323,45 @@ describe('the model library', () => {
     expect(perform.mock.calls[2]![2]).toBe('remove_fast_model');
   });
 
+  // 2026-11-06：公司的 LLM 网关要自定义的鉴权头。新加时填头名就带上；不填不发这个字段（旧版 daemon 照样接受）。
+  it('adds a decision model with a custom auth header, and refuses a header the request itself uses', async () => {
+    const perform = vi.fn<Perform>(async (_type, _id, action) => ({
+      target: { type: 'model_settings', id: 'models' }, action, result: { summary: 'ok', note: null, id: 'decision-2' },
+    }));
+    const { runtime } = modelRuntime(settings(), perform);
+    renderWithRuntime(<ModelSection />, runtime);
+    fireEvent.click(screen.getByTestId('model-fast-add-entry'));
+    expect(screen.getByTestId('model-fast-auth-header-hint').textContent).toContain('x-gateway-key');
+    fireEvent.change(screen.getByTestId('model-fast-name'), { target: { value: 'decision-2' } });
+    fireEvent.change(screen.getByTestId('model-fast-url'), { target: { value: 'http://llm-gateway.example.com/gw' } });
+    fireEvent.change(screen.getByTestId('model-fast-model'), { target: { value: 'decision-1' } });
+    fireEvent.change(screen.getByTestId('model-fast-key'), { target: { value: 'gw-key' } });
+    fireEvent.change(screen.getByTestId('model-fast-auth-header'), { target: { value: 'Content-Type' } });
+    fireEvent.click(screen.getByTestId('model-fast-save'));
+    expect(screen.getByTestId('model-fast-form-message').textContent).toContain('used by the request itself');
+    expect(perform).not.toHaveBeenCalled();
+    fireEvent.change(screen.getByTestId('model-fast-auth-header'), { target: { value: 'x-gateway-key' } });
+    await act(async () => { fireEvent.click(screen.getByTestId('model-fast-save')); });
+    expect(inputOf(perform)).toEqual({
+      name: 'decision-2', baseUrl: 'http://llm-gateway.example.com/gw', model: 'decision-1', apiKey: 'gw-key', authHeader: 'x-gateway-key',
+    });
+  });
+
+  it('shows the saved auth header when editing, and clearing it sends null to go back to Authorization', async () => {
+    const perform = vi.fn<Perform>(async (_type, _id, action) => ({
+      target: { type: 'model_settings', id: 'models' }, action, result: { summary: 'ok', note: null, id: 'decision-1' },
+    }));
+    const base = settings();
+    const withHeader = settings({}, { models: base.fast.models.map((entry) => (entry.id === 'decision-1' ? { ...entry, authHeader: 'x-gateway-key' } : entry)) });
+    const { runtime } = modelRuntime(withHeader, perform);
+    renderWithRuntime(<ModelSection />, runtime);
+    fireEvent.click(screen.getByTestId('model-fast-row-decision-1'));
+    expect((screen.getByTestId('model-fast-auth-header') as HTMLInputElement).value).toBe('x-gateway-key');
+    fireEvent.change(screen.getByTestId('model-fast-auth-header'), { target: { value: '' } });
+    await act(async () => { fireEvent.click(screen.getByTestId('model-fast-save')); });
+    expect(inputOf(perform)).toEqual({ id: 'decision-1', name: 'decision-1', baseUrl: 'https://jev.example.com', model: 'jev-latest', authHeader: null });
+  });
+
   it('says the saved key stays with its host when a decision model moves', () => {
     const { runtime } = modelRuntime(settings());
     renderWithRuntime(<ModelSection />, runtime);

@@ -254,7 +254,8 @@ export interface PlcConfigFile {
   decision?: {
     baseUrl?: string;
     model?: string;
-    models?: Array<{ id: string; name: string; baseUrl: string; model: string }>;
+    // authHeader（2026-11-06）：key 放在哪个头里，值是 key 原文。不写时 key 以 Bearer 放进 Authorization。
+    models?: Array<{ id: string; name: string; baseUrl: string; model: string; authHeader?: string }>;
     chain?: string[];
     llmFallback?: string | null;
   };
