@@ -56,6 +56,28 @@ const config = (models: string[] = [], extra: Record<string, unknown> = {}) => n
 });
 
 describe("the Lead model catalog", () => {
+  // magpie（2026-11-05）：没有详细目录，?client_version=pi 也只回普通目录；能力写在 data[] 的每一项里。
+  it("reads image input and windows, but no effort suffixes, from a plain catalog that carries them (magpie)", async () => {
+    const magpie = {
+      data: [
+        {
+          id: "auto/deepseek-flash", owned_by: "deepseek", display_name: "DeepSeek V4.1 Flash", modalities: { input: ["text", "image"] },
+          supported_reasoning_levels: [{ effort: "low" }, { effort: "high" }], context_window: 1_048_576, max_output_tokens: 393_216,
+        },
+        { id: "deepseek/deepseek-v4-pro", owned_by: "deepseek", modalities: { input: ["text"] } },
+        { id: "bailian-token-plan/glm-5.3", owned_by: "bailian-token-plan" },
+      ],
+    };
+    const fetchMagpie = async () => new Response(JSON.stringify(magpie));
+    const { models } = await leadModelCatalog(config(), {}, fetchMagpie as typeof fetch);
+    const flash = models.find((model) => model.id === "auto/deepseek-flash");
+    expect(flash).toMatchObject({
+      name: "DeepSeek V4.1 Flash", input: ["text", "image"], efforts: [], contextWindow: 1_048_576, maxTokens: 393_216,
+    });
+    expect(models.find((model) => model.id === "deepseek/deepseek-v4-pro")?.input).toEqual(["text"]);
+    expect(models.find((model) => model.id === "bailian-token-plan/glm-5.3")?.input).toEqual(["text"]);
+  });
+
   it("reads the account prefix, the upstream, image input and the effort levels", async () => {
     const { models } = await leadModelCatalog(config(), {}, vibeproxy as typeof fetch);
     expect(models.map((model) => [model.id, model.group, model.source])).toEqual([
