@@ -1307,7 +1307,7 @@ function prReviewTemplate(
     deliver?: PrReviewDelivery; review_events?: string[];
   },
   external: boolean,
-): { brief: string; workdir: string | undefined; criteria: string[]; repository: string; record: Record<string, unknown> } {
+): { brief: string; workdir: string | undefined; criteria: string[]; repository: string; pullRequest: number; record: Record<string, unknown> } {
   if (!params.pr_review) throw new Error("template=pr_review needs pr_review: { pr, focus, acceptance }");
   const pr = parsePullRequestRef(params.pr_review.pr);
   const repo = githubRepoRoots(db, pr.owner, pr.repo)[0];
@@ -1320,6 +1320,7 @@ function prReviewTemplate(
     }),
     workdir: repo,
     repository: `${pr.owner}/${pr.repo}`,
+    pullRequest: pr.number,
     // 结构化验收标准（工单 05）：系统把用户的原话按行抄进去，不经 Lead 改写。
     criteria: normalizeCriterionTexts(acceptanceCriteriaFromUserWords(params.pr_review.acceptance), "pr_review.acceptance"),
     record: {
@@ -1913,7 +1914,7 @@ export function createLeadTools(deps: LeadDeps): ToolDefinition<any>[] {
           description: "可以不填：派发时系统按 workdir 是不是 git 仓库、Run 会不会写文件判定",
         })),
         review_pull_request: Type.Optional(Type.Integer({
-          minimum: 1, description: "评审 GitHub PR 时给 PR 编号；workdir 必须是那个仓库",
+          minimum: 1, description: "评审 GitHub PR 时给 PR 编号；workdir 必须是那个仓库。template=pr_review 时可以不给：系统按 pr_review.pr 登记；给了要是同一个编号",
         })),
         pull_request_remote: Type.Optional(Type.String({
           description: "PR 所在的 git remote 名。可以不给：系统用地址指向 PR 所在仓库的那个 remote（按 template=pr_review 的 pr 或 repository 认仓库），"
@@ -2071,6 +2072,13 @@ export function createLeadTools(deps: LeadDeps): ToolDefinition<any>[] {
         if (template && params.acceptance_criteria !== undefined) {
           throw new Error("template=pr_review 的验收标准由系统按行抄用户的原话（pr_review.acceptance），不要另给 acceptance_criteria");
         }
+        // brief 和发布权限清单（pr-review-grant.ts）都按 pr_review.pr 的号码：检出另一个 PR 时，评审读的代码和发到的 PR 对不上。
+        if (template && params.review_pull_request !== undefined && params.review_pull_request !== template.pullRequest) {
+          throw new Error(
+            `review_pull_request=${params.review_pull_request} 和 pr_review.pr 的 #${template.pullRequest} 不是同一个 PR。`
+              + "去掉 review_pull_request（系统按 pr_review.pr 登记），或者把 pr_review.pr 改成要评审的那个 PR。",
+          );
+        }
         const criteria = template?.criteria ?? normalizeCriterionTexts(params.acceptance_criteria ?? []);
         const brief = template?.brief ?? params.brief;
         // 写明了要改的仓库：本机没有 checkout 就由 daemon 在沙箱外 clone（engine 的 repository-checkout.ts，2026-10-29）。
@@ -2099,6 +2107,10 @@ export function createLeadTools(deps: LeadDeps): ToolDefinition<any>[] {
         // 没给 workdir 的轻子 agent（例如市场调查）：不让它在 daemon 的当前目录（部署用的主 checkout）里跑，给它一个
         // 自己的目录（数据目录下的 light-tasks/），沙箱里能写的就是这里（lead-tools-and-routing spec D9）。
         const workdir = given ?? (params.light ? lightTaskDir(deps.dataDir) : undefined);
+        // template=pr_review 也要登记 PR 目标（工单 #17），评审 Run 才在 PR head 的临时检出里跑，而不是 master 的 worktree。
+        // 号码取模板里解析出的 PR（Lead 另给的 review_pull_request 上面已核对过是同一个）。workdir 不是 git 仓库时没法检出，照旧建单。
+        const reviewPullRequest = params.review_pull_request
+          ?? (template && workdir && await gitRunLead(["rev-parse", "--show-toplevel"], workdir) ? template.pullRequest : undefined);
         const relationResults: LinkTicketResult[] = [];
         // 附件（工单 #231）：建单前先取到、核对完，一个不行就不建单。写盘在建单以后。
         const attachments = params.attachments?.length
@@ -2134,11 +2146,11 @@ export function createLeadTools(deps: LeadDeps): ToolDefinition<any>[] {
           if (params.due_at) {
             setItemTime(db, createdId, { dueAt: new Date(params.due_at).toISOString() }, leadSource());
           }
-          if (params.review_pull_request !== undefined) {
+          if (reviewPullRequest !== undefined) {
             // PR 所在的仓库一起记下：检出时按它的地址找 remote，不写死 origin（工单 #212）。
             const pullRequestRepository = template?.repository ?? repository?.key;
             setPullRequestReviewTarget(db, {
-              itemId: createdId, number: params.review_pull_request, actor: "lead",
+              itemId: createdId, number: reviewPullRequest, actor: "lead",
               ...(params.pull_request_remote ? { remote: params.pull_request_remote } : {}),
               ...(pullRequestRepository ? { repository: pullRequestRepository } : {}),
             });
@@ -2231,7 +2243,11 @@ export function createLeadTools(deps: LeadDeps): ToolDefinition<any>[] {
               + relationImpactLine(result),
             ).join("\n")}`
           : "";
-        const templateText = template ? `；按 PR 评审模板建的，brief 里有用户的原话和固定护栏${workdir ? `，workdir=${workdir}` : "，没有找到登记过的本地仓库"}` : "";
+        const templateText = template ? `；按 PR 评审模板建的，brief 里有用户的原话和固定护栏${workdir ? `，workdir=${workdir}` : "，没有找到登记过的本地仓库"}`
+          + (reviewPullRequest !== undefined
+            ? `；评审 Run 在 PR #${reviewPullRequest} head 的临时检出里跑`
+            : "；没有登记 PR 目标：workdir 不是（或还不是）本地的 git 仓库，评审 Run 不会检出 PR head。要检出时取消这张单再建一张，workdir 写这个 PR 所在仓库的本地 checkout")
+          : "";
         const criteriaText = criteria.length ? `；验收标准 ${criteria.length} 条` : "；没有结构化的验收标准";
         const created = getItem(db, id);
         // 审查 L4：给了核查员、却不要求独立核查时，说清楚不会自动派核查。

@@ -109,7 +109,15 @@ export function prReviewBrief(input: PrReviewBriefInput): string {
       `- 描述、改动和文件列表用连接工具读：先 search_connection_tools 找 GitHub 读 PR 的工具，再 call_connection_tool `
         + `读 ${pr.owner}/${pr.repo} 的 PR #${pr.number}（描述、diff、文件列表、CI 检查）。命令在沙箱里跑，沙箱里没有 GitHub 的凭证，\`gh\` 用不了。`,
       "- 提示里有 PR 的临时检出（Pull request checkout 一节）时，在那里读代码、跑测试：依赖不全时在沙箱里装（包仓库在网络白名单里）。"
-        + "没有临时检出时，不要在用户的工作副本里 fetch、checkout 或切分支。",
+        + "没有临时检出时，不要在用户的工作副本里 fetch、checkout 或切分支，也不要自己 export 一份 PR head、重新 install：先用 request_decision 问 Lead。",
+    ].join("\n"),
+    [
+      "## 验证",
+      "- 评审在 PR head 的临时检出上做；不在默认分支的副本或用户的工作副本里跑。",
+      "- 不跑要起浏览器的测试（浏览器里跑的 e2e、截图对比之类）：沙箱里起不来浏览器。这类检查的结果看 CI（连接工具读 PR 的检查结果），失败的检查只引用检查名。"
+        + "名字带 e2e、但不起浏览器的测试照下一条的规则跑。",
+      "- 不做全量构建，不跑全量测试。只跑和这个 PR 改动相关的测试（PR 新增或修改的测试文件，每个最多跑一次）；CI 已经通过的检查不用再跑。",
+      "- 命令输出只看摘要：用 tail、grep 或把日志重定向到文件再 grep；不要 cat 整个日志或整个 diff。",
     ].join("\n"),
     deliver === "post" ? postDelivery(name, events) : returnDelivery(),
     `## 固定护栏（用户确认的规则）\n${[...PR_REVIEW_GUARDRAILS, ...prReviewGuardrails(deliver, name)].join("\n")}`,
