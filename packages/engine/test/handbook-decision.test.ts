@@ -99,6 +99,40 @@ describe("deciding by the handbook", () => {
   });
 });
 
+// #21（#18 的调查）：2026-11-03 的 115 条 Slack 消息全是 tell 级，每条单独叫醒 Lead（约 24 万 token 一轮）；其中 42 条
+// 要回的概率低于门槛。开关关着时门槛从没生效（早返回了「交给你」）。现在低于门槛的并进摘要（digest），不单独叫醒。
+describe("a message that most likely needs no reply, with the switch off", () => {
+  const off = { ...CHANNEL_HANDBOOK_DEFAULTS, autoReply: false };
+
+  it("goes to Lead in a batch (digest) instead of waking it for each message, and stays an ask", () => {
+    expect(decideByHandbook(input("other", { handbook: off, needsReply: 0.2 })))
+      .toMatchObject({ by: "switch", final: "hand", action: { kind: "ask" }, digest: true });
+    expect(decideByHandbook(input("work_build", { handbook: off, needsReply: 0.29 }))).toMatchObject({ digest: true });
+  });
+
+  it("still wakes Lead for a message at or above the line, or without a score", () => {
+    expect(decideByHandbook(input("other", { handbook: off, needsReply: 0.3 })).digest).toBeUndefined();
+    expect(decideByHandbook(input("other", { handbook: off, needsReply: null })).digest).toBeUndefined();
+  });
+
+  it("follows the user's own line when one is set", () => {
+    expect(decideByHandbook(input("other", { handbook: off, needsReply: 0.4, noReplyBelow: 0.5 }))).toMatchObject({ digest: true });
+    expect(decideByHandbook(input("other", { handbook: off, needsReply: 0.2, noReplyBelow: 0.1 })).digest).toBeUndefined();
+  });
+
+  it("keeps waking Lead when the sender answers what you just said, or asks for something sensitive", () => {
+    expect(decideByHandbook(input("other", { handbook: off, needsReply: 0.1, ownMessageAgoMs: 60_000 })).digest).toBeUndefined();
+    const sensitive = decideByHandbook(input("other", { handbook: off, needsReply: 0.1, sensitive: { query_credentials: 0.9 } }));
+    expect(sensitive).toMatchObject({ final: "hand", action: { kind: "ask" } });
+    expect(sensitive.digest).toBeUndefined();
+  });
+
+  it("leaves a closing message and a bot to their own record-only rule", () => {
+    expect(decideByHandbook(input("closing", { handbook: off, closing: "they_thank_you", needsReply: 0.04 }))).toMatchObject({ action: { kind: "skip" } });
+    expect(decideByHandbook(input("other", { handbook: off, needsReply: 0.1, sender: { trust: "colleague", bot: true } }))).toMatchObject({ action: { kind: "skip" } });
+  });
+});
+
 describe("the dispatch bound of a sentence (issue 04)", () => {
   it("turns abilities into a grant bound: PR writes only on that PR, reads on chosen repos and connections", () => {
     expect(abilitiesGrantBound(["read_code", "review_comment"])).toEqual({

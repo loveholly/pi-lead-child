@@ -41,6 +41,13 @@ export const serverMessages = defineMessages({
       cannotSwitchWhileRunning: "This Lead session cannot change the model while it runs",
       switchFailed: (wanted: string, current: string) => `Cannot change to ${wanted}. ${current} is still in use`,
     },
+    // Lead 的模型连续失败到上限，系统不再自动叫醒它（#21）。
+    wakeRetry: {
+      stoppedTitle: (name: string, failures: number) => `${name}'s model failed ${failures} times in a row. Automatic retries stopped`,
+      stoppedBody: (name: string) =>
+        `Check the model and key in Settings. Changing them, sending ${name} a message or restarting the daemon tries again; `
+        + `waiting events go to ${name} after the first successful turn.`,
+    },
     // /stop：daemon 对这条命令的回答，以及停下的那一轮末尾加的一句。
     stop: {
       stopped: (name: string) => `Stopped the turn that ${name} was running.`,
@@ -80,6 +87,12 @@ export const serverMessages = defineMessages({
     model: {
       cannotSwitchWhileRunning: "这个 Lead 会话不能在运行中换模型",
       switchFailed: (wanted, current) => `换不到 ${wanted}，还在用 ${current}`,
+    },
+    wakeRetry: {
+      stoppedTitle: (name, failures) => `${name} 的模型连续失败 ${failures} 次，已停止自动重试`,
+      stoppedBody: (name) =>
+        `请在设置里检查模型和 key。改了它们、给 ${name} 发一条消息或者重启 daemon 都会再试；`
+        + `等着的事在第一次成功的回合以后交给 ${name}。`,
     },
     stop: {
       stopped: (name) => `已停下 ${name} 正在进行的一轮。`,
