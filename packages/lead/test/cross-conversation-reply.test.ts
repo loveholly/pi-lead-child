@@ -9,8 +9,10 @@
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { tempDir } from "@pi-lead-child/core/testing";
-import { ChannelHub, ChannelRegistry, createSlackChannelAdapter, type ChannelMessageService } from "@pi-lead-child/engine";
-import { cardIdOf, FakeAgentTaskDispatcher, FakeSlack, scriptedSmartModel } from "@pi-lead-child/engine/testing";
+// 通道 hub 和上下文包从同一棵树的源码导入，不经过 node_modules 的链接：在别的 worktree 里跑基线时，
+// @pi-lead-child/engine 可能链到另一份代码，回放就不是这棵树的行为了。
+import { ChannelHub, ChannelRegistry, createSlackChannelAdapter, type ChannelMessageService } from "../../engine/src/index.js";
+import { cardIdOf, FakeAgentTaskDispatcher, FakeSlack, scriptedSmartModel } from "../../engine/testing/index.js";
 import { MESSAGE_EVENT_KIND } from "@pi-lead-child/protocol";
 import { getChannelCard, listEvents, openDb, type Db, type EventRecord } from "@pi-lead-child/store";
 import { leadContextPackBlocks, leadMessageEventBlock } from "../src/envelope.js";
@@ -120,19 +122,12 @@ describe("#286: a reply for the user never carries another conversation's conten
     return { channels, zhangCard: cardIdOf(db, zhang)!, ethanCard, ethanEvent: messageEventOf(ethanCard) };
   }
 
-  it("keeps the user's words from another conversation out of what Lead reads for 「啥意思」, so the reply cannot quote them", async () => {
+  // 回放本身：只断言 X 不出现。旧代码上这条失败在「回复里有 X」：related 带进了用户和张三聊的话，假 Lead 拿它解释「啥意思」。
+  it("does not put the user's words from another conversation into the reply to 「啥意思」", async () => {
     const { channels, ethanCard, ethanEvent } = await replay();
-
-    // 上下文包：用户和张三聊的话只是时间近，没提到同一个对象、也没提到 Ethan，不放进来。
-    const context = ethanEvent.payload.context as Record<string, any>;
-    expect(JSON.stringify(context.related)).not.toContain(X);
     const input = leadInputFor(ethanEvent);
-    expect(input).not.toContain(X);
-    // 这个对话没有前文：交给 Lead 的文字让它先读这个对话，看不出就不猜。
-    expect(input).toContain("这个对话里没有记下前文");
-    expect(input).toContain("read_channel_conversation");
 
-    // 假 Lead 照出事的样子回复：Ethan 收到的回复不提 X。
+    // 假 Lead 照出事的样子回复。Ethan 收到的回复、卡上的草稿和发出去的话都不提 X。
     const sends: Array<{ conversation: string; text: string }> = [];
     const replied = await confusedLead(input, tools(channels, sends)("reply_to_source"));
     expect(replied).not.toContain(X);
@@ -141,6 +136,19 @@ describe("#286: a reply for the user never carries another conversation's conten
     const card = getChannelCard(db, ethanCard)!;
     expect(JSON.stringify([card.sent, card.draft])).not.toContain(X);
     expect(slack.sent("D0ETHAN").map((message) => message.text).join("\n")).not.toContain(X);
+
+    // 原因在输入里：Lead 读到的上下文包和交给它的文字都没有 X（用户和张三聊的话只是时间近，没提到同一个对象、也没提到 Ethan）。
+    const context = ethanEvent.payload.context as Record<string, any>;
+    expect(JSON.stringify(context.related)).not.toContain(X);
+    expect(input).not.toContain(X);
+  });
+
+  // 新加的提示（和 X 无关，单独一条）：这个对话没有前文时，先读这个对话，看不出就不猜。
+  it("tells Lead to read the conversation first when it has no earlier messages", async () => {
+    const { ethanEvent } = await replay();
+    const input = leadInputFor(ethanEvent);
+    expect(input).toContain("这个对话里没有记下前文");
+    expect(input).toContain("read_channel_conversation");
   });
 
   it("still brings the user's recent words from another conversation when they name the sender, and marks them as another conversation", async () => {
