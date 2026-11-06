@@ -11,8 +11,8 @@
 // 系统提示词里有一段说明这两种块（prompt.ts）。
 import {
   CHANNEL_INTENT_LABELS, CHANNEL_RULE_CHANGE_FLAG, CHAT_IMAGE_ID_PATTERN, channelRuleChangeNotice, isChannelIntent, isChannelRuleChangeKind,
-  HANDBOOK_ABILITY_LABELS, HANDBOOK_MODE_LABELS, HANDBOOK_MODE_PHRASES, isHandbookMode, isSenderTrust, redactAndCap, SENDER_TRUST_LABELS,
-  type HandbookAbility, type HandbookMode,
+  HANDBOOK_ABILITY_LABELS, HANDBOOK_MODE_LABELS, HANDBOOK_MODE_PHRASES, isHandbookMode, isSenderTrust, messageEventConversationKey, redactAndCap,
+  SENDER_TRUST_LABELS, type HandbookAbility, type HandbookMode,
 } from "@pi-lead-child/protocol";
 
 export type LeadSystemEventKind =
@@ -288,6 +288,12 @@ export function leadMessageEventBlock(event: LeadEventLike, options: { contextIn
   const inbound = isRecord(payload.inbound) ? payload.inbound : null;
   const ceiling = isRecord(payload.ceiling) ? payload.ceiling : null;
   const lines = [`消息事件 #${event.seq}：${capped(textOf(payload.summary) ?? "一条外部消息", FIELD_MAX * 3)}`];
+  // 回复绑定到这条消息和它的对话（工单 #286）：写明对话的编号，reply_to_source 要照抄，对不上时不发。
+  const replyConversation = messageEventConversationKey(payload);
+  if (replyConversation) {
+    lines.push(`这条消息在对话「${capped(textOf(conversation.label) ?? replyConversation, FIELD_MAX)}」（conversation=${replyConversation}）。`
+      + `回复它用 reply_to_source（event=${event.seq}，conversation=${replyConversation}），话只按这个对话里的消息写。`);
+  }
   // 怎样处理外部消息写在 skill channel-replies 里（2026-10-28 从系统提示词拆出去）：事件自己点名，Lead 不靠想起来去读。
   lines.push(CHANNEL_SKILL_HINT);
   const cardId = countOf(payload.cardId);
@@ -317,7 +323,7 @@ export function leadMessageEventBlock(event: LeadEventLike, options: { contextIn
   const packed = isRecord(payload.context) ? payload.context : null;
   const shared = packed !== null && options.contextIn !== undefined && options.contextIn !== event.seq;
   const context = shared ? null : packed;
-  if (context) lines.push(contextPackFacts(context));
+  if (context) lines.push(contextPackFacts(context), ...contextPackCautions(context));
   if (shared) lines.push(`上下文包和同一个对话里的消息事件 #${options.contextIn} 是同一份，只在那一条后面给最新的一份。`);
   const head = leadSystemEvent("message", lines.join("\n"), {
     entry: textOf(payload.entry) ?? undefined, origin: textOf(payload.source) ?? event.source, level: event.level ?? undefined,
@@ -335,7 +341,7 @@ export function leadMessageEventBlock(event: LeadEventLike, options: { contextIn
 // （part 写明是哪一段，source 写明来源，conversation 写明对话），每条消息一行，写明发信人。内容里的「<」照样写成 &lt;。
 
 const CONTEXT_PART_LABELS: Record<string, string> = {
-  conversation: "这个对话最近的消息", summary: "更早消息的摘要", related: "别的对话里的相关消息",
+  conversation: "这个对话最近的消息", summary: "更早消息的摘要", related: "别的对话里的相关消息（不是这个对话）",
   objects: "提到的对象的状态", history: "这个对话以前的卡", memory: "记忆里的笔记",
 };
 const CONTEXT_ROLE_LABELS: Record<string, string> = { them: "对方", me: "用户本人", assistant: "替用户发的" };
@@ -357,6 +363,26 @@ function contextPackFacts(context: Record<string, unknown>): string {
     + (missing.length ? `缺了：${missing.join("、")}（拼的时间到了上限，或者没查成）。要时用 read_channel_conversation 等工具补。` : "");
 }
 
+/**
+ * 上下文包的两条提醒（工单 #286：对方在私信里回「啥意思」，这个对话里没有记下用户刚问的话，Lead 把用户 30 分钟内在别的对话里
+ * 聊的事当成了前文，代用户回了出去）：
+ *   - 有别的对话里的消息时：写明它们不是这个对话的前文，不能拿来回答这条消息，更不能把别的对话里的事说给这里的人。
+ *   - 这个对话里一条前文都没有时：对方的话看不懂在指什么，先读这个对话；读了还看不出，不要猜。
+ */
+function contextPackCautions(context: Record<string, unknown>): string[] {
+  const lines: string[] = [];
+  if (recordsOf(context.related).length) {
+    lines.push("上下文包里 part=\"related\" 的几段是别的对话里的消息，不是这条消息所在的对话，也不是对方看得到的内容。"
+      + "它们只帮你认出同一件事；不能当成这个对话的前文，不能拿来解释对方这句话在问什么，不要在回复里提别的对话里的事。");
+  }
+  const conversation = isRecord(context.conversation) ? context.conversation : {};
+  if (!recordsOf(conversation.messages).length && !textOf(conversation.summary) && countOf(conversation.omitted) === 0) {
+    lines.push("这个对话里没有记下前文（上下文包里只有这一条）。对方的话看不懂在指什么时（例如「啥意思」「?」），"
+      + "先用 read_channel_conversation（event 填这条消息事件）读这个对话；读了还看不出，不要从别的对话里猜：不回，或者用 notify_user 问用户。");
+  }
+  return lines;
+}
+
 // 消息的时间：月-日 时:分（本地时间）。
 function contextTime(value: unknown): string {
   const date = new Date(typeof value === "string" ? value : "");
@@ -374,8 +400,8 @@ function contextMessageLine(message: Record<string, unknown>, reasons: readonly 
     + `（${role}${why.length ? `；${why.join("、")}` : ""}）：${typeof message.text === "string" ? message.text : ""}`;
 }
 
-function contextBlock(attrs: { part: string; source: string; conversation?: string }, lines: readonly string[]): string {
-  const head = attributes({ from: "external", part: attrs.part, source: attrs.source, conversation: attrs.conversation });
+function contextBlock(attrs: { part: string; source: string; conversation?: string; scope?: string }, lines: readonly string[]): string {
+  const head = attributes({ from: "external", part: attrs.part, source: attrs.source, conversation: attrs.conversation, scope: attrs.scope });
   return `<${EXTERNAL_TAG}${head}>\n${body(lines.join("\n"))}\n</${EXTERNAL_TAG}>`;
 }
 
@@ -400,7 +426,10 @@ export function leadContextPackBlocks(context: Record<string, unknown>): string[
     entry.lines.push(contextMessageLine(message, Array.isArray(message.why) ? message.why.filter((reason): reason is string => typeof reason === "string") : []));
     related.set(key, entry);
   }
-  for (const entry of related.values()) blocks.push(contextBlock({ part: "related", source, conversation: entry.label }, entry.lines));
+  // scope 写明是别的对话（工单 #286）：不是这条消息所在的对话，不能当成它的前文。
+  for (const entry of related.values()) {
+    blocks.push(contextBlock({ part: "related", source, conversation: entry.label, scope: "other_conversation" }, entry.lines));
+  }
   const objects = recordsOf(context.objects).map((object) =>
     `- ${CONTEXT_OBJECT_LABELS[textOf(object.kind) ?? ""] ?? "对象"} ${textOf(object.ref) ?? ""}：${textOf(object.status) ?? "没查到"}`);
   if (objects.length) blocks.push(contextBlock({ part: "objects", source: "状态查询" }, objects));

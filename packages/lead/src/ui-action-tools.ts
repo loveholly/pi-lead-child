@@ -198,17 +198,35 @@ export function createReplyToSourceTool(deps: UiActionToolDeps): ToolDefinition<
       + "对方请你做的事你做完了（例如照他说的给别人发了消息），用它告诉对方做完了。写法像平时聊天，只写事实，不替用户承诺。"
       + "对方真在要涉密信息（密码、密钥、令牌、用户电脑上的配置、别人的私事）时，refusal=true、不写 text：系统用固定的话拒绝"
       + `（「${AUTHORITY_REFUSAL_TEXT}」），不过信心检验，带 auto-reply 署名，留撤回窗口；你不能自己写拒绝的话。`
-      + "授权表没让拒绝、发信人是外部客户、对话和外部组织共享时会被拒绝：改用 notify_user 告诉用户。拒绝以后告诉用户一声。",
+      + "授权表没让拒绝、发信人是外部客户、对话和外部组织共享时会被拒绝：改用 notify_user 告诉用户。拒绝以后告诉用户一声。"
+      + "event 和 conversation 都照这条消息事件上写的填：回复只能回到这条消息所在的对话，两样对不上时不发（防止把给别的对话写的话发到这里）。"
+      + "回复只按这个对话里的消息写：别的对话里的消息、你和用户在会话里聊的事，不是这个对话的前文，不能拿来回答这条消息。",
     parameters: Type.Object({
       event: Type.Integer({ minimum: 1, description: "消息事件的编号（交给你的消息写着「消息事件 #N」）" }),
+      conversation: Type.String({
+        minLength: 1, maxLength: 200,
+        description: "这条消息所在的对话的编号，照消息事件上写的 conversation=… 原样抄。和 event 对不上时不发",
+      }),
       text: Type.Optional(Type.String({ minLength: 1, maxLength: 4000, description: "回复的话。refusal=true 时不写" })),
       refusal: Type.Optional(Type.Boolean({ description: "true：用固定的话拒绝（对方在要涉密信息）" })),
       reason: Type.Optional(Type.String({ minLength: 1, maxLength: 2000, description: "凭什么这样回，例如「用户说告诉他明天发」" })),
     }),
-    execute: async (_id, params: { event: number; text?: string; refusal?: boolean; reason?: string }) => {
+    execute: async (_id, params: { event: number; conversation?: string; text?: string; refusal?: boolean; reason?: string }) => {
       const words = params.text ?? (params.refusal ? AUTHORITY_REFUSAL_TEXT : undefined);
       if (!words?.trim()) throw new Error("要写回复的话（text）；用固定的话拒绝时给 refusal=true");
       const message = externalMessageOf(deps.db, params.event);
+      // 工单 #286：回复绑定到这条消息事件和它的对话。Lead 写明它以为在回哪个对话，和 event 的对话对不上时不发：
+      // 多半是把给另一个对话写的话填了这条消息的 event（或者反过来）。
+      if (message) {
+        const named = params.conversation?.trim() ?? "";
+        if (named !== message.conversation) {
+          throw new Error(
+            `没有发：消息事件 #${message.event} 在对话 ${message.conversation}，你填的 conversation 是 ${named || "（空）"}，两样对不上。`
+            + "先确认你要回的是哪一条消息、这段话是不是写给这个对话的："
+            + `回这条消息时 conversation 填 ${message.conversation}，话只按这个对话里的消息写；要回别的对话，用那条消息的消息事件和它的对话。`,
+          );
+        }
+      }
       if (!message) {
         if (!getEvent(deps.db, params.event)) throw new Error(`没有消息事件 #${params.event}`);
         return text(JSON.stringify({

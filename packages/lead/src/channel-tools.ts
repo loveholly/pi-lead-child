@@ -13,7 +13,7 @@
 import { Type } from "typebox";
 import { defineTool, resizeImage, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import {
-  EXTERNAL_REVIEW_EVENTS, GRANT_INTENTS, MESSAGE_EVENT_KIND, type ChannelCardDto, type ChannelCardState, type GrantIntent, type GrantReviewEvent,
+  EXTERNAL_REVIEW_EVENTS, GRANT_INTENTS, MESSAGE_EVENT_KIND, messageEventConversationKey, type ChannelCardDto, type ChannelCardState, type GrantIntent, type GrantReviewEvent,
 } from "@pi-lead-child/protocol";
 import { getEvent, type Db } from "@pi-lead-child/store";
 
@@ -89,9 +89,7 @@ export function externalMessageOf(db: Db, eventSeq: number): { event: number; co
   if (!event) return null;
   const payload = event.payload;
   if (event.kind === MESSAGE_EVENT_KIND && payload.entry === "external") {
-    const replyTo = payload.replyTo && typeof payload.replyTo === "object" ? payload.replyTo as Record<string, unknown> : {};
-    const conversation = payload.conversation && typeof payload.conversation === "object" ? payload.conversation as Record<string, unknown> : {};
-    const key = typeof replyTo.conversation === "string" ? replyTo.conversation : typeof conversation.key === "string" ? conversation.key : null;
+    const key = messageEventConversationKey(payload);
     return key ? { event: event.seq, conversation: key, cardId: typeof payload.cardId === "number" ? payload.cardId : null } : null;
   }
   if (payload.handedBack === true && typeof payload.messageEvent === "number") return externalMessageOf(db, payload.messageEvent);

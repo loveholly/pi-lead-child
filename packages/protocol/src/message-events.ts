@@ -229,3 +229,15 @@ export const MessageReceivedPayloadSchema = Type.Object({
   }), { maxItems: 8 })),
 });
 export type MessageReceivedPayload = Static<typeof MessageReceivedPayloadSchema>;
+
+/**
+ * 一条外部通道的消息事件回复到哪个对话（工单 #286）：回复目标的对话（replyTo.conversation），没有时用这条消息所在的对话。
+ * 回复的工具和出站层都按它核对「这条回复是给这条消息的」：event 和对话对不上时不发。不是外部通道的消息事件时是 null。
+ */
+export function messageEventConversationKey(payload: Record<string, unknown>): string | null {
+  if (payload.entry !== "external") return null;
+  const replyTo = payload.replyTo && typeof payload.replyTo === "object" ? payload.replyTo as Record<string, unknown> : {};
+  const conversation = payload.conversation && typeof payload.conversation === "object" ? payload.conversation as Record<string, unknown> : {};
+  if (typeof replyTo.conversation === "string" && replyTo.conversation) return replyTo.conversation;
+  return typeof conversation.key === "string" && conversation.key ? conversation.key : null;
+}

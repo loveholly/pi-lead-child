@@ -80,7 +80,7 @@ import {
   type ChannelLeadDecision, type ChannelLeadStage,
   type ChannelReplyDecision, type ChannelReplyDraftKind, type ChannelReplyLabel, type ChannelLookupCheckStatus, type ConnectionSource, type GrantIntent,
   type ExternalGrantScope, type GrantReviewEvent, type IntentGrantBound, type LookupSource, isExternalReviewEvent,
-  MESSAGE_CONTEXT_EVENT_KIND, MESSAGE_EVENT_KIND, type MessageReceivedPayload,
+  MESSAGE_CONTEXT_EVENT_KIND, MESSAGE_EVENT_KIND, messageEventConversationKey, type MessageReceivedPayload,
 } from "@pi-lead-child/protocol";
 import { LLM_BACKEND } from "../smart-model/llm.js";
 import type { SmartModel, SmartTextComplete } from "../smart-model/types.js";
@@ -1837,6 +1837,25 @@ export class ChannelHub {
     return { card: getChannelCard(this.db, latest.id)!, reasons: failed ? [failed] : [] };
   }
 
+  /**
+   * 回复绑定到触发它的消息事件（工单 #286）：event 要是外部通道的消息事件（或者带着它的子 agent 交回），而且它的对话就是
+   * 要发的对话。不是时抛 invalid_action，什么都不发。
+   */
+  private assertReplyBelongs(conversationId: string, eventSeq: number): void {
+    let event = getEvent(this.db, eventSeq);
+    if (event && event.kind !== MESSAGE_EVENT_KIND && event.payload.handedBack === true && typeof event.payload.messageEvent === "number") {
+      event = getEvent(this.db, event.payload.messageEvent);
+    }
+    const key = event?.kind === MESSAGE_EVENT_KIND ? messageEventConversationKey(event.payload) : null;
+    if (!key) throw new ChannelActionError("invalid_action", `#${eventSeq} 不是外部通道的消息事件：回复要填对方那条消息的消息事件`);
+    if (key !== conversationId) {
+      throw new ChannelActionError(
+        "invalid_action",
+        `没有发：消息事件 #${eventSeq} 在对话 ${key}，不在 ${conversationId}。回复只能回到那条消息所在的对话；先确认这段话是写给哪个对话的`,
+      );
+    }
+  }
+
   // Lead 回复的是哪一条：给了消息事件时是它最后一条入站事件（编辑也算），否则是卡上最新的一条。
   private replyForSeq(card: ChannelCard, eventSeq: number | undefined): number {
     const event = eventSeq === undefined ? undefined : getEvent(this.db, eventSeq);
@@ -1918,6 +1937,8 @@ export class ChannelHub {
     },
   ): Promise<ChannelSentMessage> {
     const source = conversationId.split(":")[0] ?? "";
+    // 工单 #286：回复一条消息事件的（event）只能发到那条消息所在的对话。对不上时什么都不发：多半是给别的对话写的话。
+    if (input.event !== undefined) this.assertReplyBelongs(conversationId, input.event);
     const adapter = this.options.registry.get(source);
     if (!adapter?.capabilities.reply || !adapter.resolveConversation) throw new ChannelActionError("unavailable", `来源 ${source} 不能直接发消息`);
     const context = await this.context(adapter);
@@ -2694,8 +2715,15 @@ export class ChannelHub {
     const event = this.messageEventOf(card.id, forSeq);
     const verdict = input.decision === "hand_over" ? "交给用户" : "问用户";
     const next = `结论是${verdict}（${input.reason}）。${event ? `消息事件 #${event}：用 read_channel_conversation（event=${event}）看子 agent 查到的；` : ""}`
-      + `要用户决定的用 notify_user${event ? `（event=${event}）` : ""}推给他，带你按查到的事实写的草稿；你有把握的用 reply_to_source 回复`;
+      + `要用户决定的用 notify_user${event ? `（event=${event}）` : ""}推给他，带你按查到的事实写的草稿；`
+      + `你有把握的用 reply_to_source${event ? `（event=${event}，conversation=${this.replyConversationOf(event) ?? card.objectKey}）` : ""}回复`;
     return { level: "tell", fields: { handedBack: true, messageEvent: event, intent: input.intent, reason: input.reason }, next };
+  }
+
+  // 一条消息事件回复到哪个对话（reply_to_source 的 conversation 要填的）。
+  private replyConversationOf(eventSeq: number): string | null {
+    const event = getEvent(this.db, eventSeq);
+    return event ? messageEventConversationKey(event.payload) : null;
   }
 
   // 这张卡的消息事件（Lead 的通用工具按它找卡）：先找这条消息的，没有时用这张卡最新的。并进编辑被取代的不算。
