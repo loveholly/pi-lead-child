@@ -201,6 +201,25 @@ describe("李雷 on 10-26: the answer is in the user's DM with Ivy (spec D5 item
   });
 });
 
+describe("#286: the user's recent words elsewhere need a link to this message (spec D5 item 2)", () => {
+  it("leaves out what the user said in another DM in the last 30 minutes when it names neither an object nor the sender", async () => {
+    clock = new Date("2026-11-06T09:00:00.000Z");
+    const channels = hub();
+    await deliver(channels, slack.dm("U0ZHANG", "今天的电脑安全扫描你那边跑完了吗？"));
+    pass(5 * MINUTE);
+    await deliver(channels, slack.selfReply("D0ZHANG", "跑完了，随口担心了一下摄像头和麦克风"));
+    pass(MINUTE);
+    await deliver(channels, slack.selfReply("D0ZHANG", "Ethan 下午也要跑一次"));
+    pass(5 * MINUTE);
+    await deliver(channels, slack.dm("U0ETHAN", "啥意思"));
+
+    const context = contextOf(latestMessageEvent())!;
+    // 只是时间近的那句不在；提到发信人的那句在。
+    expect(JSON.stringify(context.related)).not.toContain("摄像头");
+    expect(context.related).toEqual([expect.objectContaining({ role: "me", text: "Ethan 下午也要跑一次", why: ["user_recent"] })]);
+  });
+});
+
 describe("limits and the conversation summary (spec D5 item 1)", () => {
   it("replaces the earliest messages with a summary written by the memory curator when the conversation passes 20 messages", async () => {
     const prompts: Array<{ prompt: string; purpose: string }> = [];

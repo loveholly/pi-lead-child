@@ -191,6 +191,8 @@ const messageFrom = (call: FakeCall, sender: string): string | null => {
 };
 // 输入里写着的消息事件编号，取最新的一条（同一个对话的几条合成一次时，Lead 按最新的那条处理）。
 const latestEventIn = (text: string) => Math.max(...[...text.matchAll(/消息事件 #(\d+)/gu)].map((match) => Number(match[1])));
+// 消息事件上写的回复目标（工单 #286）：reply_to_source 的 conversation 照它抄。
+const conversationIn = (text: string, event: number) => new RegExp(`reply_to_source（event=${event}，conversation=([^）]+)）`, "u").exec(text)?.[1] ?? "";
 
 // ── 读落库的事实 ──
 
@@ -458,7 +460,7 @@ describe("spec acceptance: replaying 10-26 (unified-message-events 11)", () => {
           })));
           results.push(await send("slack:@U0NINA", "Nina，PROJ-34469 麻烦改成已修复。"));
           results.push(await send("slack:@U0LUCAS", "Lucas，PROJ-34470 麻烦确认一下。"));
-          results.push(await attempt(errors, async () => parsed(await live("reply_to_source").execute("call", { event, text: "已经分别发给 Nina 和 Lucas 了。" }))));
+          results.push(await attempt(errors, async () => parsed(await live("reply_to_source").execute("call", { event, conversation: conversationIn(input, event), text: "已经分别发给 Nina 和 Lucas 了。" }))));
           return { say: "Ivy 让我按映射通知两个人，已经发了，也回复了 Ivy。" };
         }
         return { say: "NO_REPLY" };
@@ -1025,7 +1027,7 @@ describe("spec invariants (unified-message-events 11)", () => {
         const input = messageFrom(call, "Sunny");
         if (input && !replied) {
           replied = await attempt(errors, async () => parsed(await live("reply_to_source").execute("call", {
-            event: latestEventIn(input), text: "来的，周五见。",
+            event: latestEventIn(input), conversation: conversationIn(input, latestEventIn(input)), text: "来的，周五见。",
           })));
         }
         return { say: "NO_REPLY" };

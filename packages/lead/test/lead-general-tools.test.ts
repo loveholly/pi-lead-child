@@ -126,14 +126,14 @@ describe("Lead's general tools (unified-message-events 05)", () => {
       },
     };
     const event = externalMessage();
-    await textOf("reply_to_source", { event, refusal: true, reason: "Ivy 在要 staging 的密码" });
-    await textOf("reply_to_source", { event, refusal: true, text: "密码不能给你。" });
+    await textOf("reply_to_source", { event, conversation: "slack:D0IVY:main", refusal: true, reason: "Ivy 在要 staging 的密码" });
+    await textOf("reply_to_source", { event, conversation: "slack:D0IVY:main", refusal: true, text: "密码不能给你。" });
     expect(sends).toMatchObject([
       ["slack:D0IVY:main", { text: AUTHORITY_REFUSAL_TEXT, words: "assistant", event, refusal: true, forUser: false }],
       ["slack:D0IVY:main", { text: "密码不能给你。", refusal: true }],
     ]);
     // 不是固定拒绝时要写回复。
-    await expect(textOf("reply_to_source", { event })).rejects.toThrow(/text/u);
+    await expect(textOf("reply_to_source", { event, conversation: "slack:D0IVY:main" })).rejects.toThrow(/text/u);
     expect(CHANNEL_SKILL).toMatch(/refusal=true/u);
     for (const text of [LEAD_SYSTEM_PROMPT, CHANNEL_SKILL]) {
       expect(text).not.toMatch(/不要回，用 notify_user 告诉用户/u);

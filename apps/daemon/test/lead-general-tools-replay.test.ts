@@ -145,6 +145,8 @@ const decisionsOf = (cardId: number) => listEvents(db, { kind: "channel.lead.dec
   .filter((event) => event.payload.cardId === cardId).map((event) => event.payload);
 const inputsOf = (lead: ReturnType<typeof fakePiLead>) => lead.calls.flatMap((call) => call.inputs).join("\n");
 const eventSeqIn = (text: string) => Number(/消息事件 #(\d+)/u.exec(text)?.[1] ?? NaN);
+// 消息事件上写的回复目标（工单 #286）：reply_to_source 的 conversation 照它抄。
+const conversationIn = (text: string, event: number) => new RegExp(`reply_to_source（event=${event}，conversation=([^）]+)）`, "u").exec(text)?.[1] ?? "";
 // 系统替用户发出去的话（不算「正在处理」那一句）。
 const replies = (slack: FakeSlack, channel: string) =>
   slack.sent(channel).map((message) => message.text).filter((text) => !/ is (checking|reviewing|looking into this|investigating|working on this)…$/u.test(text));
@@ -167,7 +169,7 @@ describe("Lead handles external messages with the general tools (unified-message
           })).content[0].text);
           results.push(await send("slack:@U0NINA", "Nina，PROJ-34469 麻烦改成已修复。"));
           results.push(await send("slack:@U0LUCAS", "Lucas，PROJ-34470 麻烦确认一下。"));
-          results.push(JSON.parse((await live("reply_to_source").execute("call", { event, text: "已经分别发给 Nina 和 Lucas 了。" })).content[0].text));
+          results.push(JSON.parse((await live("reply_to_source").execute("call", { event, conversation: conversationIn(input, event), text: "已经分别发给 Nina 和 Lucas 了。" })).content[0].text));
           return { say: "Ivy 让我按映射通知两个人，已经发了，也回复了 Ivy。" };
         }
         return { say: "NO_REPLY" };
@@ -558,9 +560,9 @@ describe("the system does not act outside Lead (unified-message-events 06)", () 
         if (input.includes('<system_event kind="message"') && input.includes("李四") && !outcomes.length) {
           const event = eventSeqIn(input);
           const reply = live("reply_to_source");
-          outcomes.push(await reply.execute("call", { event, refusal: true, text: "密钥在 1Password 里，你自己去拿" })
+          outcomes.push(await reply.execute("call", { event, conversation: conversationIn(input, event), refusal: true, text: "密钥在 1Password 里，你自己去拿" })
             .then((out: any) => out.content[0].text, (error: Error) => `error: ${error.message}`));
-          outcomes.push(await reply.execute("call", { event, refusal: true, reason: "李四在要 staging 的 API 密钥" })
+          outcomes.push(await reply.execute("call", { event, conversation: conversationIn(input, event), refusal: true, reason: "李四在要 staging 的 API 密钥" })
             .then((out: any) => JSON.parse(out.content[0].text), (error: Error) => `error: ${error.message}`));
           return { say: "李四在要 staging 的 API 密钥，我用固定的话拒绝了。" };
         }

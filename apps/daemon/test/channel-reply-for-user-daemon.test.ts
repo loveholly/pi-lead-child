@@ -105,7 +105,9 @@ describe("Lead replies in a channel for the user", () => {
     // 2. 用户本人在网页上说「帮我回张三，说能来，三点以后到」：Lead 用 reply_to_source 代他回复，不过信心检验，带 confirmed by 署名。
     await userTurn("turn-reply", "帮我回张三，说能来，三点以后到");
     const event = listEvents(db, { kind: MESSAGE_EVENT_KIND }).filter((entry) => entry.payload.cardId === zhang).at(-1)!.seq;
-    const sent = await result("reply_to_source", "turn-reply", { event, text: "能来，三点以后到。", reason: "用户说帮我回张三：能来，三点以后到" });
+    const sent = await result("reply_to_source", "turn-reply", {
+      event, conversation: (getEvent(db, event)!.payload.conversation as { key: string }).key, text: "能来，三点以后到。", reason: "用户说帮我回张三：能来，三点以后到",
+    });
     expect(sent).toMatchObject({
       authority: "on_behalf", on_behalf_of_turn: "turn-reply", result: { sent: { outcome: "sent", card: { id: zhang, state: "replied" } } },
     });

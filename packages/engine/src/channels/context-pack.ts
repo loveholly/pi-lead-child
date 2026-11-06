@@ -4,7 +4,8 @@
 //   1. 这个对话最近的消息：事件日志里这个对话的消息（别人的、用户本人的、替用户发的，按消息编号应用改和删），加上道的起点
 //      （thread 的根消息和它之前的几条，开道时补的）。最多 20 条或 4000 字（fitConversation），更早的交给记忆沉淀的整理器
 //      写成对话摘要（memory.ts 的 summarizeChannelMessages）。摘要按对话缓存在 kv 里，更早的那一段没变时不再问模型。
-//   2. 同一件事在别的对话里的消息，三个条件：同一个人（7 天内）；用户最近 30 分钟说的；提到同一个对象（7 天内）。
+//   2. 同一件事在别的对话里的消息，三个条件：同一个人（7 天内）；用户最近 30 分钟说的，而且提到同一个对象或者这条消息的发信人
+//      （只是时间近不算，工单 #286）；提到同一个对象（7 天内）。
 //      满足的条件多的、新的在前。时间按来源给的消息时间（occurred_at），和这条消息的时间比：两边是同一个时钟。
 //      在事件日志里找，不限于有道的对话：例如用户在频道的 thread 里说的话，没有道也记在日志里（hub 的 followOnly）。
 //   3. 提到的对象：PR（hub 的 pullRequestOf，只认明确的语法）、Jira（浏览链接）、仓库（请求 A 的候选仓库的名字、
@@ -555,6 +556,7 @@ function relatedMessages(db: Db, input: ContextPackInput, at: number, objects: r
     byConversation.set(row.entity_key, list);
   }
   const tokens = objects.flatMap((object) => objectTokens(object));
+  const senderNames = nameTokens(input.sender.name);
   const candidates: Array<MessageContextRelated & { time: number }> = [];
   for (const [key, entries] of byConversation) {
     // 对话的名字：道的名字（开道时按对方起的）；没有道时用第一条别人的消息带的名字。
@@ -564,8 +566,13 @@ function relatedMessages(db: Db, input: ContextPackInput, at: number, objects: r
       if (time === null || !message.text.trim()) continue;
       const why: MessageContextRelatedReason[] = [];
       if (message.role === "them" && message.senderId === input.sender.id && time >= at - SAME_SENDER_MS) why.push("same_sender");
-      if (message.role !== "them" && time >= at - USER_RECENT_MS) why.push("user_recent");
-      if (time >= at - SAME_OBJECT_MS && tokens.some((token) => mentions(message.text, token))) why.push("same_object");
+      const sameObject = time >= at - SAME_OBJECT_MS && tokens.some((token) => mentions(message.text, token));
+      // 用户最近 30 分钟在别的对话里说的话，只是时间近不够（工单 #286：用户刚在别的私信里聊安全扫描，这里对方回「啥意思」，
+      // Lead 把那段当成了前文，代用户回了出去）：还要提到同一个对象，或者提到这条消息的发信人。
+      if (message.role !== "them" && time >= at - USER_RECENT_MS && (sameObject || senderNames.some((name) => mentions(message.text, name)))) {
+        why.push("user_recent");
+      }
+      if (sameObject) why.push("same_object");
       if (!why.length) continue;
       candidates.push({
         at: message.at, role: message.role, sender: message.sender, text: clip(message.text, RELATED_TEXT_MAX),
@@ -642,6 +649,13 @@ function objectTokens(object: MessageContextObject): string[] {
 }
 
 // 文字里有没有这个名字（不分大小写，前后不是字母、数字、-、_：orders 不算 preorders 里的）。
+// 发信人的名字在原话里的写法：整个名字，和括号外按空格分开的几段（中文至少 2 个字，别的至少 3 个字母，免得 FE、Al 这类到处都能碰上）。
+function nameTokens(name: string): string[] {
+  const plain = name.replace(/[(（][^)）]*[)）]/gu, " ").trim();
+  const parts = plain.split(/\s+/u).filter((part) => (/[^\x00-\x7f]/u.test(part) ? part.length >= 2 : part.length >= 3));
+  return [...new Set([name.trim(), plain, ...parts].filter((part) => part.length >= 2))];
+}
+
 function mentions(text: string, name: string): boolean {
   const haystack = text.toLowerCase();
   const needle = name.toLowerCase();
