@@ -1,0 +1,88 @@
+# 向 master 提 pull request 时跑的检查，fork 来的 PR 也跑。命令取自 npm run verify。
+# - checks（ubuntu-24.04）：oxlint、三次类型检查（根、packages/components、apps/companion）、components 和 companion 的测试。
+# - root-tests（macos-15）：根 vitest（后端各包、apps/daemon、apps/cli、scripts/、desktop/）。这些测试按 macOS 写：
+#   沙箱测试在 Linux 上要 bubblewrap、socat 和 ripgrep，还有 Keychain、launchd、代码签名的测试。产品也只有 macOS 版。
+#   所以放在 macOS 上跑，不排除任何测试。
+# - apps/companion 自己的 expo lint 不在这里：它现在一跑就崩溃（TypeError: Cannot read properties of undefined (reading 'Intrinsic')），要先修好才能放进来。
+# - 用 pull_request，不用 pull_request_target：fork 的代码拿不到写权限，也拿不到 secret。这里不读任何 secret。
+# - 只有 contents: read；第三方 action 固定到 commit SHA；不用 ${{ }} 把 PR 的内容拼进脚本。
+# - 同一个 PR 推了新提交，旧的那次运行会被取消。
+name: pr-checks
+
+on:
+  pull_request:
+    branches: [master]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-checks-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out the pull request
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node (the same version as the runtime bundle)
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: desktop/node-version
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint (oxlint)
+        run: npm run lint
+
+      - name: Type-check the root project
+        run: npm run typecheck
+
+      - name: Type-check packages/components
+        run: npm run typecheck:components
+
+      - name: Type-check apps/companion
+        run: npm run typecheck:companion
+
+      - name: Test packages/components
+        run: npm run test:components
+
+      - name: Test apps/companion
+        run: npm run test:companion
+
+  root-tests:
+    runs-on: macos-15
+    timeout-minutes: 60
+    env:
+      # 测试会在临时目录下建 unix socket。runner 的 TMPDIR 太长，socket 路径会超过 103 字节。
+      TMPDIR: /tmp
+    steps:
+      - name: Check out the pull request
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node (the same version as the runtime bundle)
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: desktop/node-version
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      # 有的测试会在临时仓库里 git commit。runner 上的 git 没有身份，这里给一个假的；测试自己设的身份照样优先。
+      - name: Give git an identity for the tests that commit
+        run: |
+          git config --global user.name "pr-checks"
+          git config --global user.email "pr-checks@example.com"
+
+      - name: Test the root project (vitest)
+        run: npm test
