@@ -17,7 +17,7 @@ import type {
   OutcomeSnapshot,
 } from "@pi-lead-child/store";
 import {
-  activePairedUserTurn, addActivity, getDeliverySnapshotBySequence, getItem, getLatestOutcomeSnapshot,
+  activePairedUserTurn, addActivity, addInbox, getDeliverySnapshotBySequence, getItem, getLatestOutcomeSnapshot,
   getWorkspace, leadDisplayName, listDeliverySnapshotHeaders,
 } from "@pi-lead-child/store";
 import type { Item, ItemStage, Workspace } from "@pi-lead-child/core";
@@ -25,6 +25,7 @@ import { readHead } from "@pi-lead-child/core";
 import { redactSecretText } from "@pi-lead-child/protocol";
 import { abandonIsolatedWorkspace, integrateIsolatedWorkspace, withWorkspaceLock } from "./workspace.js";
 import { worktreeBaseBranch } from "./workspace-remote.js";
+import { checkPushAgainstOrigin } from "./push-guard.js";
 import {
   activeRuns, deliveryFileHiddenReason, deliveryWorkspace, execFileAsync, firstLine, git, gitRun, hasGitSegment, latestDecision,
   NETWORK_TIMEOUT_MS, normalizeDeliveryPath, redact, uncommittedFileCount, workspaceHead, worktreePresent,
@@ -750,6 +751,7 @@ export async function openDeliveryPullRequest(
     const branch = workspace.branch!;
     const base = await pullRequestBase(repo, worktreeBaseBranch(db, workspace));
     const item = recheckBeforeActing(db, itemId, workspace.id, ["review", "done"], "交付以后才能开 PR。");
+    await guardPush(db, itemId, workspace.id, repo, branch, delivery.workspace?.head ?? null, "open", input.actor);
     const push = await gitRun(["push", "origin", `refs/heads/${branch}:refs/heads/${branch}`], repo, {
       timeout: NETWORK_TIMEOUT_MS, env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
     });
@@ -789,6 +791,33 @@ export async function openDeliveryPullRequest(
   });
 }
 
+// 推送之前查这条分支和 origin 的默认分支有没有共同历史（push-guard.ts，#288）。不通过时不推、不开 PR：
+// 在工单上记下原因，抛错。谁来告诉 Lead：用户点的按钮由这里叫醒 Lead；Lead 自己调的 open_pr 直接拿到这个报错；
+// 系统自动开、自动更新的由 auto-pull-request.ts 告诉 Lead（同一个提交只告诉一次）。
+async function guardPush(
+  db: Db, itemId: number, workspaceId: number, repo: string, branch: string, head: string | null,
+  step: "open" | "update", requestedBy: PullRequestActor["actor"],
+): Promise<void> {
+  const check = await checkPushAgainstOrigin(repo, branch);
+  if (check.ok) return;
+  addActivity(db, {
+    itemId, actor: "system", kind: "decision",
+    payload: {
+      decision: "workspace_push_refused", workspaceId, branch, head, step, requestedBy, reason: check.reason,
+      defaultBranch: check.defaultBranch, unpublished: check.unpublished,
+    },
+  });
+  if (requestedBy === "user") {
+    addInbox(db, {
+      itemId, severity: "attention", source: "structural",
+      summary: `工单 #${itemId} 的分支没有推送：${check.reason}`,
+      payload: { inboxKind: "workspace_push_refused", step, reason: check.reason, wakeLead: true, needsUser: true },
+      lossless: true,
+    });
+  }
+  throw new DeliveryError("unavailable", check.reason);
+}
+
 // 这条分支上开着的 PR 的地址。gh 失败时当作没有：之后的 gh pr create 会报出真正的原因。
 async function openPullRequestFor(runner: PullRequestRunner, repo: string, branch: string): Promise<string | null> {
   const listed = await runner.gh(["pr", "list", "--head", branch, "--state", "open", "--json", "url", "--jq", ".[0].url"], repo);
@@ -814,6 +843,7 @@ export async function updateDeliveryPullRequest(
     const repo = workspace.repo_root!;
     const branch = workspace.branch!;
     const item = recheckBeforeActing(db, itemId, workspace.id, ["review", "done"], "交付以后才能更新 PR。");
+    await guardPush(db, itemId, workspace.id, repo, branch, delivery.workspace!.head, "update", "system");
     const push = await gitRun(["push", "origin", `refs/heads/${branch}:refs/heads/${branch}`], repo, {
       timeout: NETWORK_TIMEOUT_MS, env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
     });

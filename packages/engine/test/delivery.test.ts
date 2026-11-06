@@ -376,6 +376,8 @@ describe("open a pull request", () => {
     const second = deliveredTicketIn(join(dir, "other"));
     execFileSync("git", ["init", "-q", "--bare", join(dir, "other.git")]);
     git(join(dir, "other"), "remote", "add", "origin", join(dir, "other.git"));
+    // origin 上要有默认分支：推送前要确认分支和它有共同历史（push-guard.ts，#288）。
+    git(join(dir, "other"), "push", "-q", "origin", "main");
     const turn = createTurn(db, {
       id: "pr-turn", originBindingId: createLoopbackBinding(db, { name: "Mac 网页" }).binding.id, originKind: "paired:companion", userText: "开个 PR", state: "streaming",
     });

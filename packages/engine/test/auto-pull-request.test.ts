@@ -12,7 +12,8 @@ import {
 } from "@pi-lead-child/store";
 import { tempDir } from "@pi-lead-child/core/testing";
 import { prepareRunWorkspaceNowForTesting } from "../src/coordinator/workspace-policy.js";
-import type { PullRequestRunner } from "../src/coordinator/delivery.js";
+import { openDeliveryPullRequest, type PullRequestRunner } from "../src/coordinator/delivery.js";
+import { checkPushAgainstOrigin, MAX_UNPUBLISHED_COMMITS } from "../src/coordinator/push-guard.js";
 import {
   AUTO_PULL_REQUEST_SINCE_KEY, autoPullRequestPlan, markAutoPullRequestRollout, setAutoPullRequest, syncAutoPullRequests,
 } from "../src/coordinator/auto-pull-request.js";
@@ -205,5 +206,117 @@ describe("the draft PR follows the ticket from delivery through rework", () => {
 
     expect(await syncAutoPullRequests(db, { runner: gh })).toMatchObject({ opened: [], updated: [], failed: [] });
     expect(decisions(itemId, "workspace_pr_auto_failed")).toHaveLength(1);
+  });
+});
+
+// 回归（2026-11-06，#288）：用户给主 checkout 加了 origin（公开仓库）。一张工单的分支建在旧的、没公开过的本地历史上，
+// 和 origin 的 master 没有共同历史。系统自动开 PR 时先推送成功，开 PR 才失败，整段本地历史被推到了公开仓库。
+// 现在推送之前先查共同历史和 origin 上没有的提交数，不通过就不推、不开 PR，在工单上写原因，告诉 Lead。
+describe("before any push, the branch must share history with origin's default branch", () => {
+  // 把工单的分支换成一条和 origin 毫无关系的历史（像建在另一个仓库的历史上）。
+  function rewriteOnUnrelatedHistory(worktree: string, branch: string): void {
+    git(worktree, "checkout", "-q", "--orphan", "unrelated-history");
+    git(worktree, "rm", "-rqf", ".");
+    commitIn(worktree, "private.md", "old private history\n");
+    commitIn(worktree, "plan.md", "# 方案\n");
+    git(worktree, "checkout", "-qB", branch);
+  }
+
+  function remoteHasBranch(branch: string): boolean {
+    return git(remote, "for-each-ref", `refs/heads/${branch}`) !== "";
+  }
+
+  it("does not push or open a PR on its own, records why on the ticket, and tells Lead once", async () => {
+    const { itemId, worktree, branch } = codingTicket();
+    rewriteOnUnrelatedHistory(worktree, branch);
+    const gh = fakeGh();
+
+    expect(await syncAutoPullRequests(db, { runner: gh })).toMatchObject({ opened: [], failed: [itemId] });
+    expect(remoteHasBranch(branch)).toBe(false);
+    expect(gh.calls).toEqual([]);
+    const [refused] = decisions(itemId, "workspace_push_refused");
+    expect(refused).toMatchObject({ actor: "system", branch, step: "open", requestedBy: "system", defaultBranch: "main" });
+    expect(refused!.reason).toContain("和 origin/main 没有共同历史");
+    expect(refused!.reason).toContain("rebase");
+    const told = listInbox(db).filter((row) => row.item_id === itemId);
+    expect(told).toHaveLength(1);
+    expect(told[0]!.summary).toContain("没有共同历史");
+
+    // 同一个提交不再试，也不再告诉 Lead。
+    expect(await syncAutoPullRequests(db, { runner: gh })).toMatchObject({ opened: [], updated: [], failed: [] });
+    expect(remoteHasBranch(branch)).toBe(false);
+    expect(listInbox(db).filter((row) => row.item_id === itemId)).toHaveLength(1);
+  });
+
+  it("refuses the manual open_pr the same way, and wakes Lead when the user clicked it", async () => {
+    const { itemId, worktree, branch } = codingTicket();
+    rewriteOnUnrelatedHistory(worktree, branch);
+    const gh = fakeGh();
+
+    await expect(openDeliveryPullRequest(db, itemId, { actor: "user", reason: "用户点了开 PR", runner: gh }))
+      .rejects.toMatchObject({ code: "unavailable", message: expect.stringContaining("没有共同历史") });
+    expect(remoteHasBranch(branch)).toBe(false);
+    expect(gh.calls).toEqual([]);
+    expect(decisions(itemId, "workspace_push_refused")[0]).toMatchObject({ requestedBy: "user", step: "open" });
+    expect(listInbox(db).some((row) => row.item_id === itemId && row.summary.includes("没有共同历史"))).toBe(true);
+
+    // Lead 自己调 open_pr：直接拿到报错，照样不推。
+    await expect(openDeliveryPullRequest(db, itemId, { actor: "lead", sourceTurnId: null, reason: "Lead 判断要开 PR", runner: gh }))
+      .rejects.toMatchObject({ code: "unavailable" });
+    expect(remoteHasBranch(branch)).toBe(false);
+    expect(decisions(itemId, "workspace_push_refused")).toHaveLength(2);
+  });
+
+  it("does not push rework onto an open PR when the branch was rewritten onto unrelated history", async () => {
+    const { itemId, worktree, branch } = codingTicket();
+    const gh = fakeGh();
+    expect(await syncAutoPullRequests(db, { runner: gh })).toMatchObject({ opened: [itemId] });
+    const pushed = git(remote, "rev-parse", branch);
+
+    db.prepare("UPDATE items SET stage='active' WHERE id=?").run(itemId);
+    rewriteOnUnrelatedHistory(worktree, branch);
+    deliver(itemId, "2026-10-26T09:00:00.000Z");
+    gh.calls.length = 0;
+    expect(await syncAutoPullRequests(db, { runner: gh })).toMatchObject({ updated: [], failed: [itemId] });
+    expect(git(remote, "rev-parse", branch)).toBe(pushed);
+    expect(gh.calls).toEqual([]);
+    expect(decisions(itemId, "workspace_push_refused")[0]).toMatchObject({ step: "update" });
+  });
+
+  it(`refuses a branch that carries more than ${MAX_UNPUBLISHED_COMMITS} commits origin does not have`, async () => {
+    const { itemId, worktree, branch } = codingTicket();
+    for (let index = 0; index < MAX_UNPUBLISHED_COMMITS; index += 1) {
+      git(worktree, "-c", "user.email=a@b.test", "-c", "user.name=agent", "commit", "-q", "--allow-empty", "-m", `local ${index}`);
+    }
+    const gh = fakeGh();
+
+    expect(await syncAutoPullRequests(db, { runner: gh })).toMatchObject({ opened: [], failed: [itemId] });
+    expect(remoteHasBranch(branch)).toBe(false);
+    expect(gh.calls).toEqual([]);
+    expect(decisions(itemId, "workspace_push_refused")[0]).toMatchObject({ unpublished: MAX_UNPUBLISHED_COMMITS + 1 });
+  });
+
+  it("refuses when origin has no default branch to compare with", async () => {
+    const { itemId } = codingTicket();
+    const empty = join(dir, "empty.git");
+    execFileSync("git", ["init", "-q", "--bare", empty]);
+    git(repo, "remote", "set-url", "origin", empty);
+    git(repo, "update-ref", "-d", "refs/remotes/origin/main");
+
+    await expect(openDeliveryPullRequest(db, itemId, { actor: "user", reason: "用户点了开 PR", runner: fakeGh() }))
+      .rejects.toMatchObject({ message: expect.stringContaining("找不到 origin 的默认分支") });
+    expect(git(empty, "for-each-ref")).toBe("");
+    expect(decisions(itemId, "workspace_push_refused")).toHaveLength(1);
+  });
+
+  it("still pushes a normal branch and opens the PR, from the manual open_pr too", async () => {
+    const { itemId, worktree, branch } = codingTicket();
+    const gh = fakeGh();
+
+    const result = await openDeliveryPullRequest(db, itemId, { actor: "user", reason: "用户点了开 PR", runner: gh });
+    expect(result.pullRequestUrl).toBe("https://github.com/acme/repo/pull/12");
+    expect(git(remote, "rev-parse", branch)).toBe(git(worktree, "rev-parse", "HEAD"));
+    expect(decisions(itemId, "workspace_push_refused")).toEqual([]);
+    expect(await checkPushAgainstOrigin(repo, branch)).toEqual({ ok: true, defaultBranch: "main", unpublished: 0 });
   });
 });
