@@ -17,6 +17,10 @@ on:
 permissions:
   contents: read
 
+# 界面的日期和时间测试按北京时间写（用例里的 15:43、18:00 都是 UTC+8）。runner 默认 UTC，不固定时区会差 8 小时。
+env:
+  TZ: Asia/Shanghai
+
 concurrency:
   group: pr-checks-${{ github.event.pull_request.number }}
   cancel-in-progress: true
