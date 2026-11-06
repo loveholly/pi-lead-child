@@ -289,8 +289,23 @@ export const TicketSummarySchema = StrictObject({
     pendingDecisionCount: Type.Optional(Type.Integer({ minimum: 1 })),
   }),
   workspace: Type.Optional(TicketWorkspaceControlSchema),
+  // 工单有一个暂停着的 Run（工单 #111）。没有时不出现。终态的工单不出现。
+  // 暂停期间 stage 还是 active、runtime.state 是 idle，只看这两个看不出它停着。
+  pause: Type.Optional(StrictObject({
+    // 暂停着的那个 Run：「继续」恢复的就是它（resume_run 的 runId）。
+    attemptId: Type.Integer({ minimum: 1 }),
+    // 从什么时候停的（runs.paused_at）。
+    since: Type.String(),
+    // 谁暂停的：用户、Lead，或者系统（例如执行器被拒绝启动）。
+    by: Type.Union([Type.Literal("user"), Type.Literal("lead"), Type.Literal("system")]),
+    // 暂停前在做什么：最近一个执行 agent 报的 checkpoint 标题；没有时用执行计划里正在做的那一步；都没有时为 null。
+    lastCheckpoint: Type.Union([Type.String(), Type.Null()]),
+    // 停的时间超过了 PAUSE_OVERDUE_MS。读的时候按服务端的时间算，和 runtime.state 的 stale 一样。
+    overdue: Type.Boolean(),
+  })),
 });
 export type TicketSummary = Static<typeof TicketSummarySchema>;
+export type TicketPause = NonNullable<TicketSummary["pause"]>;
 
 // POST /v1/tickets/:id/request-review 的请求体（2026-10-20 加 runtime）。都可以不给，旧客户端发 {} 照旧。
 // runtime：用户选的核查员。有排着（含挂起）的核查就改它的核查员，没有就用它新排一条；核查正在跑、

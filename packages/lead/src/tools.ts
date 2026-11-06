@@ -3479,7 +3479,7 @@ export function createLeadTools(deps: LeadDeps): ToolDefinition<any>[] {
       label: "List Needs User",
       description:
         "列出现在需要用户处理的工单：待审批、阻塞、核查结论要用户决定、独立核查未派发、待验收、停滞、" +
-        "等待能力、草稿待确认。规则和 App 收件箱的「需要我」、会话底栏的「需要处理」完全相同，子工单也算。" +
+        "暂停超过一天（停太久）、等待能力、草稿待确认。规则和 App 收件箱的「需要我」、会话底栏的「需要处理」完全相同，子工单也算。" +
         "用户问'有什么要我处理/介入/决定/验收的'时必须用它回答，不要自己用 query_tickets 拼。",
       parameters: Type.Object({}),
       execute: async () => {

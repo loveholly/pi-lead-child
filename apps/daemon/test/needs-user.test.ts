@@ -5,8 +5,8 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createLeadTools, type LeadDeps } from "@pi-lead-child/lead";
 import { ticketNeedsUser, ticketNeedsUserLabel, ticketsNeedingUser } from "@pi-lead-child/protocol";
-import { createItem, createRun, listInbox, markInbox, openDb, transition, updateRun, type Db } from "@pi-lead-child/store";
-import { createCoordinator } from "@pi-lead-child/engine";
+import { createItem, createRun, listInbox, markInbox, markLightTask, openDb, transition, updateRun, type Db } from "@pi-lead-child/store";
+import { createCoordinator, runTicketAction } from "@pi-lead-child/engine";
 import { readGatewayTickets } from "@pi-lead-child/gateway/testing";
 import { tempDir } from "@pi-lead-child/core/testing";
 import { startDaemon } from "../src/server.js";
@@ -48,6 +48,18 @@ function strandedInReview(): number {
   return itemId;
 }
 
+// 像 #28（工单 #111）：轻子任务，用户暂停了它的 Run，停了两天。以前它算 Lead 的后台工作，三处都不数它。
+async function pausedTwoDaysAgo(): Promise<number> {
+  const itemId = task("paused light task", { createdBy: "lead" });
+  markLightTask(db, itemId, "lead");
+  transition(db, { itemId, to: "active", actor: "system", reason: "run started" });
+  const runId = createRun(db, { itemId, role: "executor", purpose: "execution", runtime: "claude" });
+  updateRun(db, runId, { state: "running" });
+  await runTicketAction(db, { itemId, action: "pause_run", caller: { kind: "user" } });
+  db.prepare("UPDATE runs SET paused_at = ? WHERE id = ?").run(new Date(Date.now() - 2 * 24 * 60 * 60_000).toISOString(), runId);
+  return itemId;
+}
+
 function seedLikeTheLiveInstance() {
   const stuckReview = strandedInReview();
   const blockedRoot = blocked(task("blocked root"));
@@ -71,6 +83,7 @@ function seedLikeTheLiveInstance() {
 describe("what needs the user", () => {
   it("is the same set of tickets for the app and for Lead's list_needs_user tool", async () => {
     const seeded = seedLikeTheLiveInstance();
+    const paused = await pausedTwoDaysAgo();
     let tools: ReturnType<typeof createLeadTools> = [];
     const factory = async (args: LeadDeps) => {
       tools = createLeadTools({ ...args, db, dbPath, dataDir: dir });
@@ -91,8 +104,9 @@ describe("what needs the user", () => {
     const appTickets = ticketsNeedingUser(await readGatewayTickets(db));
     const appIds = appTickets.map((ticket) => ticket.id).sort((a, b) => a - b);
     expect(appIds).toEqual(
-      [seeded.stuckReview, seeded.blockedRoot, seeded.blockedChild, seeded.draft].sort((a, b) => a - b),
+      [seeded.stuckReview, seeded.blockedRoot, seeded.blockedChild, seeded.draft, paused].sort((a, b) => a - b),
     );
+    expect(ticketNeedsUser(appTickets.find((ticket) => ticket.id === paused)!)).toBe("paused");
 
     const tool = tools.find((candidate) => candidate.name === "list_needs_user");
     expect(tool, "Lead has a tool for 'what needs me'").toBeDefined();

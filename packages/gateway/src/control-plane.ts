@@ -42,7 +42,7 @@ import type {
   TicketUsage,
   TimelineResponse,
 } from "@pi-lead-child/protocol";
-import { foldTurnSurfaces, foldTurnToolCalls, isSystemTurnOrigin, LEAD_ACTIVITY_DISPOSITIONS, ticketNeedsUser, ticketTurn, type InboxView, type LeadActivityItem, type LeadActivityView, type LeadInterrupt, type ProjectOverview, type TicketTurn, type TurnPlacement } from "@pi-lead-child/protocol";
+import { foldTurnSurfaces, foldTurnToolCalls, isSystemTurnOrigin, LEAD_ACTIVITY_DISPOSITIONS, PAUSE_OVERDUE_MS, ticketNeedsUser, ticketTurn, type InboxView, type LeadActivityItem, type LeadActivityView, type LeadInterrupt, type ProjectOverview, type TicketTurn, type TurnPlacement } from "@pi-lead-child/protocol";
 import { toWireAttemptPurpose, toWireAttemptState } from "@pi-lead-child/core";
 import { createCoordinator } from "@pi-lead-child/engine";
 import { createWorkspaceActionService } from "@pi-lead-child/engine";
@@ -62,7 +62,7 @@ import {
   verificationState,
   type ReviewVerdictRow,
 } from "@pi-lead-child/engine";
-import { activeDelegationPolicy, getLocale, isLightTask, leadDisplayName } from "@pi-lead-child/store";
+import { activeDelegationPolicy, getExecutionPlan, getLocale, isLightTask, leadDisplayName } from "@pi-lead-child/store";
 import { controlPlaneMessages } from "./control-plane.messages.js";
 import { itemHasRun } from "@pi-lead-child/engine";
 import type { Db } from "@pi-lead-child/store";
@@ -558,6 +558,42 @@ export function createControlPlaneService(db: Db, options: ControlPlaneOptions) 
       : undefined;
   }
 
+  // 暂停着的 Run（工单 #111）：最近的那个，和「继续」（resume_run）不给 runId 时恢复的是同一个。
+  const pausedRunStatement = db.prepare(
+    "SELECT id, paused_at, started_at FROM runs WHERE item_id = ? AND state = 'paused' ORDER BY id DESC LIMIT 1",
+  );
+  // 谁暂停的：暂停时记下的那条活动（ticket-actions 的 pauseItemRun）；执行器被拒绝启动时系统把 Run 放回 paused（run_start_refused）。
+  const pauseActorStatement = db.prepare(
+    `SELECT actor, json_extract(payload, '$.decision') AS decision FROM activities
+     WHERE run_id = ? AND kind = 'decision' AND json_extract(payload, '$.decision') IN ('暂停执行', 'run_start_refused')
+     ORDER BY id DESC LIMIT 1`,
+  );
+  const lastAgentCheckpointStatement = db.prepare(
+    `SELECT kind, title, summary, next_step FROM checkpoints
+     WHERE item_id = ? AND source = 'agent_reported' ORDER BY id DESC LIMIT 1`,
+  );
+  function pauseOf(item: Item): TicketSummary["pause"] {
+    if (item.stage === "done" || item.stage === "cancelled" || item.stage === "acked") return undefined;
+    const run = pausedRunStatement.get(item.id) as { id: number; paused_at: string | null; started_at: string } | undefined;
+    if (!run) return undefined;
+    const since = iso(run.paused_at) ?? iso(run.started_at) ?? run.started_at;
+    const actor = pauseActorStatement.get(run.id) as { actor: string; decision: string } | undefined;
+    const by = actor?.decision === "暂停执行" && (actor.actor === "user" || actor.actor === "lead") ? actor.actor : "system";
+    const checkpoint = lastAgentCheckpointStatement.get(item.id) as
+      { kind: string; title: string; summary: string; next_step: string | null } | undefined;
+    const lastCheckpoint = checkpoint
+      ? presentUserFacingCheckpoint({ kind: checkpoint.kind, title: checkpoint.title, summary: checkpoint.summary, nextStep: checkpoint.next_step }).title
+      : getExecutionPlan(db, item.id)?.steps.find((step) => step.status === "in_progress")?.title ?? null;
+    const sinceMs = Date.parse(since);
+    return {
+      attemptId: run.id,
+      since,
+      by,
+      lastCheckpoint: lastCheckpoint || null,
+      overdue: Number.isFinite(sinceMs) && now().getTime() - sinceMs > PAUSE_OVERDUE_MS,
+    };
+  }
+
   function itemSummary(item: Item): TicketSummary {
     const runtime = options.runtime();
     const run = activeRun(db, item.id);
@@ -573,6 +609,7 @@ export function createControlPlaneService(db: Db, options: ControlPlaneOptions) 
     const execution = executionState(item, run);
     const workspace = workspaceActions.controlForItem(item.id);
     const nextMilestone = item.kind === "task" ? nextMilestoneOf(item.id) : undefined;
+    const pause = item.kind === "task" ? pauseOf(item) : undefined;
     return {
       id: item.id,
       title: item.title,
@@ -616,6 +653,7 @@ export function createControlPlaneService(db: Db, options: ControlPlaneOptions) 
         activeAttemptId: run?.id ?? null,
       },
       attention: attention(item),
+      ...(pause ? { pause } : {}),
     };
   }
 
@@ -1422,6 +1460,8 @@ export function createControlPlaneService(db: Db, options: ControlPlaneOptions) 
               ? (summary.reviewState?.reason ?? summary.reviewState?.label ?? null)
               : needs === "stalled"
                 ? m.inbox.stalled
+                : needs === "paused" && summary.pause
+                ? m.inbox.paused(summary.pause.by === "lead" ? leadName : m.inbox.pausedBy[summary.pause.by], summary.pause.lastCheckpoint)
                 : needs === "capability"
                   ? m.inbox.capability
                   : m.inbox.draft(leadName);
@@ -1431,6 +1471,8 @@ export function createControlPlaneService(db: Db, options: ControlPlaneOptions) 
             ? decision.since
             : needs === "stalled" && summary.runtime.lastActivityAt
             ? summary.runtime.lastActivityAt
+            : needs === "paused" && summary.pause
+            ? summary.pause.since
             : stageSince;
         tickets.push({ ticketId: item.id, reason, since });
       }

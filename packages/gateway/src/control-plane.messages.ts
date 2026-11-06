@@ -95,6 +95,10 @@ export const controlPlaneMessages = defineMessages({
       stalled: "The run has had no activity for a long time",
       capability: "The continuation waits for a capability that is not deployed yet",
       draft: (lead: string) => `${lead} created this draft. It starts after you confirm it`,
+      // 停了超过一天的暂停（工单 #111）。who 是「你」、Lead 的名字或「系统」；what 是暂停前在做的事。
+      paused: (who: string, what: string | null) =>
+        `${who} paused it more than a day ago${what ? `, during "${what}"` : ""}. Resume or cancel it`,
+      pausedBy: { user: "You", system: "The system" },
     },
     leadHandled: {
       milestoneVerb: (change: string) => {
@@ -197,6 +201,8 @@ export const controlPlaneMessages = defineMessages({
       stalled: "Run 很久没有动静",
       capability: "续作在等一个还没部署的能力",
       draft: (lead) => `${lead} 建的草稿，等你确认才会开始`,
+      paused: (who, what) => `${who}暂停的，已经停了超过 1 天${what ? `，停在「${what}」` : ""}。继续还是取消？`,
+      pausedBy: { user: "你", system: "系统" },
     },
     leadHandled: {
       milestoneVerb: (change) => {

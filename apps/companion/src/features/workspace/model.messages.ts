@@ -48,7 +48,7 @@ export const workspaceModelMessages = defineMessages({
       release: 'Release work folder',
       cleanup: 'Clean up work folder',
     },
-    filters: { all: 'All', todo: 'Waiting for you', running: 'Running', queued: 'Queued' },
+    filters: { all: 'All', todo: 'Waiting for you', running: 'Running', paused: 'Paused', queued: 'Queued', lead: (lead: string) => lead },
     empty: {
       loadingTitle: 'Loading tickets',
       loadingBody: (lead: string) => `Waiting for ${lead} to send the ticket list.`,
@@ -64,6 +64,7 @@ export const workspaceModelMessages = defineMessages({
     groups: {
       needsIntervention: 'Waiting for you',
       running: 'Running',
+      paused: 'Paused',
       queued: 'Queued · Nobody works on it',
       lead: (lead: string) => `${lead} is handling it`,
       background: (lead: string) => `${lead} · Background`,
@@ -198,7 +199,13 @@ export const workspaceModelMessages = defineMessages({
       queued: 'Queued · Not started yet',
       background: (lead: string) => `${lead} · Background`,
       executing: 'Running',
+      // 暂停的工单（工单 #111）：谁暂停的、停在哪一步。
+      pausedBy: { user: 'Paused by you', lead: (lead: string) => `Paused by ${lead}`, system: 'Paused by the system' },
+      pausedAt: (what: string) => `at "${what}"`,
     },
+    // 工单行右边的停留时间：暂停的工单写停了多久（工单 #111）。
+    pausedFor: (duration: string) => `Paused ${duration}`,
+    pausedJustNow: 'Just paused',
     weekday: (index: number) => ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'][index] ?? '',
   },
   zh: {
@@ -246,7 +253,7 @@ export const workspaceModelMessages = defineMessages({
       release: '释放工作区',
       cleanup: '清理工作区',
     },
-    filters: { all: '全部', todo: '等你', running: '在执行', queued: '排队' },
+    filters: { all: '全部', todo: '等你', running: '在执行', paused: '已暂停', queued: '排队', lead: (lead) => lead },
     empty: {
       loadingTitle: '正在读取工单',
       loadingBody: (lead) => `等待 ${lead} 返回真实工单列表。`,
@@ -262,6 +269,7 @@ export const workspaceModelMessages = defineMessages({
     groups: {
       needsIntervention: '等你',
       running: '在执行',
+      paused: '已暂停',
       queued: '排队 · 没人在动',
       lead: (lead) => `${lead} 处理中`,
       background: (lead) => `${lead} 后台`,
@@ -396,7 +404,11 @@ export const workspaceModelMessages = defineMessages({
       queued: '排队 · 还没开始执行',
       background: (lead) => `${lead} 后台`,
       executing: '执行中',
+      pausedBy: { user: '你暂停的', lead: (lead) => `${lead} 暂停的`, system: '系统暂停的' },
+      pausedAt: (what) => `停在「${what}」`,
     },
+    pausedFor: (duration) => `停了 ${duration}`,
+    pausedJustNow: '刚暂停',
     weekday: (index) => ['一', '二', '三', '四', '五', '六', '日'][index] ?? '',
   },
 });

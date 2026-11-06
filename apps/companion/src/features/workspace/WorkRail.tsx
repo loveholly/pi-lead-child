@@ -57,6 +57,9 @@ type WorkRailProps = {
   ticketProject?: string | null;
   onTicketProjectChange?: (project: string | null) => void;
   onSeedTask?: (draft: string) => void;
+  // 停太久的暂停工单在工单行上直接继续、取消（工单 #111）。
+  onResumeTicket?: (ticket: Ticket) => Promise<unknown>;
+  onCancelTicket?: (ticket: Ticket) => Promise<unknown>;
   showViewTabs?: boolean;
   // 收件箱里单独露出来的通知（protocol 的 inboxNotices）。只在收件箱渲染。
   notices?: InboxNotices;
@@ -105,6 +108,8 @@ export function WorkRail({
   ticketProject: controlledTicketProject,
   onTicketProjectChange,
   onSeedTask,
+  onResumeTicket,
+  onCancelTicket,
   showViewTabs = true,
   notices = EMPTY_NOTICES,
   onAckNotification,
@@ -250,18 +255,21 @@ export function WorkRail({
           </Row>
         ) : null}
         {view === 'tickets' ? (
-          <Row items="center" gap="chips">
-            {ticketRailFilters(locale).map((item) => (
-              <Chip
-                key={item.id}
-                testID={`ticket-filter-${item.id}`}
-                label={item.label}
-                count={ticketProjection.filterCounts[item.id]}
-                selected={filter === item.id}
-                onPress={() => selectFilter(item.id)}
-              />
-            ))}
-          </Row>
+          // 六个筛选在窄栏里放不下：横向滑动，不换行，数字变了这一行的高度也不变（工单 #111）。
+          <ScrollArea horizontal flex={0} testID="ticket-filters">
+            <Row items="center" gap="chips">
+              {ticketRailFilters(locale).map((item) => (
+                <Chip
+                  key={item.id}
+                  testID={`ticket-filter-${item.id}`}
+                  label={item.label}
+                  count={ticketProjection.filterCounts[item.id]}
+                  selected={filter === item.id}
+                  onPress={() => selectFilter(item.id)}
+                />
+              ))}
+            </Row>
+          </ScrollArea>
         ) : null}
       </Column>
       <SwitchTransition transitionKey={view} direction={viewDirection}>
@@ -300,6 +308,8 @@ export function WorkRail({
                 onClearFilters={clearFilters}
                 onSeedTask={onSeedTask}
                 project={projectScope}
+                onResumeTicket={onResumeTicket}
+                onCancelTicket={onCancelTicket}
               />
             ) : null}
             {view === 'projects' ? (
