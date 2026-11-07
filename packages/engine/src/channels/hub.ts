@@ -3534,16 +3534,32 @@ export class ChannelHub {
 
   // 断线这段时间的补拉没补全：记一条 tell 级的事件，Lead 下一轮看到，自己决定要不要告诉用户、去来源里查。
   // 同一段（来源和结束的时刻）只记一次。只有我们自己写的话，没有外部的原文。
+  // 断线的时段写传输记下的真实断开、重连时刻（outage）；from、to 是补拉读的区间（水位往回留了余量），不说成断线的时段。
   private catchUpIncomplete(adapter: ChannelAdapter, report: ChannelCatchUpReport): void {
     const from = report.from.toISOString();
     const to = report.to.toISOString();
-    const summary = `${adapter.label} 在 ${from} 到 ${to}（UTC）之间断过线，重新连上以后补拉的消息没有补全，`
-      + `补到了 ${report.caught} 条：${report.reasons.join("；")}。这段时间里可能有消息没收到，需要时到 ${adapter.label} 里查。`;
+    const setup = [...report.setup ?? []];
+    const outage = report.outage ?? null;
+    const seconds = outage ? Math.max(Math.round((outage.reconnectedAt.getTime() - outage.disconnectedAt.getTime()) / 1000), 0) : null;
+    const what = outage
+      ? `${adapter.label} 在 ${outage.disconnectedAt.toISOString()} 断开，${outage.reconnectedAt.toISOString()}（UTC）重新连上，断了 ${seconds} 秒`
+        + `${outage.drops > 1 ? `（中间断开了 ${outage.drops} 次）` : ""}。`
+      : `${adapter.label} 连上了（daemon 启动以后第一次连上，断开的时刻不知道）。`;
+    const read = `补拉读的是 ${from} 到 ${to}（UTC）的消息（从上次确认收到的时刻往回留了余量）`;
+    const summary = report.reasons.length
+      ? `${what}${read}，没有补全，补到了 ${report.caught} 条：${[...report.reasons, ...setup].join("；")}。`
+        + `这段时间里可能有消息没收到，需要时到 ${adapter.label} 里查。`
+      : `${what}${read}，补到了 ${report.caught} 条，但有配置问题：${setup.join("；")}。`
+        + `每次补拉都一样，这里只提醒一次；改好以前，断线期间的这部分消息补不到。`;
     try {
       this.db.transaction(() => appendEvent(this.db, {
         source: "system", sourceRef: `channel-catch-up:${adapter.id}:${to}`, kind: CHANNEL_EVENT_KINDS.catchUpIncomplete,
         entityKey: `channel:${adapter.id}`, level: "tell", occurredAt: to,
-        payload: { channel: adapter.id, from, to, caught: report.caught, reasons: [...report.reasons], summary },
+        payload: {
+          channel: adapter.id, from, to, caught: report.caught, reasons: [...report.reasons, ...setup], setup,
+          disconnectedAt: outage?.disconnectedAt.toISOString() ?? null, reconnectedAt: outage?.reconnectedAt.toISOString() ?? null,
+          disconnectedSeconds: seconds, drops: outage?.drops ?? null, summary,
+        },
       }))();
     } catch (error) {
       this.log(`[channels] ${adapter.id}: could not tell Lead that the catch-up is incomplete: ${errorText(error)}`);

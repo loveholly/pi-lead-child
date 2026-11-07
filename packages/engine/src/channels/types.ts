@@ -318,7 +318,8 @@ export interface ChannelOpenLane {
  */
 // reason：设置页按它写给人看的话（两种语言）。signed_out：用户的登录已经失效（例如浏览器会话过期），要重新登录，不再自己重试。
 export type ChannelTransportStatus =
-  | { state: "connecting" }
+  // disconnectReason：连着的连接断了、正在重连时，断开的原因（日志里也有）。拿不到时写明不知道。
+  | { state: "connecting"; disconnectReason?: string }
   | { state: "connected" }
   | { state: "error"; error: string; reason?: "signed_out" };
 
@@ -339,13 +340,29 @@ export interface ChannelTransportContext {
   status?(update: ChannelTransportStatus): void;
 }
 
-/** 断线这段时间的补拉没补全（ChannelTransportContext.catchUpIncomplete）。reasons 是来源写的话，不含外部的原文。 */
+/**
+ * 一次补拉对应的真实断线（传输记下的）：连着的连接第一次断开的时刻、重新连上的时刻、中间断开了几次（很快又重连时合并成一次补拉）。
+ * daemon 启动以后第一次连上时没有（断开的是 daemon 自己）。
+ */
+export interface ChannelOutage {
+  disconnectedAt: Date;
+  reconnectedAt: Date;
+  drops: number;
+}
+
+/**
+ * 断线这段时间的补拉没补全（ChannelTransportContext.catchUpIncomplete）。reasons、setup 是来源写的话，不含外部的原文。
+ * from、to 是补拉读的区间（水位往回留了余量），不是断线的时段；断线的时段在 outage。
+ * reasons：这一次的缺口（超过上限、调用失败）。setup：长期的配置问题（例如缺权限），每次补拉都一样，来源只在第一次报。
+ */
 export interface ChannelCatchUpReport {
   from: Date;
   to: Date;
   // 补到了几条。
   caught: number;
   reasons: readonly string[];
+  setup?: readonly string[];
+  outage?: ChannelOutage | null;
 }
 
 /** 传输把一次投递交给 hub 的进程内入口。不抛错。 */
