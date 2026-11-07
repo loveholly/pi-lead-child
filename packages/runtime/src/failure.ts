@@ -12,8 +12,8 @@ import {
 } from "./typed-failure.js";
 
 export {
-  classifyHostFailure, FAILURE_CLASSES, matchProviderFailure, residualFailureCode, storedFailure, typedFailure, usageResetAt,
-  type FailureCode, type FailureEvidence, type RuntimeFailureCategory,
+  classifyHostFailure, FAILURE_CLASSES, matchProviderFailure, residualFailureCode, storedFailure, toolChannelStartTimedOut,
+  typedFailure, usageResetAt, type FailureCode, type FailureEvidence, type RuntimeFailureCategory,
 } from "./typed-failure.js";
 
 // ── 决策边界 ───────────────────────────────────────────────────────────────────
