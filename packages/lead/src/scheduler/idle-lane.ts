@@ -117,7 +117,8 @@ export interface IdleLaneState {
   idleSince: number | null;
   // 最近一次读到的上下文水位（占窗口的比例）。
   ratio: number | null;
-  // 这个压缩周期里相邻两次读数之间最大的增长（一步最多加多少）：提级的线据此往前挪，留出两步的余量。
+  // 相邻两次读数之间最大的增长（一步最多加多少）：提级的线据此往前挪，留出两步的余量。它说的是这份工作的步子多大，
+  // 压缩以后不清零：压缩以后第一次读数就可能已经过了线（开发模式下压缩后还有 75%，留着最近两次读的结果）。
   stepMax: number;
   compact: CompactJobState;
   precipitate: PrecipitateJobState;
@@ -479,7 +480,6 @@ export function idleLaneStep(state: IdleLaneState, event: IdleLaneEvent, now: nu
         state: {
           ...state,
           ratio: null,
-          stepMax: 0,
           compact: idleCompactJob(0),
           precipitate: { ...state.precipitate, done: false, yields: 0 },
         },
@@ -508,7 +508,7 @@ export function idleLaneStep(state: IdleLaneState, event: IdleLaneEvent, now: nu
         if (compact.phase !== "ready") effects.push({ type: "compact.cancel", id: compact.id, why: `compacted_by_${event.how}` });
       }
       return {
-        state: { ...state, ratio: null, stepMax: 0, compact: idleCompactJob(0), precipitate: { ...state.precipitate, done: false, yields: 0 } },
+        state: { ...state, ratio: null, compact: idleCompactJob(0), precipitate: { ...state.precipitate, done: false, yields: 0 } },
         effects,
       };
     }

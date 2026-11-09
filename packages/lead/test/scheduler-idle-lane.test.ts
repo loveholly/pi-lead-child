@@ -79,6 +79,18 @@ describe("idle lane: starting idle work", () => {
     expect(logs[0]).toMatch(/idle\.start job=compact .*ratio=0\.75 line=0\.71 promoted=true why=boundary step=0\.(09|10) threshold=0\.90 /);
   });
 
+  it("keeps the step size across a compaction, so the first boundary after it can promote", () => {
+    const at = (ratio: number | null, time: number): [number, IdleLaneEvent] => [time, tick(ratio, { boundary: true, thresholdRatio: 0.92 })];
+    const { kinds } = run([
+      [0, { type: "busy", unitId: "unit_a", lane: 0 }], [5_000, { type: "idle" }], at(0.65, 5_000),
+      [5_100, { type: "busy", unitId: "unit_b", lane: 0 }], [10_000, { type: "idle" }], at(0.75, 10_000),
+      [10_000, { type: "compacted", how: "overflow" }],
+      [10_100, { type: "busy", unitId: "unit_c", lane: 0 }], [15_000, { type: "idle" }], at(0.75, 15_000),
+    ]);
+    // 第一次在 0.75（线 0.72）就提级，压缩后的第一次也一样。
+    expect(kinds).toEqual(["compact.start", "compact.cancel", "compact.start"]);
+  });
+
   it("never starts while a unit runs", () => {
     const { kinds } = run([[0, { type: "busy", unitId: "unit_a", lane: 0 }], [600_000, tick(0.95)]]);
     expect(kinds).toEqual([]);
