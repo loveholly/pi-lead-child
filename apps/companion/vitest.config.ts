@@ -1,3 +1,4 @@
+import { readdirSync, readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 
@@ -60,6 +61,20 @@ const reactCompilerForListedFiles: Plugin = {
   },
 };
 
+// 测试按运行环境分两组（2026-11-09，测试提速；vitest 指南「Test Environments」「Pool」两节）。
+// - 渲染界面的文件在文件头写 @vitest-environment jsdom。它们用 vmThreads：每个 worker 只建一次 jsdom，每个文件在新的
+//   VM 上下文里跑，模块和 window 照样每个文件一份。缺省的 forks 每个文件都要新建 jsdom、重新加载 react-dom 和 Tamagui，
+//   整套跑时这两步占了大部分时间。
+// - 其余文件在 node 环境里跑，用 threads，每个文件仍然隔离。它们不用 vmThreads：VM 上下文里 node 自带的类（例如
+//   DOMException）不是这个上下文的 Error 的子类，产品代码里的 reason instanceof Error 会判断错（runtime.test.ts 取消下载那条）。
+// 两组都不关隔离（isolate: false）：一半以上的文件用 vi.mock，关掉以后，前一个文件加载过的模块不会再被 mock 替换。
+// 分组看文件头，不看路径，所以新文件只要照旧写环境注释就进对的组。
+const SRC = fileURLToPath(new URL('./src', import.meta.url));
+const JSDOM_FILES = readdirSync(SRC, { recursive: true, encoding: 'utf8' })
+  .filter((file) => /\.test\.tsx?$/.test(file))
+  .filter((file) => /@vitest-environment\s+jsdom/.test(readFileSync(`${SRC}/${file}`, 'utf8')))
+  .map((file) => `src/${file.split('\\').join('/')}`);
+
 // apps/companion 的单元测试。没有这个文件时，vitest 会向上找到仓库根的配置，而根配置只跑后端各包的测试。
 // 界面模块经过 @pi-lead-child/components 引入 react-native。这里和组件库的测试一样，
 // 把 react-native 换成 react-native-web，Tamagui 以 web 为目标，渲染路径和浏览器里的 web 包相同。
@@ -81,7 +96,7 @@ export default defineConfig({
     __DEV__: 'false',
   },
   test: {
-    include: ['src/**/*.test.{ts,tsx}'],
+    // include 写在下面两组里：组会继承这里的设置，数组是拼起来的，写在这里两组就都包含全部文件。
     exclude: [...configDefaults.exclude, 'dist/**', 'dist-*/**'],
     setupFiles: ['./test/setup.ts'],
     // 和仓库根的 vitest.config.ts 同一个理由：缺省 5 秒的超时比这些测试在忙的机器上的真实耗时还短。
@@ -91,5 +106,9 @@ export default defineConfig({
     hookTimeout: 15_000,
     // react-native 系的包要经过 Vite 转换，react-native 别名才对它们生效。
     server: { deps: { inline: [/@tamagui\//, /react-native-web/, /react-native-safe-area-context/, /react-native-svg/, /react-native-reanimated/, /react-native-worklets/, /expo-/, /@expo\//] } },
+    projects: [
+      { extends: true, test: { name: 'dom', include: JSDOM_FILES, pool: 'vmThreads' } },
+      { extends: true, test: { name: 'node', include: ['src/**/*.test.{ts,tsx}'], exclude: JSDOM_FILES, pool: 'threads' } },
+    ],
   },
 });
