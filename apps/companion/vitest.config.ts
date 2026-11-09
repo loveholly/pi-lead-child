@@ -84,6 +84,11 @@ export default defineConfig({
     include: ['src/**/*.test.{ts,tsx}'],
     exclude: [...configDefaults.exclude, 'dist/**', 'dist-*/**'],
     setupFiles: ['./test/setup.ts'],
+    // 和仓库根的 vitest.config.ts 同一个理由：缺省 5 秒的超时比这些测试在忙的机器上的真实耗时还短。
+    // 2026-11-06（#279）整套连跑 5 次，有 2 次各有几条渲染整个工作区的用例超时，每次是不同的用例，
+    // 当时机器 8 核、负载 35 左右。这些用例空闲时只要 0.35–1.3 秒。超时是用来抓挂死的，不是量快慢的，所以放到 15 秒。
+    testTimeout: 15_000,
+    hookTimeout: 15_000,
     // react-native 系的包要经过 Vite 转换，react-native 别名才对它们生效。
     server: { deps: { inline: [/@tamagui\//, /react-native-web/, /react-native-safe-area-context/, /react-native-svg/, /react-native-reanimated/, /react-native-worklets/, /expo-/, /@expo\//] } },
   },
