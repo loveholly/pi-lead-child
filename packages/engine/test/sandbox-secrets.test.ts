@@ -1,4 +1,4 @@
-// 沙箱里的密钥和本机端口（2026-10-28）：用真的沙箱跑，只在 macOS 和 Linux 上跑。
+// 沙箱里的密钥和本机端口（2026-10-28）：用真的沙箱跑，只在 macOS 上跑。
 // 用户：「让它读不到真正的内容，但是当他调用某些工具要用到环境变量却又可以」。绑定了主机的密钥，沙箱里只是占位值
 // （发往那个主机时沙箱的代理换成真值，这一步要连外网，在本机用 Claude Code 和 postman-echo.com 核实过）；
 // 没绑定主机的，沙箱里没有。
@@ -7,7 +7,9 @@ import { sandboxPolicy, SANDBOX_SECRET_HOSTS_ENV } from "@pi-lead-child/core";
 import { tempDir } from "@pi-lead-child/core/testing";
 import { resetSandboxForTests, sandboxedBashOperations } from "../src/sandbox/bash.js";
 
-const supported = process.platform === "darwin" || process.platform === "linux";
+// 用真的沙箱，只在 macOS 上跑。Linux 上的沙箱要 bubblewrap、socat 和 ripgrep，CI 的 ubuntu runner 不装它们，
+// 产品也只有 macOS 版，所以在别的系统上跳过（docs/testing.md 的「只在 macOS 上跑的测试」）。
+const supported = process.platform === "darwin";
 
 async function run(ops: ReturnType<typeof sandboxedBashOperations>, command: string, cwd: string) {
   let output = "";

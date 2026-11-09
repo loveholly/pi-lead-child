@@ -1,4 +1,4 @@
-// 沙箱里的 bash（lead-tools-and-routing spec D2）：用真的沙箱跑，只在 macOS 和 Linux 上跑。
+// 沙箱里的 bash（lead-tools-and-routing spec D2）：用真的沙箱跑，只在 macOS 上跑。
 import { mkdirSync, mkdtempSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -7,7 +7,9 @@ import { sandboxPolicy } from "@pi-lead-child/core";
 import { tempDir } from "@pi-lead-child/core/testing";
 import { resetSandboxForTests, sandboxedBashOperations } from "../src/sandbox/bash.js";
 
-const supported = process.platform === "darwin" || process.platform === "linux";
+// 用真的沙箱，只在 macOS 上跑。Linux 上的沙箱要 bubblewrap、socat 和 ripgrep，CI 的 ubuntu runner 不装它们，
+// 产品也只有 macOS 版，所以在别的系统上跳过（docs/testing.md 的「只在 macOS 上跑的测试」）。
+const supported = process.platform === "darwin";
 
 async function run(ops: ReturnType<typeof sandboxedBashOperations>, command: string, cwd: string) {
   let output = "";
