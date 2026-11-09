@@ -174,8 +174,8 @@ export type IdleLaneEvent =
   // 整理笔记的单元开了 / 结束了。
   | { type: "precipitate.started"; unitId: string }
   | { type: "precipitate.ended"; outcome: "done" | "yielded" | "failed" }
-  // Lead 忙着 L4 的活时，更高车道的输入到了（what：user、event、retry）。
-  | { type: "input"; lane: Lane; what: string }
+  // Lead 忙着 L4 的活时，更高车道的输入到了（what：user、event、retry；turnId：用户那一轮，关联编号）。
+  | { type: "input"; lane: Lane; what: string; turnId?: string | null }
   // 一件没人等的后台重活在等空闲 / 放行了。
   | { type: "gate.wait"; kind: string; label: string }
   | { type: "gate.release"; count: number };
@@ -367,8 +367,8 @@ function onInline(state: IdleLaneState, event: Extract<IdleLaneEvent, { type: "i
       // 兜底时限到了：照常就地压缩（D7「压缩自己的时限」）。
       const dueMs = compact.deferredSince === null ? 0 : now - compact.deferredSince;
       effects.push(line("idle.compact.forced", {
-        ...busyFields(state), reason: event.reason, dueMs, deferMaxMs: limits.deferMaxMs, deferrals: compact.deferrals,
-        job: compact.phase === "idle" ? "-" : compact.id, phase: compact.phase,
+        job: "compact", id: compact.phase === "idle" ? "-" : compact.id, ...busyFields(state), reason: event.reason, dueMs,
+        deferMaxMs: limits.deferMaxMs, deferrals: compact.deferrals, phase: compact.phase,
       }));
       effects.push(record(compact.id ?? `idle_compact_forced_${now.toString(36)}`, "compact", "forced", {
         dueMs, deferrals: compact.deferrals, phase: compact.phase, unit: state.busyUnit,
@@ -501,7 +501,10 @@ export function idleLaneStep(state: IdleLaneState, event: IdleLaneEvent, now: nu
     }
     case "compacted": {
       // 别处压缩成了（pi 就地、溢出恢复、daemon 的恢复压缩）：新的周期。还在写的摘要用不上了。
-      const effects: IdleLaneEffect[] = [];
+      // 记一行带单元编号的日志：就地压缩发生在哪个单元里（plc sched trace 按单元能看到它）。
+      const effects: IdleLaneEffect[] = [line("idle.compacted", {
+        how: event.how, ...busyFields(state), job: "compact", id: compact.id ?? "-", phase: compact.phase,
+      })];
       if (compact.id && (compact.phase === "summarizing" || compact.phase === "preparing" || compact.phase === "ready")) {
         effects.push(line("idle.discard", { job: "compact", id: compact.id, why: `compacted_by_${event.how}`, phase: compact.phase }));
         effects.push(record(compact.id, "compact", "discarded", { why: `compacted_by_${event.how}` }));
@@ -546,6 +549,7 @@ export function idleLaneStep(state: IdleLaneState, event: IdleLaneEvent, now: nu
         next = { ...next, precipitate: { ...job, yieldRequested: true } };
         effects.push(line("idle.yield", {
           job: "precipitate", id: job.id, unit: state.busyUnit, by: laneName(event.lane), what: event.what,
+          ...(event.turnId ? { turn: event.turnId } : {}),
           action: "abort_at_yield_point", runMs: job.startedAt === null ? null : now - job.startedAt,
         }));
         effects.push(record(job.id ?? state.busyUnit, "precipitate", "yield_requested", { by: laneName(event.lane), what: event.what, unit: state.busyUnit }));

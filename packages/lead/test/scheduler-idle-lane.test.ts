@@ -213,7 +213,7 @@ describe("idle lane: pi wants to compact in the middle of a unit", () => {
       [301_000, { type: "inline", reason: "threshold", ready: false }],
     ]);
     expect(kinds).toEqual(["inline", "compact.start", "inline"]);
-    expect(logs.at(-1)).toMatch(/^\[sched\] idle\.compact\.forced unit=unit_u lane=L1 reason=threshold dueMs=300000 deferMaxMs=300000 deferrals=1 job=idle_compact_\w+ phase=preparing$/);
+    expect(logs.at(-1)).toMatch(/^\[sched\] idle\.compact\.forced job=compact id=idle_compact_\w+ unit=unit_u lane=L1 reason=threshold dueMs=300000 deferMaxMs=300000 deferrals=1 phase=preparing$/);
   });
 });
 
@@ -226,11 +226,11 @@ describe("idle lane: the notes turn yields to new input", () => {
   it("asks the L4 unit to stop once, whoever comes", () => {
     const { state } = running();
     const { kinds, logs } = run([
-      [20_000, { type: "input", lane: 0, what: "user" }],
+      [20_000, { type: "input", lane: 0, what: "user", turnId: "turn_7" }],
       [20_500, { type: "input", lane: 2, what: "event" }],
     ], LIMITS, state);
     expect(kinds).toEqual(["yield.unit"]);
-    expect(logs[0]).toMatch(/^\[sched\] idle\.yield job=precipitate id=idle_precipitate_\w+ unit=unit_p by=L0 what=user action=abort_at_yield_point runMs=4000$/);
+    expect(logs[0]).toMatch(/^\[sched\] idle\.yield job=precipitate id=idle_precipitate_\w+ unit=unit_p by=L0 what=user turn=turn_7 action=abort_at_yield_point runMs=4000$/);
   });
 
   it("runs again at the next idle moment after a yield (resume), but not after it finished", () => {

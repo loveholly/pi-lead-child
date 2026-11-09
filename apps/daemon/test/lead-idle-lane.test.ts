@@ -109,7 +109,7 @@ describe("the idle lane: Lead's notes turn yields to new input", () => {
     await vi.waitFor(() => expect(logs.some((line) => /\[sched\] idle\.done job=precipitate .*outcome=done/u.test(line))).toBe(true), { timeout: 5_000 });
 
     // 只看日志就能说清：谁让谁让路、怎么让、结局是什么。
-    expect(logs.some((line) => /^\[sched\] idle\.yield job=precipitate id=idle_precipitate_\w+ unit=unit_\w+ by=L0 what=user action=abort_at_yield_point runMs=\d+$/u.test(line))).toBe(true);
+    expect(logs.some((line) => /^\[sched\] idle\.yield job=precipitate id=idle_precipitate_\w+ unit=unit_\w+ by=L0 what=user turn=\S+ action=abort_at_yield_point runMs=\d+$/u.test(line))).toBe(true);
     expect(logs.some((line) => /^\[sched\] decide unit=unit_\w+ lane=L4 turn=\S+ decision=idle_yield by=L0 steps=\d+$/u.test(line))).toBe(true);
     expect(logs.some((line) => /^\[sched\] abort unit=unit_\w+ lane=L4 .*reason=idle_yield:L0/u.test(line))).toBe(true);
     expect(logs.some((line) => /^\[sched\] unit\.end unit=unit_\w+ lane=L4 .*outcome=yielded .*aborts=idle_yield:L0/u.test(line))).toBe(true);

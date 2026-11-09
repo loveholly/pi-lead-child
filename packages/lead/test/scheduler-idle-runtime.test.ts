@@ -216,7 +216,8 @@ describe("idle lane on a real pi session", () => {
     h.runtime.unitOpened("unit_busy", 2);
     h.host.unit = "unit_busy";
     for (const tag of ["one", "two", "three", "four", "five", "six"]) await h.session.prompt(big(1_200, tag), { expandPromptTemplates: false });
-    expect(h.logs.some((line) => line.includes("idle.compact.forced unit=unit_busy lane=L2 reason=threshold"))).toBe(true);
+    expect(h.logs.some((line) => /idle\.compact\.forced job=compact id=idle_compact_\w+ unit=unit_busy lane=L2 reason=threshold/.test(line))).toBe(true);
+    expect(h.logs.some((line) => /^\[sched\] idle\.compacted how=threshold unit=unit_busy lane=L2 job=compact id=idle_compact_\w+ phase=summarizing$/.test(line))).toBe(true);
     expect(compactions(h).at(-1)?.summary).toContain("INLINE SUMMARY");
     expect(h.inlineSummaries).toBeGreaterThan(0);
     // 别处压缩成了：还在写的摘要用不上，子进程被叫停。

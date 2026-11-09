@@ -2151,7 +2151,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     publishTurnStarted(entry, "queued", { placement: "queued" });
     carryOverTurns.push({ prompt, entry });
     log(`user message ${entry.turn.id} waits for Lead's idle work to yield (unit ${sched.unit?.id ?? "-"})`);
-    idleLane.inputArrived(0, "user");
+    idleLane.inputArrived(0, "user", entry.turn.id);
   }
 
   // 用户选「排队」、Lead 正在忙（工单 04，spec D6）：交给 pi 的 followUp。Lead 答完这一轮（插话也处理完）以后，

@@ -188,9 +188,9 @@ export class IdleLaneRuntime {
   }
 
   /** Lead 忙着 L4 的活时，更高车道的输入到了。 */
-  inputArrived(lane: Lane, what: string): void {
+  inputArrived(lane: Lane, what: string, turnId?: string | null): void {
     if (lane >= 4) return;
-    this.dispatch({ type: "input", lane, what });
+    this.dispatch({ type: "input", lane, what, ...(turnId ? { turnId } : {}) });
   }
 
   /** 发 prompt 之前等：空闲车道正在碰会话（取对话、接上摘要，各几毫秒）。不会抛错。 */
