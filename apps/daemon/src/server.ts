@@ -5293,30 +5293,41 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
   // 红线中断以后，这一次 prompt 返回了：在同一轮里马上给 Lead 红线消息。pi 先送这条，再送排着的插话；排队的消息
   // 等 Lead 交接完（这一段最后的回答）才送，那时工具限制已经解除。交接超过 PLC_LEAD_HANDOFF_MS 时再中断一次，这一轮结束。
   // 交接是这个单元的第二段运行：用一个新的 controller（AbortSignal 只能触发一次）。
+  // 红线可能在同一个单元里停下不止一次：Lead 交接完（这一段最后的回答）以后，pi 在同一次运行里接着答排着的追问，预算从那时
+  // 重新算；追问做久了又到预算，红线再停一次。这时再开一段交接（2026-11-10 开发模式的发现：以前第二次停下以后这一轮直接收尾，
+  // 排着的追问没有回答，记成「Lead 未生成回复」）。最多交接 3 段，免得来回停。
   async function continueAfterRedLine(): Promise<void> {
-    const handoff = sched.dispatch({ type: "prompt.returned", limits: schedulerLimits() })
-      .find((effect) => effect.type === "redline.handoff");
-    if (!handoff) return;
-    activeTurnError = null;
-    sched.nextSegment();
-    handoffTimer = setNodeTimeout(() => {
-      handoffTimer = null;
-      if (schedRedLinePhase(sched.state) !== "handoff") return;
-      log(`lead red line: the hand-off took over ${Math.round(handoff.timeoutMs / 1_000)}s; ending the turn`);
-      sched.dispatch({ type: "handoff.timeout" });
-    }, handoff.timeoutMs);
-    handoffTimer.unref();
-    // 交接这一段 Lead 说了什么：没说话时系统替它写一句确认（lead-scheduler spec H6）。
-    const spokenBefore = activeChannelTurn?.assistantText.length ?? 0;
-    try {
-      await session.prompt(redLineMessage(handoff.elapsedMs, redLineWaiting(handoff.waiting), handoff.timeoutMs));
-    } finally {
-      if (handoffTimer) clearNodeTimeout(handoffTimer);
-      handoffTimer = null;
+    for (let round = 1; round <= 3; round += 1) {
+      const handoff = sched.dispatch({ type: "prompt.returned", limits: schedulerLimits() })
+        .find((effect) => effect.type === "redline.handoff");
+      if (!handoff) return;
+      activeTurnError = null;
+      sched.nextSegment();
+      handoffTimer = setNodeTimeout(() => {
+        handoffTimer = null;
+        if (schedRedLinePhase(sched.state) !== "handoff") return;
+        log(`lead red line: the hand-off took over ${Math.round(handoff.timeoutMs / 1_000)}s; ending the turn`);
+        sched.dispatch({ type: "handoff.timeout" });
+      }, handoff.timeoutMs);
+      handoffTimer.unref();
+      // 交接这一段 Lead 说了什么：没说话时系统替它写一句确认（lead-scheduler spec H6）。
+      const spokenBefore = activeChannelTurn?.assistantText.length ?? 0;
+      try {
+        await session.prompt(redLineMessage(handoff.elapsedMs, redLineWaiting(handoff.waiting), handoff.timeoutMs));
+      } finally {
+        if (handoffTimer) clearNodeTimeout(handoffTimer);
+        handoffTimer = null;
+      }
+      // 这一段跑完以前红线又停了一次（追问做到了预算）：再交接一段。用户 /stop、停机排空时不再交接。
+      if (schedRedLinePhase(sched.state) === "aborting" && !stoppedByUser(sched.state) && !abortedForRestart(sched.state)) {
+        log(schedulerLine("decide", { unit: sched.unit?.id ?? "-", decision: "handoff_again", round: round + 1 }));
+        continue;
+      }
+      if (schedRedLinePhase(sched.state) === "closing") activeTurnError = null;
+      sched.dispatch({ type: "handoff.done" });
+      confirmForcedHandoff(spokenBefore);
+      return;
     }
-    if (schedRedLinePhase(sched.state) === "closing") activeTurnError = null;
-    sched.dispatch({ type: "handoff.done" });
-    confirmForcedHandoff(spokenBefore);
   }
 
   // 被迫交（lead-scheduler spec H6）：用户在等的这一轮，交接这一段 Lead 一句话都没说时，系统用模板写：交出去了，或者挂起了。

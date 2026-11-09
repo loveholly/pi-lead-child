@@ -213,6 +213,29 @@ describe("the 2026-11-03 queue, replayed", () => {
     expect(red).toContain("hand_off");
   }, 20_000);
 
+  // 回归（2026-11-10 开发模式）：交接完以后 pi 在同一次运行里接着答排着的追问，追问又做到了预算。以前第二次停下没有交接，
+  // 这一轮直接收尾，追问记成「Lead 未生成回复」。现在再交接一段，追问有回答。
+  it("hands off again when the queued follow-up runs past the budget in the same unit", async () => {
+    lights(600_000, 400);
+    let red = 0;
+    const { say, lead, logs, turn } = await boot((call) => {
+      if (has(call, RED)) {
+        red += 1;
+        return { say: red === 1 ? "A 交出去了。" : "B 也交出去了。" };
+      }
+      if (has(call, "先整理 acme/a 的发布说明")) return { tools: [github] };
+      if (has(call, "再整理 acme/b 的发布说明")) return { tools: [github] };
+      return { say: [never] };
+    });
+    await say("r1", "先整理 acme/a 的发布说明");
+    await vi.waitFor(() => expect(lead.calls.length).toBe(2), { timeout: 5_000 });
+    const follow = await say("r2", "再整理 acme/b 的发布说明", "followUp");
+    await vi.waitFor(() => expect(turn(follow.turnId).state).toBe("completed"), { timeout: 10_000 });
+    expect(red).toBe(2);
+    expect(lead.aborts()).toBe(2);
+    expect(logs.some((line) => line.includes("decision=handoff_again"))).toBe(true);
+  }, 20_000);
+
   it("lets a running bash command finish before it stops the turn", async () => {
     lights(150, 300);
     const pushed = deferred();
