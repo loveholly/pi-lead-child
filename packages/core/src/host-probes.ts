@@ -95,20 +95,18 @@ export function startHostProbes(options: HostProbeOptions): HostProbes {
   const blockedMs = options.blockedMs ?? 2_000;
   const timers: NodeJS.Timeout[] = [];
 
-  // 主线程延迟的分布。
+  // 主线程延迟的分布。直方图记的是相邻两次采样的间隔，里面包含采样的间隔本身（resolution），读数要减掉它。
+  const LOOP_RESOLUTION_MS = 20;
   let histogram: IntervalHistogram | null = null;
   try {
-    histogram = monitorEventLoopDelay({ resolution: 20 });
+    histogram = monitorEventLoopDelay({ resolution: LOOP_RESOLUTION_MS });
     histogram.enable();
   } catch {
     histogram = null;
   }
+  const delayMs = (nanoseconds: number) => Math.max(0, Math.round(nanoseconds / 1e6) - LOOP_RESOLUTION_MS);
   const loopStats = () => histogram
-    ? {
-      p50: Math.round(histogram.percentile(50) / 1e6),
-      p99: Math.round(histogram.percentile(99) / 1e6),
-      max: Math.round(histogram.max / 1e6),
-    }
+    ? { p50: delayMs(histogram.percentile(50)), p99: delayMs(histogram.percentile(99)), max: delayMs(histogram.max) }
     : { p50: 0, p99: 0, max: 0 };
 
   // 线程池探针：同一时间只有一次 stat 在等。
