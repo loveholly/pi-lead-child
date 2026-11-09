@@ -2092,6 +2092,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     if (!interruptLeadStep()) return;
     stepInterruptedForSteer = true;
     log(`steer ${sink.turn.id}: stopped the model's unfinished step so Lead reads the steer now`);
+    sched.noteSteerInterrupt(sink.turn.id);
   }
 
   // user-placement.ts 要的、正在跑的这一轮的事实。

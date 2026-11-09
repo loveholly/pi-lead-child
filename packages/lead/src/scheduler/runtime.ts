@@ -131,6 +131,19 @@ export class LeadSchedulerRuntime {
     return lane;
   }
 
+  /**
+   * 打断式插话停下了这一步的模型请求（step-interrupt.ts，D4 的「插话」）。它不经过控制层：只中止这一次模型请求，
+   * 单元照常往下走。记一条决定，带单元编号和插话的那一轮，时间线里看得到它。
+   */
+  noteSteerInterrupt(turnId: string): void {
+    const unit = this.#state.unit;
+    this.#options.log(schedulerLine("decide", {
+      unit: unit?.id ?? "-", lane: unit ? laneName(unit.lane) : "-", turn: turnId, decision: "steer_interrupt",
+      stage: this.#stage?.stage ?? "-", step: this.#stage?.step ?? null,
+    }));
+    if (unit) this.#record("decided", { unitId: unit.id, turnId, lane: laneName(unit.lane), decision: "steer_interrupt" });
+  }
+
   /** extension 报告一步现在在哪个阶段。 */
   noteStage(stage: LeadStageInfo | null): void {
     this.#stage = stage;

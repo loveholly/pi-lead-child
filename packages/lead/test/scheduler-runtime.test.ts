@@ -136,6 +136,20 @@ describe("LeadSchedulerRuntime", () => {
     ]);
   });
 
+  // 可观测性的缺口（P1 验收时发现）：打断式插话只记了一行普通日志，按单元查时间线时看不到它。
+  it("records a steer interrupt as a decision of the running unit", () => {
+    const logs: string[] = [];
+    const records: string[] = [];
+    const rt = new LeadSchedulerRuntime({
+      log: (line) => logs.push(line), record: (kind, payload) => records.push(`${kind}:${String(payload.decision)}`), newUnitId: () => "unit_s",
+    });
+    rt.openUnit({ source: "user", lane: 0, origin: null, turnId: "turn_a" });
+    rt.noteStage({ run: 1, step: 2, stage: "B1", since: 0 });
+    rt.noteSteerInterrupt("turn_b");
+    expect(logs.at(-1)).toBe("[sched] decide unit=unit_s lane=L0 turn=turn_b decision=steer_interrupt stage=B1 step=2");
+    expect(records).toEqual(["unit_started:undefined", "decided:steer_interrupt"]);
+  });
+
   it("describes the running unit and the waiting lanes", () => {
     let clock = 1_000;
     const rt = new LeadSchedulerRuntime({ log: () => {}, now: () => clock, newUnitId: () => "unit_s" });
