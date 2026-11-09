@@ -51,6 +51,7 @@ import { LEAD_CODEMODE_TOOL, LEAD_HAND_TOOLS, leadHandsExtension } from "./hands
 import { handbookGuardExtension } from "./handbook-guard.js";
 import { leadSchedulerExtension } from "./scheduler/extension.js";
 import type { LeadSchedulerRuntime } from "./scheduler/runtime.js";
+import { idleLaneExtension, type IdleLaneRuntime } from "./scheduler/idle-runtime.js";
 import { TurnEvidence } from "./credibility/evidence.js";
 import type { CreateSmartModelOptions, SmartTextComplete } from "@pi-lead-child/engine";
 
@@ -220,6 +221,8 @@ export async function createLeadSession(opts: {
   hostLoad?: () => string;
   // daemon 的调度器（scheduler/runtime.ts，lead-scheduler spec D13）：扩展和 daemon 共用同一个实例。
   scheduler?: LeadSchedulerRuntime;
+  // 空闲车道（scheduler/idle-runtime.ts，lead-scheduler spec D8，P4）：pi 想压缩时问它。和 daemon 共用同一个实例。
+  idleLane?: IdleLaneRuntime;
 }): Promise<{
   session: LeadEngine; modelName: string; syncToolAccess: () => void; reloadExtensions: () => Promise<void>;
   models: string[]; switchModel: (spec: string) => Promise<void>; reportsInputDelivery: boolean; interruptStep: () => boolean;
@@ -397,6 +400,9 @@ export async function createLeadSession(opts: {
         name: "plc-cost-signals", hidden: true,
         factory: costSignalsExtension({ compactAt: (window) => window - settingsManager.getCompactionSettings().reserveTokens }),
       },
+      // 空闲车道（scheduler/idle-runtime.ts，P4）：pi 在单元中间想压缩时推迟到空闲，或者用子进程写好的摘要。
+      // 排在分段压缩之前：它取消时 pi 不再问后面的扩展；它接上时分段压缩跳过（skip）。
+      ...(opts.idleLane ? [{ name: "plc-idle-lane", hidden: true, factory: idleLaneExtension(opts.idleLane) }] : []),
       // 历史放不进一次摘要请求时分段压缩（compaction-chunks.ts，2026-11-01）。pi 自己触发的压缩也由它来写，
       // 带上删减的标准和「能力不写成规则」（2026-11-02）；daemon 发起、放得进一次请求的压缩照旧交给 pi。
       {
@@ -405,6 +411,7 @@ export async function createLeadSession(opts: {
           ...(opts.onCompactionProgress ? { onProgress: opts.onCompactionProgress } : {}),
           log: (line) => console.error(line),
           instructions: leadAutoCompactionInstructions(),
+          ...(opts.idleLane ? { skip: (event) => opts.idleLane!.claims(event) } : {}),
         }),
       },
       // inlineBudget 0：codemode 的说明不列不常用工具的签名，系统提示词列它们的名字（tool-exposure.ts）。

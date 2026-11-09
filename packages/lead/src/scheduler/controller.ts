@@ -24,13 +24,16 @@ export type LeadAbortReason =
   // 用户的 /stop。
   | { kind: "user_stop" }
   // 停机前排空到时。
-  | { kind: "drain" };
+  | { kind: "drain" }
+  // 空闲车道的活（L4 单元，例如整理笔记）给更高车道的输入让路（spec D8，P4）。by 是那条输入的车道。
+  | { kind: "idle_yield"; by: string };
 
 export type LeadAbortKind = LeadAbortReason["kind"];
 
 /** 日志里的原因：budget、stage_timeout:A、preempt。不写原文。 */
 export function abortReasonText(reason: LeadAbortReason): string {
   if (reason.kind === "stage_timeout") return `stage_timeout:${reason.stage}`;
+  if (reason.kind === "idle_yield") return `idle_yield:${reason.by}`;
   return reason.kind;
 }
 

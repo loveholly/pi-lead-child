@@ -11,7 +11,8 @@ import { join } from "node:path";
 import { createInterface } from "node:readline";
 import type { EventRecord } from "@pi-lead-child/store";
 
-export const SCHED_TRACE_ID = /^(unit|turn)_[A-Za-z0-9-]{4,80}$/u;
+// 空闲车道的作业（P4）编号是 idle_<种类>_…：它的日志带 id=idle_…，events 表里的 unitId 也是它。
+export const SCHED_TRACE_ID = /^(unit|turn|idle)_[A-Za-z0-9_-]{4,80}$/u;
 
 export interface SchedTraceEntry {
   at: number;
@@ -41,6 +42,15 @@ function logTime(line: string): number | null {
 /** 这个 id 关联到哪些单元：本身是单元编号，或者日志、会话文件、事件里和这个 turn 一起出现的单元。 */
 export function unitsOf(id: string, sources: SchedTraceSources, unitsFromEvents: readonly string[] = []): string[] {
   if (id.startsWith("unit_")) return [id];
+  // 空闲车道的作业：连同它开的单元（整理笔记那一轮）一起查。
+  if (id.startsWith("idle_")) {
+    const units = new Set([id]);
+    for (const line of sources.logLines) {
+      if (!line.includes(`id=${id}`)) continue;
+      for (const match of line.matchAll(UNIT_FIELD)) units.add(match[1]!);
+    }
+    return [...units];
+  }
   const units = new Set(unitsFromEvents);
   for (const line of sources.logLines) {
     if (!line.includes(`turn=${id}`)) continue;
@@ -62,7 +72,7 @@ function fields(data: Record<string, unknown>, skip: ReadonlySet<string>): strin
 export function schedTrace(id: string, units: readonly string[], sources: SchedTraceSources): SchedTraceEntry[] {
   const unitSet = new Set(units);
   const turnId = id.startsWith("turn_") ? id : null;
-  const mentions = (line: string) => [...unitSet].some((unit) => line.includes(`unit=${unit}`))
+  const mentions = (line: string) => [...unitSet].some((unit) => line.includes(`unit=${unit}`) || line.includes(`id=${unit}`))
     || (turnId !== null && line.includes(`turn=${turnId}`));
   const entries: SchedTraceEntry[] = [];
   const own: Array<{ at: number; line: string }> = [];

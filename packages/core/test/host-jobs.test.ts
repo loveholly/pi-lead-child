@@ -4,7 +4,8 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
-  assertRemovableTree, describeHostJobs, removeTree, removeTreeCommand, runningHostJobs, schedLine, setHostJobLog, trackHostJob,
+  assertRemovableTree, describeHostJobs, removeTree, removeTreeCommand, runHostChild, runningHostJobs, schedLine, setHostIdleGate,
+  setHostJobLog, trackHostJob, waitForHostIdle,
 } from "../src/index.js";
 import { tempDir } from "../testing/index.js";
 
@@ -92,5 +93,55 @@ describe("the job registry", () => {
   it("writes [sched] lines with quoted values only where needed", () => {
     expect(schedLine("step", { unit: 3, stage: "A", reason: "pool busy", none: null, skipped: undefined }))
       .toBe('[sched] step unit=3 stage=A reason="pool busy" none=null');
+  });
+});
+
+describe("runHostChild", () => {
+  it("passes stdin, captures stdout, and logs the job without the input", async () => {
+    const lines: string[] = [];
+    setHostJobLog((line) => lines.push(line));
+    let spawned: number | null = null;
+    const result = await runHostChild({
+      kind: "idle-compact", label: "idle_compact_x", command: "/bin/cat", args: [], priority: "utility",
+      stdin: "secret-ish input", captureStdout: true, onSpawn: (pid) => { spawned = pid; },
+    });
+    expect(result).toMatchObject({ code: 0, stdout: "secret-ish input", timedOut: false, aborted: false });
+    expect(spawned).toEqual(expect.any(Number));
+    expect(lines.join("\n")).not.toContain("secret-ish");
+    expect(lines[1]).toMatch(/^\[sched\] job\.end id=\d+ kind=idle-compact label=idle_compact_x pid=\d+ ms=\d+ exit=0$/);
+  });
+
+  it("stops a child that runs past its time limit", async () => {
+    const lines: string[] = [];
+    setHostJobLog((line) => lines.push(line));
+    const result = await runHostChild({ kind: "idle-compact", label: "slow", command: "/bin/sleep", args: ["30"], timeoutMs: 100 });
+    expect(result.timedOut).toBe(true);
+    expect(result.code).toBeNull();
+    expect(runningHostJobs()).toEqual([]);
+    expect(lines.at(-1)).toMatch(/job\.end .*signal=SIGTERM timedOut=true$/);
+  });
+});
+
+describe("the idle gate (lead-scheduler P4)", () => {
+  afterEach(() => setHostIdleGate(null));
+
+  it("lets background work start at once when no gate is set, and waits for the gate when one is", async () => {
+    await expect(waitForHostIdle("worktree-delete", "wt-1")).resolves.toBeUndefined();
+    let open!: () => void;
+    const seen: string[] = [];
+    setHostIdleGate((job) => { seen.push(`${job.kind}:${job.label}`); return new Promise<void>((resolve) => { open = resolve; }); });
+    let started = false;
+    const waiting = waitForHostIdle("worktree-delete", "wt-2").then(() => { started = true; });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(started).toBe(false);
+    open();
+    await waiting;
+    expect(started).toBe(true);
+    expect(seen).toEqual(["worktree-delete:wt-2"]);
+  });
+
+  it("does not block the work forever when the gate fails", async () => {
+    setHostIdleGate(() => Promise.reject(new Error("broken")));
+    await expect(waitForHostIdle("worktree-delete", "wt-3")).resolves.toBeUndefined();
   });
 });

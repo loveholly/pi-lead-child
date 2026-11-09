@@ -22,6 +22,7 @@ export const HASHED_FILES = [
   "apps/daemon/dist/ops.mjs",
   "apps/daemon/dist/mcp-server.mjs",
   "apps/daemon/dist/hindsight.mjs",
+  "apps/daemon/dist/idle-compact.mjs",
   "apps/daemon/dist/launcher-shim.mjs",
   "apps/daemon/dist/web/index.html",
   "apps/cli/dist/cli.mjs",

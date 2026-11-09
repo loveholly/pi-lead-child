@@ -7,7 +7,7 @@ import { Type } from "typebox";
 import { registerEventKind, type EventKindDefinition } from "./events.ts";
 
 export const SCHEDULER_RECORD_KINDS = [
-  "unit_started", "unit_ended", "decided", "aborted", "lane_changed", "stage_slow",
+  "unit_started", "unit_ended", "decided", "aborted", "lane_changed", "stage_slow", "idle_job",
 ] as const;
 export type SchedulerRecordEventKind = typeof SCHEDULER_RECORD_KINDS[number];
 
@@ -44,6 +44,7 @@ const DESCRIPTIONS: Record<SchedulerRecordEventKind, string> = {
   aborted: "调度器中止了一段运行：原因（预算、交接超时、/stop、排空）。",
   lane_changed: "一个工作单元换了车道。",
   stage_slow: "一步在某个阶段等过了阈值（例如请求前准备超过 10 秒），带宿主的负载。",
+  idle_job: "空闲车道（L4）的一件活：压缩、整理笔记的开始、让路、完成、失败、兜底。unitId 是作业编号（idle_…）。",
 };
 
 export const LEAD_SCHEDULER_EVENT_KINDS: readonly EventKindDefinition[] = SCHEDULER_RECORD_KINDS.map((kind) => ({
@@ -85,4 +86,33 @@ export interface SchedulerSnapshot {
   };
   lanes: Array<{ lane: string; deadlineMs: number | null; waiting: Array<{ who: string; conversation: string; count: number; waitedMs: number; overdue: boolean }> }>;
   host: string | null;
+  // 空闲车道（L4，P4）：Lead 空闲了多久、上下文水位，以及压缩、整理笔记、回收区删除各自在做什么。旧的 daemon 没有这一项。
+  idle?: IdleLaneSnapshot;
+}
+
+export interface IdleLaneSnapshot {
+  // Lead 空闲了多久；忙着时为 null。
+  idleMs: number | null;
+  graceMs: number;
+  // 上下文占窗口的比例和两条线。
+  ratio: number | null;
+  precipitateRatio: number;
+  compactRatio: number;
+  compact: {
+    phase: string;
+    id: string | null;
+    promoted: boolean;
+    sinceMs: number | null;
+    // 这个周期 pi 的就地压缩被推迟了多久、几次；兜底时限。
+    deferredMs: number | null;
+    deferrals: number;
+    deferMaxMs: number;
+    failures: number;
+    retryInMs: number | null;
+    // 写摘要的子进程。
+    pid: number | null;
+  };
+  precipitate: { phase: string; id: string | null; done: boolean; yields: number; unitId: string | null };
+  // 在等 Lead 空闲的后台重活（回收区的删除）。
+  gated: number;
 }

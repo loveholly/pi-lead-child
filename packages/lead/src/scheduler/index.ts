@@ -5,3 +5,9 @@ export * from "./core.js";
 export * from "./placement.js";
 export * from "./runtime.js";
 export { leadSchedulerExtension, stepLine, STAGE_A_WARN_MS, type LeadSchedulerExtensionOptions, type LeadStepTiming } from "./extension.js";
+export * from "./idle-lane.js";
+export * from "./idle-compaction.js";
+export {
+  IdleLaneRuntime, idleLaneExtension, IDLE_APPLY_INSTRUCTIONS, IDLE_PROBE_INSTRUCTIONS,
+  type IdleLaneHost, type IdleLaneRuntimeOptions, type PrecipitationOutcome,
+} from "./idle-runtime.js";

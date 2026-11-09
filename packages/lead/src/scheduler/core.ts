@@ -59,7 +59,8 @@ export interface ToolInFlight {
   write: boolean;
 }
 
-export type UnitOutcome = "answered" | "failed" | "stopped" | "interrupted" | "offline";
+// yielded：空闲车道的单元给更高车道的输入让了路（P4）。
+export type UnitOutcome = "answered" | "failed" | "stopped" | "interrupted" | "offline" | "yielded";
 
 export interface UnitState {
   id: string;
@@ -136,7 +137,9 @@ export type SchedulerEvent =
   | { type: "drain.start" }
   | { type: "drain.abort" }
   | { type: "drain.expire" }
-  | { type: "starting"; on: boolean };
+  | { type: "starting"; on: boolean }
+  // 空闲车道（P4，idle-lane.ts）：L4 单元给更高车道的输入让路。调用方已经等正在跑的写操作做完（D5）。
+  | { type: "idle.yield"; by: Lane };
 
 /** 要写进 events 表和会话文件的调度记录（D12）。payload 里只有编号、数字和种类。 */
 export type SchedulerRecordKind = "unit_started" | "unit_ended" | "decided" | "aborted" | "lane_changed" | "stage_slow";
@@ -182,6 +185,11 @@ export function stoppedByUser(state: SchedulerState): boolean {
 /** 排空中断了这个单元（以前的 restartAbort）。 */
 export function abortedForRestart(state: SchedulerState): boolean {
   return state.unit?.aborts.some((reason) => reason.kind === "drain") ?? false;
+}
+
+/** 空闲车道的单元给更高车道的输入让了路（P4）：这一步以 aborted 结束不是失败。 */
+export function yieldedToInput(state: SchedulerState): boolean {
+  return state.unit?.aborts.some((reason) => reason.kind === "idle_yield") ?? false;
 }
 
 /** 这一步以 aborted 结束，是红线要求的（停下，或者交接超时）。 */
@@ -548,5 +556,18 @@ export function schedulerStep(state: SchedulerState, event: SchedulerEvent, now:
     }
     case "starting":
       return state.starting === event.on ? { state, effects: [] } : { state: { ...state, starting: event.on }, effects: [] };
+    case "idle.yield": {
+      // 只停 L4 的单元（spec D1：L4 随时让出）；已经停过、/stop 或者排空了的不再停。
+      if (!unit || unit.lane !== 4 || yieldedToInput(state) || stoppedByUser(state) || abortedForRestart(state)) return { state, effects: [] };
+      const reason: LeadAbortReason = { kind: "idle_yield", by: laneName(event.by) };
+      return {
+        state: withUnit(state, { ...unit, aborts: [...unit.aborts, reason] }),
+        effects: [
+          { type: "log", line: schedulerLine("decide", { ...unitFields(unit), decision: "idle_yield", by: laneName(event.by), steps: unit.steps }) },
+          { type: "record", kind: "decided", payload: { unitId: unit.id, turnId: unit.turnId, lane: laneName(unit.lane), decision: "idle_yield", by: laneName(event.by), elapsedMs: now - unit.openedAt } },
+          ...abortEffects(unit, reason, now),
+        ],
+      };
+    }
   }
 }

@@ -23,8 +23,9 @@ import {
   userQueueNoticeMs,
 } from "@pi-lead-child/lead";
 import {
-  abortedByRedLine, abortedForRestart, admitSystemUnit, canInterruptForSteer, countedWaiting, handoffGate, LeadSchedulerRuntime,
-  redLinePhase as schedRedLinePhase, schedulerLine, stoppedByUser, unitLane,
+  abortedByRedLine, abortedForRestart, admitSystemUnit, canInterruptForSteer, countedWaiting, handoffGate, IdleLaneRuntime,
+  idleLaneLimitsFromEnv, LeadSchedulerRuntime, redLinePhase as schedRedLinePhase, schedulerLine, stoppedByUser, unitLane,
+  yieldedToInput, type PrecipitationOutcome,
   type BudgetFacts, type SchedulerEffect, type SchedulerLimits, type UnitOutcome, type WaitingEntry,
 } from "@pi-lead-child/lead";
 import { isSummaryTokenCapError, leadCompactionInstructions, LEAD_COMPACTION_BUDGETS, type CompactionProgress } from "@pi-lead-child/lead";
@@ -104,7 +105,7 @@ import {
 import { createWatchLightTask, leadSandboxPolicyAsync, leadScratchDir } from "@pi-lead-child/lead";
 import { watchAgentChoice } from "@pi-lead-child/store";
 import {
-  describeHostLoad, envConfigPath, loadPlcConfig, localIso, projectRoot, setHostJobLog, startHostProbes, warmSandboxTrustBundle,
+  describeHostLoad, envConfigPath, loadPlcConfig, localIso, projectRoot, setHostIdleGate, setHostJobLog, startHostProbes, warmSandboxTrustBundle,
   type HostProbes,
 } from "@pi-lead-child/core";
 import { createConfigWatch } from "./config-watch.js";
@@ -779,6 +780,34 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     execute: (effect) => executeSchedulerEffect(effect),
     stopExecution: () => session.abort?.(),
   });
+  // 空闲车道 L4（lead 的 scheduler/idle-lane.ts、idle-runtime.ts，lead-scheduler spec D8，P4）：压缩、整理笔记、回收区的删除和
+  // 清理扫描改到 Lead 空闲时做。压缩的摘要在子进程里写，接上只在 Lead 空闲时（几毫秒）；整理笔记的 L4 单元给新输入让路；
+  // pi 在单元中间想压缩时推迟，兜底时限到了照常压缩。每个决定一条 [sched] idle.* 日志，events 表里 scheduler.idle_job。
+  // 下面用到的函数和会话在后面才定义：这里只登记，到用的时候它们都已经有了。
+  const idleLane = new IdleLaneRuntime({
+    limits: idleLaneLimitsFromEnv(process.env, { precipitateRatio: PRECIPITATE_RATIO }),
+    compactionTimeoutMs: Number(process.env.PLC_LEAD_COMPACTION_TIMEOUT_MS) > 0 ? Number(process.env.PLC_LEAD_COMPACTION_TIMEOUT_MS) : 10 * 60_000,
+    host: {
+      log,
+      record: (payload) => { recordSchedulerEvent(db, "idle_job", payload); },
+      currentUnit: () => sched.unit?.id ?? null,
+      starting: () => sched.starting || sched.draining,
+      pendingInput: () => hasUnansweredUserTurn()
+        || (leadInput.pendingMessages().length > 0 && !(leadWakeRetry && leadWakeRetry.at > Date.now())),
+      contextRatio: () => leadContextRatio(),
+      runPrecipitation: () => runPrecipitation(),
+      writeInFlight: () => Object.values(sched.unit?.tools ?? {}).find((tool) => tool.write)?.name ?? null,
+      yieldUnit: (by) => { sched.dispatch({ type: "idle.yield", by }); },
+      compact: (instructions) => {
+        if (typeof session.compact !== "function") return Promise.reject(new Error("the session cannot compact"));
+        return session.compact(instructions);
+      },
+    },
+  });
+  // 回收区的删除（engine 的 workspace.ts）开始以前等 Lead 空闲（core 的 waitForHostIdle）。
+  setHostIdleGate((job) => idleLane.gate(job));
+  // 上一个单元的结局（整理笔记那一轮让路了没有：runPrecipitation 据此告诉空闲车道）。
+  let lastUnitOutcome: UnitOutcome | null = null;
   // 排着的外部消息的推送（工单 10，publishLeadQueue）：上一次推的样子、合并变化的定时器、daemon 在停（不再推）。
   // 放在这里：启动的半路上就可能开一轮，那时下面定义的函数已经能调，变量也要已经有了。
   let leadQueueSent = "";
@@ -2112,6 +2141,15 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     log(`user message ${entry.turn.id} waits for its own turn: the running turn read external content`);
   }
 
+  // Lead 在做空闲车道的活（L4）时用户发来的消息：存进 carryOverTurns，叫那个 L4 单元让路。它结束时 dispatchLeadWork 先开这一轮。
+  // 界面显示「排队」，让路通常在几秒之内（正在等模型时马上停；正在跑写操作时等它做完）。
+  function holdForIdleYield(prompt: string, entry: ActiveChannelTurn): void {
+    publishTurnStarted(entry, "queued", { placement: "queued" });
+    carryOverTurns.push({ prompt, entry });
+    log(`user message ${entry.turn.id} waits for Lead's idle work to yield (unit ${sched.unit?.id ?? "-"})`);
+    idleLane.inputArrived(0, "user");
+  }
+
   // 用户选「排队」、Lead 正在忙（工单 04，spec D6）：交给 pi 的 followUp。Lead 答完这一轮（插话也处理完）以后，
   // pi 把排着的几条一起送进去（followUpMode=all），开下一轮；它们排在系统事件前面（系统事件等这次运行结束才单独开一轮）。
   // 会话不报告输入送到的时刻时（只有测试里的替身会这样），不交给 pi：daemon 自己在这次运行结束后开下一轮答它。
@@ -2836,6 +2874,8 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     toolGate: () => handoffGate(sched.state, RED_LINE_TOOLS),
     // 调度器（lead-scheduler spec D13）：extension 和 daemon 共用这一个实例。
     scheduler: sched,
+    // 空闲车道（P4）：pi 想压缩时问它。
+    idleLane,
     // 每一步的阶段耗时写进 daemon 的日志（lead-scheduler spec D12）；阶段 A 超时附上宿主的负载。
     schedulerLog: log,
     hostLoad: describeHostLoad,
@@ -3183,7 +3223,6 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     },
   };
 
-  let precipitated = false; // 每个压缩周期只做一次沉淀检查
   let coreMemoryDirty = false; // 压缩后核心记忆需在下一轮前缀重注入（spec §A2 的既定偏差：前缀注入替代 followUp）
   // 上下文压缩的时限（spec D9）：2026-10-16 一次溢出压缩跑了 70 分钟才失败。超过 PLC_LEAD_COMPACTION_TIMEOUT_MS
   // （缺省 10 分钟）时，daemon 用 pi 的 abortCompaction 中止这次压缩，按失败处理。
@@ -3345,6 +3384,9 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
         } else if (stoppedByAbort && abortedByRedLine(sched.state)) {
           // 红线停下的（lead 的 red-line.ts）：不是失败，这一轮接着交接或者就此结束。
           log("lead red line: the running reply was stopped");
+        } else if (stoppedByAbort && yieldedToInput(sched.state)) {
+          // 空闲车道的活（整理笔记）给新输入让了路（P4）：不是失败，这一轮就此结束，下一次空闲再接着做。
+          log("lead idle work stopped: it yields to a new input");
         } else if (event.message.stopReason === "error" || event.message.stopReason === "aborted") {
           const rawError = String(
             event.message.errorMessage
@@ -3399,7 +3441,9 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     if (event.type === "compaction_start") {
       compactionTimedOut = false;
       compactionReason = String(event.reason ?? "unknown");
-      log(`compaction started (${compactionReason})`);
+      // 空闲车道取对话（session.compact 的取对话标记）：几毫秒，马上取消，不是一次压缩。
+      if (idleLane.sessionOp === "probe") return;
+      log(idleLane.sessionOp === "apply" ? "compaction started (idle lane: applying a summary written in a child process)" : `compaction started (${compactionReason})`);
       startCompactionTimer();
     }
     // 以前每一次 compaction_end 都记成「compaction done」，失败的压缩也一样（2026-10-16 那五次）。
@@ -3411,12 +3455,15 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       const timedOut = compactionTimedOut;
       const outcome = compactionEndOutcome(event, { timedOut, timeoutMs: compactionTimeoutMs });
       compactionTimedOut = false;
+      // 空闲车道取消的（取对话、推迟到空闲）不是压缩中止；它自己写了 [sched] idle.* 日志。接上的摘要照常算一次压缩成功。
+      const idle = idleLane.compactionEnded(event);
+      if (idle.ours && !idle.applied) return;
       if (outcome.kind === "succeeded") {
-        precipitated = false; // 新压缩周期，重新武装
+        // 新压缩周期：整理笔记重新武装（空闲车道 compactionEnded 里做）。
         coreMemoryDirty = true; // 压缩摘要不保真核心记忆，下一轮重新注入
         leadInput.forgetSentSituation(); // 压缩摘要也不保真当前局面：下一份整段给
         compactionDue = null;
-        log(`compaction done (${reason}), precipitation re-armed`);
+        log(`compaction done (${reason}${idle.applied ? ", idle lane" : ""}), precipitation re-armed`);
       } else if (outcome.kind === "aborted") {
         // 停机或者停止中止了它：不是模型的问题。上下文没变，整理笔记不重新武装。
         log(`compaction aborted (${reason})`);
@@ -3474,17 +3521,26 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     throw new Error(presentLeadTurnError(error));
   }
 
-  // 沉淀检查：回合结束后检测上下文水位，赶在 auto-compaction 之前让 lead 存 notes。
-  // 用户的问题还没回答时（排队中，或者在等那一次自动重试）先不做：先回答用户。这一轮不算做过，
-  // 那一轮答完以后（每一轮结束都会再来这里）再检查（2026-10-17，spec D9）。
-  function maybePrecipitate(): void {
-    if (precipitated || sched.busy || hasUnansweredUserTurn()) return;
+  // 上下文占窗口的比例（空闲车道用）。pi 的 getContextUsage 认得压缩：压缩以后还没有新的回答时是 null（不知道），空闲车道
+  // 这时不开始整理和压缩（以前读最后一次回答的用量：空闲时接上的压缩以后还是旧的高水位，会马上又整理一次）。
+  // 替身会话没有这个接口时读最后一次回答的用量（precipitate.ts）。
+  function leadContextRatio(): number | null {
+    if (typeof session.getContextUsage !== "function") return contextUsageRatio(session);
+    const usage = session.getContextUsage();
+    return usage && usage.tokens !== null && usage.contextWindow > 0 ? usage.tokens / usage.contextWindow : null;
+  }
+
+  // 沉淀检查：上下文过了 PRECIPITATE_RATIO，赶在压缩之前让 Lead 存笔记。什么时候做由空闲车道定（lead-scheduler spec D8，P4）：
+  // Lead 空闲满 graceMs、没有排着的用户消息和事件时才开（以前一轮结束马上开）；它是一个 L4 单元，新输入到达时让路，
+  // 这个周期重新武装，下一次空闲再开。一个压缩周期做完一次（失败也算），压缩成功以后重新武装。
+  async function runPrecipitation(): Promise<PrecipitationOutcome> {
+    if (sched.busy || sched.starting || sched.draining || hasUnansweredUserTurn()) return "skipped";
     const ratio = contextUsageRatio(session);
-    if (ratio !== null && ratio >= PRECIPITATE_RATIO) {
-      precipitated = true;
-      log(`context at ${(ratio * 100).toFixed(0)}%, running precipitation check`);
-      void runTurn(PRECIPITATE_PROMPT, { system: SYSTEM_TURN_ORIGINS.precipitate });
-    }
+    log(`context at ${ratio === null ? "?" : (ratio * 100).toFixed(0)}%, running precipitation check`);
+    const outcome = await runTurn(PRECIPITATE_PROMPT, { system: SYSTEM_TURN_ORIGINS.precipitate });
+    if (outcome.deferred || outcome.offline) return "skipped";
+    if (lastUnitOutcome === "yielded") return "yielded";
+    return outcome.ok ? "done" : "failed";
   }
 
   // ── Lead 是常驻的助理（2026-10-15 用户决定，Jarvis 模式）──────────────────────────────
@@ -3895,10 +3951,11 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     currentTurn = new Promise<void>((resolve) => { settleTurn = resolve; });
     // 开一个工作单元（lead-scheduler spec D3）：车道按来源定（D2）。从这一刻起 Lead 算忙。
     const unitSource = options.system ? "system" as const : options.aish ? "aish" as const : "user" as const;
-    sched.openUnit({
-      source: unitSource, lane: unitLane({ source: unitSource, system: options.system ?? null }),
-      origin: options.system ?? null, turnId: channelTurn?.turn.id ?? null,
+    const openedLane = unitLane({ source: unitSource, system: options.system ?? null });
+    const openedUnit = sched.openUnit({
+      source: unitSource, lane: openedLane, origin: options.system ?? null, turnId: channelTurn?.turn.id ?? null,
     });
+    idleLane.unitOpened(openedUnit, openedLane);
     publishLeadQueue();
     // 新回合开始，上一回合遗留的插话锚（受理了但 lead 一直没再开口）作废——
     // 否则它会去接下一回合的水，把答非所问的文本挂到一条早已过去的消息下面。
@@ -3988,6 +4045,9 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       // 整理笔记是内部回合，不给：积压的事等下一轮普通的 Lead 回合。
       const situation = options.system === SYSTEM_TURN_ORIGINS.precipitate ? "" : situationBlock();
       const full = [clock, presence, situation, capabilityBlock, stopBlock, coreBlock, delivered?.text ?? "", body].filter(Boolean).join("\n\n");
+      // 空闲车道正在碰会话（取对话、接上摘要，各几毫秒）：等它做完。pi 在压缩时不收 prompt。
+      // 单元已经开了，这之后空闲车道不会再开始碰会话。
+      await idleLane.sessionFree();
       // 上一次自动压缩失败了：先压缩，再调模型（recoverLeadContext）。放在取事件之后：失败时这一轮带着事件失败，
       // 游标不动，按退避再叫醒（leadWakeRetry），不会马上又开一轮、又压缩一次。
       await recoverLeadContext();
@@ -4166,8 +4226,10 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       // 单元结束（lead-scheduler spec D12）：关联编号用这一轮最后接文字的那一轮，结果按停下、被重启打断、断网、成败分。
       if (runTurnId) sched.dispatch({ type: "unit.turn", turnId: runTurnId });
       const unitOutcome: UnitOutcome = stoppedByUser(sched.state) ? "stopped" : interrupted ? "interrupted"
-        : offline ? "offline" : succeeded ? "answered" : "failed";
+        : yieldedToInput(sched.state) ? "yielded" : offline ? "offline" : succeeded ? "answered" : "failed";
+      lastUnitOutcome = unitOutcome;
       sched.closeUnit(unitOutcome);
+      idleLane.unitClosed();
       publishLeadQueue();
       // 这一轮结束：插进来的系统事件不再找得到。会话不报告输入送到的时刻时，交出去的用户消息也一样
       // （成功时它们在这一轮里被看到了，失败时上面已经找回了还在队列里的）。会话报告时，还在 pi 队列里的
@@ -4225,10 +4287,10 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
           }
         });
       }
-      // Lead 空下来了：先答排着的用户消息，再处理排着的系统事件（dispatchLeadWork），最后才是整理笔记。
+      // Lead 空下来了：先答排着的用户消息，再处理排着的系统事件（dispatchLeadWork），最后才是空闲车道（整理笔记、压缩）。
       setImmediate(() => {
         dispatchLeadWork();
-        maybePrecipitate();
+        idleLane.check();
       });
     }
     return outcome;
@@ -4594,16 +4656,20 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
   // Lead 忙时用户排着的追问（用户 2026-10-28）：状态栏的「Steer」「×」和 Lead 都经过操作层的 follow_up。
   uiActionServices.followUps = { snapshot: followUpSnapshot, steer: steerFollowUp, cancel: cancelFollowUp };
   // Lead 调度器现在的样子（lead-scheduler spec D12）：GET /v1/lead/scheduler 读它。只读，不是操作。
+  // 空闲车道的样子（P4）也在这一份里。
   uiActionServices.leadScheduler = {
-    snapshot: () => sched.snapshot({
+    snapshot: () => ({ ...schedulerSnapshot(), idle: idleLane.snapshot() }),
+  };
+  function schedulerSnapshot() {
+    return sched.snapshot({
       waiting: sched.busy ? waitingEntries(Date.now()) : leadInput.queue().map((entry): WaitingEntry => ({
         who: entry.senders.join("、") || entry.conversation, conversation: entry.conversation, count: entry.count,
         waitedMs: Math.max(0, Date.now() - Date.parse(entry.firstAt)), lane: 1,
       })),
       host: describeHostLoad(),
       budgetMs: redLineLimits().ms,
-    }),
-  };
+    });
+  }
   // 子 agent 工单的结果交回通道的 ⑦（信心模型决定代用户回复，还是交回 Lead）。登记以前结束的先留着，登记时交。
   if (channelHub) {
     const hub = channelHub;
@@ -4627,7 +4693,12 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     db, dataDir: opts.dataDir, log, options: opts.triageShadow,
     decisionModel: memoryControl ? () => memoryControl.decisionCredentials() : null,
   });
+  // 空闲车道的心跳（P4）：单元结束时和空闲满 graceMs 时都会看一眼；这里兜住启动时（会话还没建好）和别的漏掉的时机。
+  const IDLE_HEARTBEAT_MS = 30_000;
   function pollNotices(): void {
+    pollStep("idle-lane", () => {
+      if (!sched.busy && !sched.starting) idleLane.check({ ifOlderThanMs: Math.min(IDLE_HEARTBEAT_MS, idleLane.limits.graceMs) });
+    });
     // 审批过期 + 投递（不可逆动作的门禁，即时推送）
     pollStep("interventions", () => coordinator.expireInterventions(new Date()));
     pollStep("workspace-sweep", () => {
@@ -4635,6 +4706,10 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       // 扫描在后台跑（git 和删目录都是异步的），这一拍不等它；上一次还没跑完时不开新的。
       if (workspaceSweepRunning) return;
       if (lastWorkspaceSweepAt === null || sweepNow - lastWorkspaceSweepAt >= workspaceSweepMs) {
+        // 空闲车道（P4）：Lead 空闲满 graceMs 才扫；推迟超过一个间隔（Lead 一直忙）时照样扫。
+        // 启动后的第一次不等：重启前留在回收区的删除也要等空闲（闸门在 workspace.ts），扫描本身很快。
+        const overdue = lastWorkspaceSweepAt === null || sweepNow - lastWorkspaceSweepAt >= 2 * workspaceSweepMs;
+        if (!idleLane.mayStartSweep(overdue)) return;
         lastWorkspaceSweepAt = sweepNow;
         workspaceSweepRunning = true;
         void sweepWorkspaces(db, new Date(sweepNow)).then((workspaceSweep) => {
@@ -4933,6 +5008,12 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
   function dispatchLeadWork(): void {
     if (sched.draining) return;
     if (sched.busy) {
+      // Lead 在做空闲车道的活（整理笔记，L4）：要它处理的事不插进那一轮，让那一轮在让出点停下，事等它结束后单独开一轮
+      // （lead-scheduler spec D1：L4 随时让出；P4）。
+      if (sched.unit?.lane === 4) {
+        if (leadInput.pendingMessages().length) idleLane.inputArrived(2, "event");
+        return;
+      }
       steerInterrupts();
       return;
     }
@@ -5530,6 +5611,12 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     // 消息没带 mode（plc、Slack 里用户发给自己的私信、新版的 App）时，按「Lead 忙时你发的消息」的设置放：缺省排队，
     // 用户可以在设置里改成插话（protocol 的 busy-placement.ts，用户 2026-11-09）。带了 mode 的照 mode 放。
     const mode = command.mode ?? getBusyPlacement(db).placement;
+    if (sched.busy && sched.unit?.lane === 4) {
+      // Lead 在做空闲车道的活（整理笔记，L4）：用户的话不插进那一轮，那一轮在下一个让出点停下，用户的话马上单独开一轮
+      // （lead-scheduler spec D1、D8，P4）。
+      holdForIdleYield(prompt, { turn, assistantText: "", commandId: command.commandId });
+      return { mode: "queued", turnId: turn.id };
+    }
     if (userMessagePlacement({ ...placementFacts(), followUp: mode === "followUp" }) === "own_turn_after") {
       // 这一轮带着外部内容（lead-tools-and-routing spec D16，user-placement.ts）：不插进去，等它结束后开一轮只属于用户的。
       holdForOwnTurn(prompt, { turn, assistantText: "", commandId: command.commandId });
@@ -5927,6 +6014,9 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     if (leadQueueTimer) clearNodeTimeout(leadQueueTimer);
     clearNodeInterval(poller); clearNodeInterval(wdTimer); clearNodeInterval(heartbeat); catalogWatch?.stop();
     hostProbes?.stop();
+    // 空闲车道：停掉写摘要的子进程和定时器，放行在等空闲的删除（它们由下一个 daemon 的清扫接着做）。
+    idleLane.stop();
+    setHostIdleGate(null);
     // 关库之前等影子分诊这一批停下（正在进行的调用被取消），通道的传输停下、这一拍跑完。
     closeStep = "stopping the shadow triage";
     await triageShadow?.stop();
