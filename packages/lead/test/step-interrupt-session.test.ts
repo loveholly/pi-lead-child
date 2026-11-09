@@ -20,7 +20,8 @@ afterEach(async () => {
 });
 
 // 带「问题 A」的第一次请求：发了响应头以后一直不说话。之后的请求回一句话就结束。
-async function thinkingStub(): Promise<{ baseUrl: string; chats: string[]; closed: () => number }> {
+// headers=false：第一次请求连响应头也不回，像 vibeproxy 那样要等模型想完才回（2026-11-09 实测）。
+async function thinkingStub(options: { headers?: boolean } = {}): Promise<{ baseUrl: string; chats: string[]; closed: () => number }> {
   const chats: string[] = [];
   let closed = 0;
   server = createServer((req, res) => {
@@ -29,9 +30,15 @@ async function thinkingStub(): Promise<{ baseUrl: string; chats: string[]; close
     req.on("end", () => {
       const body = Buffer.concat(parts).toString("utf8");
       if (body.includes("问题 A")) chats.push(body);
+      const holding = body.includes("问题 A") && chats.length === 1;
+      if (holding && options.headers === false) {
+        open.push(res);
+        res.on("close", () => { closed += 1; });
+        return;
+      }
       res.writeHead(200, { "content-type": "text/event-stream" });
       res.flushHeaders();
-      if (body.includes("问题 A") && chats.length === 1) {
+      if (holding) {
         open.push(res);
         res.on("close", () => { closed += 1; });
         return;
@@ -50,9 +57,8 @@ const textOf = (message: any): string => (typeof message?.content === "string"
   ? message.content
   : (message?.content ?? []).map((part: any) => part?.text ?? "").join(""));
 
-describe("interrupting a real Lead session's step for a steer", () => {
-  it("stops the unfinished step, then answers the steer in the same prompt with the earlier question still in context", async () => {
-    const stub = await thinkingStub();
+async function interruptScenario(headers: boolean): Promise<void> {
+    const stub = await thinkingStub({ headers });
     const dataDir = tempDir("plc-lead-step-interrupt-");
     writeFileSync(join(dataDir, "config.json"), JSON.stringify({
       lead: {
@@ -75,8 +81,13 @@ describe("interrupting a real Lead session's step for a steer", () => {
     session.subscribe((event) => events.push(event));
     try {
       const running = session.prompt("问题 A");
-      // 模型开始回答了，还没说话：这一步可以中止。
-      await vi.waitFor(() => expect(events.some((event) => event.type === "message_start" && event.message?.role === "assistant")).toBe(true));
+      // 模型开始回答了，还没说话：这一步可以中止。代理还没回响应头时（headers=false）也一样。
+      if (headers) {
+        await vi.waitFor(() => expect(events.some((event) => event.type === "message_start" && event.message?.role === "assistant")).toBe(true));
+      } else {
+        await vi.waitFor(() => expect(stub.chats).toHaveLength(1));
+        expect(events.some((event) => event.type === "message_start" && event.message?.role === "assistant")).toBe(false);
+      }
       await session.steer("插话 B");
       expect(lead.interruptStep()).toBe(true);
       await running;
@@ -98,5 +109,15 @@ describe("interrupting a real Lead session's step for a steer", () => {
       session.dispose();
       db.close();
     }
+}
+
+describe("interrupting a real Lead session's step for a steer", () => {
+  it("stops the unfinished step, then answers the steer in the same prompt with the earlier question still in context", async () => {
+    await interruptScenario(true);
+  }, 60_000);
+
+  // 回归（2026-11-09）：vibeproxy 要等模型想完才回响应头。以前这时还没有 message_start，不能中止，插话照旧等一整步。
+  it("also stops a step whose request has no response headers yet, as behind a proxy that waits for the first token", async () => {
+    await interruptScenario(false);
   }, 60_000);
 });

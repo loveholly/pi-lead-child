@@ -1,4 +1,5 @@
-// 打断式插话（step-interrupt.ts，2026-11-09）：只在模型还在想、没写字也没调工具时中止这一步的模型请求；
+// 打断式插话（step-interrupt.ts，2026-11-09）：只在模型还在想、没写字也没调工具时中止这一步的模型请求。
+// 请求发出去、还没收到回答的开头时也算在想：vibeproxy 这类代理要等模型想完才回响应头（2026-11-09 实测）；
 // 中止的是这一步自己的信号，不是这次运行的信号（工具和压缩不受影响）；压缩、摘要的请求不能打断。
 import { describe, expect, it } from "vitest";
 import { installStepInterrupt } from "../src/step-interrupt.js";
@@ -43,12 +44,24 @@ describe("interrupting the model's step for a steer", () => {
     expect(interrupter.interrupt()).toBe(false);
   });
 
-  it("does not interrupt once the step shows text or starts a tool call, or before the reply has started", () => {
+  // 回归（2026-11-09）：vibeproxy 等模型想完、吐出第一个字时才回响应头，pi 这时才有 message_start。
+  // 以前要等 message_start 才能中止，接这类代理时能打断的时间几乎是零，插话照旧等一整步。
+  it("aborts a request that is still waiting for the model's first byte", () => {
+    const { session, requests, loopRequest } = fakeSession();
+    const interrupter = installStepInterrupt(session);
+    const run = new AbortController();
+    loopRequest(run.signal);
+
+    expect(interrupter.interrupt()).toBe(true);
+    expect(requests[0]!.signal!.aborted).toBe(true);
+    expect(run.signal.aborted).toBe(false);
+  });
+
+  it("does not interrupt once the step shows text or starts a tool call", () => {
     const { session, emit, requests, loopRequest } = fakeSession();
     const interrupter = installStepInterrupt(session);
 
     loopRequest();
-    expect(interrupter.interrupt()).toBe(false);
     emit(assistantStart);
     emit(update("text_delta"));
     expect(interrupter.interrupt()).toBe(false);

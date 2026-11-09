@@ -11,10 +11,13 @@
 // 中止的那半步不会再发给模型（pi-ai 的 transform-messages.js 跳过 aborted 的助手消息）：上下文里是原来的任务、
 // 做完的工具和结果，然后是插话，和在一步的边界插进去完全一样。之前做的事一件不少，只有没想完的那一步要重想。
 //
-// 只在这一步还「干净」时中止：模型已经开始回答（message_start），但还没写出看得见的字，也没开始调工具。
+// 只在这一步还「干净」时中止：请求已经发出去，模型还没写出看得见的字，也没开始调工具。
 //   · 写出了字：那些字已经流到会话里，中止以后模型不记得它们，会话里就留下一段没人认的话。等这一步写完再插。
 //   · 开始调工具：工具调用的参数在流，render_ui 的卡片也在画。等这一步做完再插。
-//   · 准备请求的阶段（还没有 message_start）：中止会被 pi-ai 记成 stopReason=error，可能触发自动重试。等它开始。
+//   · 还没收到回答的开头（没有 message_start）也能中止（2026-11-09）：vibeproxy 这类代理要等模型想完、吐出第一个字
+//     才回响应头，模型想的那段时间里 pi 还没有 message_start。以前要等 message_start，接这类代理时能打断的时间几乎是零。
+//     这时中止，pi-ai 记的是 stopReason=aborted（signal 已中止），不会自动重试；pi 照样补一对 message_start / message_end
+//     （agent-loop.js 的 streamAssistantResponse），上下文里是一条被跳过的空回答。
 // 压缩和摘要也用 agent 的 streamFunction（agent-session.js 的 _runDefaultCompaction），它们不带对话循环的
 // getSteeringMessages：只包对话循环的请求，压缩照旧做完。
 export interface StepInterruptAgent {
@@ -36,13 +39,13 @@ export interface StepInterrupt {
 const VISIBLE_EVENTS = new Set(["text_start", "text_delta", "text_end", "toolcall_start", "toolcall_delta", "toolcall_end"]);
 
 export function installStepInterrupt(session: StepInterruptSession): StepInterrupt {
-  type Step = { controller: AbortController; started: boolean; visible: boolean };
+  type Step = { controller: AbortController; visible: boolean };
   let step: Step | null = null;
   const original = session.agent.streamFunction.bind(session.agent);
   session.agent.streamFunction = (model, context, options) => {
     // 不是对话循环的请求（压缩、摘要）：原样转过去，不能打断。
     if (typeof options?.getSteeringMessages !== "function") return original(model, context, options);
-    const current: Step = { controller: new AbortController(), started: false, visible: false };
+    const current: Step = { controller: new AbortController(), visible: false };
     step = current;
     const signal: AbortSignal = options.signal
       ? AbortSignal.any([options.signal as AbortSignal, current.controller.signal])
@@ -51,14 +54,13 @@ export function installStepInterrupt(session: StepInterruptSession): StepInterru
   };
   session.subscribe((event) => {
     if (!step || event?.message?.role === "user") return;
-    if (event?.type === "message_start" && event.message?.role === "assistant") step.started = true;
     if (event?.type === "message_update" && VISIBLE_EVENTS.has(String(event.assistantMessageEvent?.type))) step.visible = true;
     if (event?.type === "message_end" && event.message?.role === "assistant") step = null;
   });
   return {
     interrupt() {
       const current = step;
-      if (!current || !current.started || current.visible || current.controller.signal.aborted) return false;
+      if (!current || current.visible || current.controller.signal.aborted) return false;
       current.controller.abort();
       return true;
     },
