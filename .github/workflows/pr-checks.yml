@@ -1,8 +1,24 @@
 # 向 master 提 pull request 时跑的检查，fork 来的 PR 也跑。命令取自 npm run verify。
-# - checks（ubuntu-24.04）：oxlint、三次类型检查（根、packages/components、apps/companion）、components 和 companion 的测试。
-# - root-tests（macos-15）：根 vitest（后端各包、apps/daemon、apps/cli、scripts/、desktop/）。这些测试按 macOS 写：
-#   沙箱测试在 Linux 上要 bubblewrap、socat 和 ripgrep，还有 Keychain、launchd、代码签名的测试。产品也只有 macOS 版。
-#   所以放在 macOS 上跑，不排除任何测试。
+# 所有 job 都在 ubuntu-24.04 上，互相不等，同时开跑：
+# - lint-and-types：oxlint 和三次类型检查（根、packages/components、apps/companion）。
+# - ui-tests：packages/components 的测试，和 apps/companion 的测试分成 2 片（--shard）。
+# - root-tests：根 vitest（后端各包、apps/daemon、apps/cli、scripts/、desktop/）分成 4 片。每片里按文件并发跑：
+#   vitest.config.ts 看到 CI=true 就打开 fileParallelism（本机缺省仍是串行，见 docs/testing.md）。
+# - root-tests-report、companion-tests-report：把各片的 blob 报告合成一份（vitest --merge-reports），
+#   任何一片失败或者没有交出报告，这个 job 就失败。
+#
+# 根测试以前跑在 macos-15 上。macOS runner 要排队（两次没排到），也慢。产品只有 macOS 版，但大多数测试不依赖 macOS。
+# 真的依赖 macOS 的测试在别的系统上跳过（describe.runIf / it.skipIf），只在发版前的 Mac 上跑。清单见 docs/testing.md，
+# 现在是这些：
+#   packages/engine/test/sandbox-bash.test.ts        真的沙箱（sandbox-exec）
+#   packages/engine/test/sandbox-extension.test.ts   真的沙箱（sandbox-exec）
+#   packages/engine/test/sandbox-secrets.test.ts     真的沙箱（sandbox-exec）
+#   packages/lead/test/hands.test.ts                 真的沙箱（sandbox-exec）里的 Lead bash
+#   packages/core/test/sandbox-policy.test.ts        sandboxTrustEnv 一组：钥匙串里的证书（security）
+#   apps/daemon/test/vault-key.test.ts               the daemon's Keychain key 一组：钥匙串
+#   scripts/desktop/test/agent-bundle.test.ts        两条：codesign
+# Linux 上的沙箱要 bubblewrap、socat 和 ripgrep，产品不在 Linux 上跑，所以不装它们，直接跳过。
+#
 # - lint 全仓库只用根目录的 .oxlintrc.json。npm run lint 从仓库根跑，apps/companion 的文件也在里面，所以不再单独跑
 #   companion 的 lint（它的 lint 脚本也是用同一份配置的 oxlint）。expo lint 写死了 ESLint，换不成 oxlint。
 # - 用 pull_request，不用 pull_request_target：fork 的代码拿不到写权限，也拿不到 secret。这里不读任何 secret。
@@ -26,9 +42,9 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  checks:
+  lint-and-types:
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 20
     steps:
       - name: Check out the pull request
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -56,17 +72,94 @@ jobs:
       - name: Type-check apps/companion
         run: npm run typecheck:companion
 
+  ui-tests:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2]
+    steps:
+      - name: Check out the pull request
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node (the same version as the runtime bundle)
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: desktop/node-version
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      # components 的测试只有几十秒，不分片，放在第 1 片里。
       - name: Test packages/components
+        if: matrix.shard == 1
         run: npm run test:components
 
-      - name: Test apps/companion
-        run: npm run test:companion
+      - name: Test apps/companion (one shard)
+        env:
+          SHARD: ${{ matrix.shard }}
+        run: npm run test:companion -- --reporter=default --reporter=blob --shard="$SHARD/2"
+
+      - name: Keep the shard's report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: companion-blob-${{ matrix.shard }}
+          path: apps/companion/.vitest-reports
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 1
+
+  companion-tests-report:
+    if: ${{ !cancelled() }}
+    needs: [ui-tests]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out the pull request
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node (the same version as the runtime bundle)
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: desktop/node-version
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Fetch the shard reports
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: companion-blob-*
+          path: apps/companion/.vitest-reports
+          merge-multiple: true
+
+      - name: Merge the reports into one summary
+        working-directory: apps/companion
+        run: npx vitest run --merge-reports --reporter=default
+
+      # --merge-reports 只看交上来的报告。某一片在测试以前就失败（例如 npm ci 失败）时没有报告，这里要单独查。
+      - name: Fail when a shard failed
+        env:
+          SHARDS: ${{ needs.ui-tests.result }}
+        run: test "$SHARDS" = success
 
   root-tests:
-    runs-on: macos-15
-    timeout-minutes: 60
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
     env:
-      # 测试会在临时目录下建 unix socket。runner 的 TMPDIR 太长，socket 路径会超过 103 字节。
+      # 测试会在临时目录下建 unix socket，路径要短。
       TMPDIR: /tmp
     steps:
       - name: Check out the pull request
@@ -89,5 +182,52 @@ jobs:
           git config --global user.name "pr-checks"
           git config --global user.email "pr-checks@example.com"
 
-      - name: Test the root project (vitest)
-        run: npm test
+      - name: Test the root project (one shard, files in parallel)
+        env:
+          SHARD: ${{ matrix.shard }}
+        run: npm test -- --reporter=default --reporter=blob --shard="$SHARD/4"
+
+      - name: Keep the shard's report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: root-blob-${{ matrix.shard }}
+          path: .vitest-reports
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 1
+
+  root-tests-report:
+    if: ${{ !cancelled() }}
+    needs: [root-tests]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out the pull request
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node (the same version as the runtime bundle)
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: desktop/node-version
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Fetch the shard reports
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: root-blob-*
+          path: .vitest-reports
+          merge-multiple: true
+
+      - name: Merge the reports into one summary
+        run: npx vitest run --merge-reports --reporter=default
+
+      - name: Fail when a shard failed
+        env:
+          SHARDS: ${{ needs.root-tests.result }}
+        run: test "$SHARDS" = success
