@@ -6,10 +6,12 @@ import {
   existsSync,
   fchmodSync,
   fstatSync,
+  fsync,
   fsyncSync,
   linkSync,
   lstatSync,
   mkdirSync,
+  open,
   openSync,
   read,
   readSync,
@@ -18,6 +20,7 @@ import {
   renameSync,
   statSync,
   unlinkSync,
+  write,
   writeSync,
 } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -25,13 +28,15 @@ import { promisify } from "node:util";
 import type { ReadStream } from "node:fs";
 import type { Db } from "./db.js";
 import { repairItemProofMaterialization } from "./checkpoints.js";
-import type { Artifact, ArtifactAvailability } from "@pi-lead-child/core";
+import { trackHostJob, type Artifact, type ArtifactAvailability } from "@pi-lead-child/core";
 
 const MAX_ARTIFACTS_PER_CHECKPOINT = 20;
 const MAX_ARTIFACTS_PER_ITEM = 200;
 export const MAX_ARTIFACT_BYTES = 25 * 1024 * 1024;
 const MAX_ITEM_ARTIFACT_BYTES = 250 * 1024 * 1024;
 const COPY_BUFFER_BYTES = 1024 * 1024;
+// 异步读写超过这个大小时登记成后台作业（host-jobs），探针的卡顿说明能点名。
+export const LARGE_ARTIFACT_BYTES = 4 * 1024 * 1024;
 const NO_FOLLOW = constants.O_NOFOLLOW ?? 0;
 const SECRET_PATTERN = /(?:\b(?:[a-z0-9_-]*token|api[_-]?key|secret|password|passwd)\b\s*[:=]\s*\S+|\bBearer\s+[A-Za-z0-9._~+\/-]{8,}|\b(?:sk|ghp|github_pat)_[A-Za-z0-9_-]{8,})/i;
 const MIME_TOKEN_PATTERN = /^[A-Za-z0-9!#$%&'*+.^_`|~-]+$/;
@@ -63,6 +68,11 @@ export interface StagedArtifact {
   byteLength: number | null;
   storageKey: string | null;
   availability: "available" | "metadata_only";
+  /**
+   * 提交前异步地把受管文件整个读一遍，核对哈希，记下文件的身份（dev、ino、大小、mtime、ctime）。
+   * 之后 verifyStorage 在提交事务里只核对身份；身份变了才同步重算哈希。daemon 的调用方都先调它（lead-scheduler P0b）。
+   */
+  prepareCommit(): Promise<void>;
   verifyStorage(): void;
   cleanup(): void;
 }
@@ -402,6 +412,16 @@ function validateManagedBlobsRoot(
   );
 }
 
+// 目录的 fsync 也是一步：磁盘忙的时候一次 fsync 可能等上百毫秒，登记产物的路径上不同步地等它（lead-scheduler P0b）。
+function* fsyncDirectorySteps(path: string): IoSteps<void> {
+  const fd = yield { op: "open", path, flags: constants.O_RDONLY };
+  try {
+    yield { op: "fsync", fd };
+  } finally {
+    closeSync(fd);
+  }
+}
+
 function fsyncDirectory(path: string): void {
   const fd = openSync(path, constants.O_RDONLY);
   try {
@@ -431,7 +451,7 @@ function validateRelativePath(path: string): void {
   }
 }
 
-function openCanonicalSource(workdir: string, relativePath: string): OpenArtifactSource {
+function* openCanonicalSourceSteps(workdir: string, relativePath: string): IoSteps<OpenArtifactSource> {
   validateRelativePath(relativePath);
   let canonicalWorkdir: string;
   let canonicalPath: string;
@@ -446,7 +466,7 @@ function openCanonicalSource(workdir: string, relativePath: string): OpenArtifac
   }
   let fd: number;
   try {
-    fd = openSync(canonicalPath, constants.O_RDONLY | NO_FOLLOW);
+    fd = yield { op: "open", path: canonicalPath, flags: constants.O_RDONLY | NO_FOLLOW };
   } catch (error) {
     throw new Error("artifact source could not be opened without following symlinks", { cause: error });
   }
@@ -492,29 +512,101 @@ function assertSourceUnchanged(source: OpenArtifactSource, byteLength: number): 
   }
 }
 
-function hashDescriptor(fd: number, expectedSize: number): { sha256: string; byteLength: number } {
-  const hash = createHash("sha256");
-  const buffer = Buffer.allocUnsafe(COPY_BUFFER_BYTES);
-  let position = 0;
-  while (position < expectedSize) {
-    const bytesRead = readSync(fd, buffer, 0, Math.min(buffer.length, expectedSize - position), position);
-    if (bytesRead === 0) break;
-    hash.update(buffer.subarray(0, bytesRead));
-    position += bytesRead;
+// ── 读写文件内容的步骤（lead-scheduler P0b，2026-11-09 审计第 1 项）────────────────────────────
+//
+// 哈希、复制、核对都要把整个文件（最大 25 MB）读一遍。以前全是同步的 readSync、writeSync、fsyncSync：
+// daemon 经工具桥替 Codex、Claude 的子 agent 登记产物时，10 个 25 MB 的产物让主线程停 0.7–1.1 秒；
+// 提交事务里还要同步重算一遍，pi 子进程登记时拿着写锁 164–184 毫秒，daemon 的写语句就在主线程上等这么久。
+//
+// 现在这些步骤写成生成器：打开、核对、哈希和各种拓扑检查只有一份，读、写、fsync 交给驱动去做。
+//   · runIoSync：同步驱动。测试、脚本和启动时的修复用它，行为和以前一样。
+//   · runIoAsync：异步驱动。每一步是一次异步的 read、write 或 fsync，一次只占一个线程池线程；
+//     两步之间主线程只算这一块（1 MB）的哈希。同时最多两件（runArtifactIo）。
+type IoStep =
+  // 打开也是一步：负载高的时候，只读打开一个刚写完的大文件要等 5–127 毫秒（本机实测，2026-11-09）。
+  | { op: "open"; path: string; flags: number; mode?: number }
+  | { op: "read"; fd: number; buffer: Buffer; length: number; position: number }
+  | { op: "write"; fd: number; buffer: Buffer; offset: number; length: number }
+  | { op: "fsync"; fd: number };
+type IoSteps<T> = Generator<IoStep, T, number>;
+
+function performIoSync(step: IoStep): number {
+  switch (step.op) {
+    case "open": return openSync(step.path, step.flags, step.mode);
+    case "read": return readSync(step.fd, step.buffer, 0, step.length, step.position);
+    case "write": return writeSync(step.fd, step.buffer, step.offset, step.length);
+    case "fsync": fsyncSync(step.fd); return 0;
   }
-  return { sha256: hash.digest("hex"), byteLength: position };
 }
 
+const openAsync = promisify(open);
 const readAsync = promisify(read);
+const writeAsync = promisify(write);
+const fsyncAsync = promisify(fsync);
 
-// hashDescriptor 的异步版：同一个文件描述符，用异步的 read 一块一块读。打开、fstat 这些检查照旧同步做（只看元数据），
-// 只有读整个文件这一步不占住 daemon 的主线程（2026-11-03：下载一个 artifact 要先把它整个重新算一遍哈希，最大 25 MB）。
-async function hashDescriptorAsync(fd: number, expectedSize: number): Promise<{ sha256: string; byteLength: number }> {
+async function performIoAsync(step: IoStep): Promise<number> {
+  switch (step.op) {
+    case "open": return openAsync(step.path, step.flags, step.mode);
+    case "read": return (await readAsync(step.fd, step.buffer, 0, step.length, step.position)).bytesRead;
+    case "write": return (await writeAsync(step.fd, step.buffer, step.offset, step.length, null)).bytesWritten;
+    case "fsync": await fsyncAsync(step.fd); return 0;
+  }
+}
+
+function runIoSync<T>(steps: IoSteps<T>): T {
+  let next = steps.next();
+  while (!next.done) {
+    let result: number;
+    try {
+      result = performIoSync(next.value);
+    } catch (error) {
+      next = steps.throw(error);
+      continue;
+    }
+    next = steps.next(result);
+  }
+  return next.value;
+}
+
+async function runIoAsync<T>(steps: IoSteps<T>): Promise<T> {
+  let next = steps.next();
+  while (!next.done) {
+    let result: number;
+    try {
+      result = await performIoAsync(next.value);
+    } catch (error) {
+      next = steps.throw(error);
+      continue;
+    }
+    next = steps.next(result);
+  }
+  return next.value;
+}
+
+// 异步的读写同时最多两件。每件一次只占一个线程池线程，所以线程池（4 个线程）总有空给别的异步操作。
+const MAX_ASYNC_ARTIFACT_IO = 2;
+let asyncArtifactIo = 0;
+const asyncArtifactIoWaiting: Array<() => void> = [];
+
+async function runArtifactIo<T>(steps: () => IoSteps<T>): Promise<T> {
+  // 有空位就占一个；没有就排队，前一件做完时把它的空位直接交过来。
+  if (asyncArtifactIo < MAX_ASYNC_ARTIFACT_IO) asyncArtifactIo++;
+  else await new Promise<void>((resolve) => asyncArtifactIoWaiting.push(resolve));
+  try {
+    return await runIoAsync(steps());
+  } finally {
+    const next = asyncArtifactIoWaiting.shift();
+    if (next) next();
+    else asyncArtifactIo--;
+  }
+}
+
+function* hashSteps(fd: number, expectedSize: number): IoSteps<{ sha256: string; byteLength: number }> {
   const hash = createHash("sha256");
   const buffer = Buffer.allocUnsafe(COPY_BUFFER_BYTES);
   let position = 0;
   while (position < expectedSize) {
-    const { bytesRead } = await readAsync(fd, buffer, 0, Math.min(buffer.length, expectedSize - position), position);
+    const bytesRead = yield { op: "read", fd, buffer, length: Math.min(buffer.length, expectedSize - position), position };
     if (bytesRead === 0) break;
     hash.update(buffer.subarray(0, bytesRead));
     position += bytesRead;
@@ -522,48 +614,42 @@ async function hashDescriptorAsync(fd: number, expectedSize: number): Promise<{ 
   return { sha256: hash.digest("hex"), byteLength: position };
 }
 
-function copyDescriptorToFile(
+function* copySteps(
   sourceFd: number,
   expectedSize: number,
   targetPath: string,
-): { sha256: string; byteLength: number } {
-  const targetFd = openSync(
-    targetPath,
-    constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY,
-    0o600,
-  );
+): IoSteps<{ sha256: string; byteLength: number }> {
+  const targetFd = yield {
+    op: "open", path: targetPath, flags: constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY, mode: 0o600,
+  };
   const hash = createHash("sha256");
   const buffer = Buffer.allocUnsafe(COPY_BUFFER_BYTES);
   let position = 0;
   try {
     while (position < expectedSize) {
-      const bytesRead = readSync(
-        sourceFd,
-        buffer,
-        0,
-        Math.min(buffer.length, expectedSize - position),
-        position,
-      );
+      const bytesRead = yield {
+        op: "read", fd: sourceFd, buffer, length: Math.min(buffer.length, expectedSize - position), position,
+      };
       if (bytesRead === 0) break;
       hash.update(buffer.subarray(0, bytesRead));
       let written = 0;
       while (written < bytesRead) {
-        written += writeSync(targetFd, buffer, written, bytesRead - written);
+        written += yield { op: "write", fd: targetFd, buffer, offset: written, length: bytesRead - written };
       }
       position += bytesRead;
     }
     fchmodSync(targetFd, 0o400);
-    fsyncSync(targetFd);
+    yield { op: "fsync", fd: targetFd };
   } finally {
     closeSync(targetFd);
   }
   return { sha256: hash.digest("hex"), byteLength: position };
 }
 
-function openVerifiedFile(path: string, sha256: string, byteLength: number): number {
-  const fd = openManagedFile(path, byteLength);
+function* openVerifiedFileSteps(path: string, sha256: string, byteLength: number): IoSteps<number> {
+  const fd = yield* openManagedFileSteps(path, byteLength);
   try {
-    assertVerifiedHash(hashDescriptor(fd, byteLength), sha256, byteLength);
+    assertVerifiedHash(yield* hashSteps(fd, byteLength), sha256, byteLength);
     return fd;
   } catch (error) {
     closeSync(fd);
@@ -571,16 +657,23 @@ function openVerifiedFile(path: string, sha256: string, byteLength: number): num
   }
 }
 
-/** openVerifiedFile 的异步版：检查一样，读整个文件算哈希这一步是异步的。 */
-async function openVerifiedFileAsync(path: string, sha256: string, byteLength: number): Promise<number> {
-  const fd = openManagedFile(path, byteLength);
-  try {
-    assertVerifiedHash(await hashDescriptorAsync(fd, byteLength), sha256, byteLength);
-    return fd;
-  } catch (error) {
-    closeSync(fd);
-    throw error;
-  }
+// 受管文件的身份，纳秒精度。内容一改，ctime 就变（用户态改不了 ctime）；换成别的文件，ino 就变。
+interface BlobIdentity {
+  dev: bigint;
+  ino: bigint;
+  size: bigint;
+  mtimeNs: bigint;
+  ctimeNs: bigint;
+}
+
+function blobIdentity(fd: number): BlobIdentity {
+  const stat = fstatSync(fd, { bigint: true });
+  return { dev: stat.dev, ino: stat.ino, size: stat.size, mtimeNs: stat.mtimeNs, ctimeNs: stat.ctimeNs };
+}
+
+function sameIdentity(left: BlobIdentity, right: BlobIdentity): boolean {
+  return left.dev === right.dev && left.ino === right.ino && left.size === right.size
+    && left.mtimeNs === right.mtimeNs && left.ctimeNs === right.ctimeNs;
 }
 
 function assertVerifiedHash(actual: { sha256: string; byteLength: number }, sha256: string, byteLength: number): void {
@@ -590,7 +683,7 @@ function assertVerifiedHash(actual: { sha256: string; byteLength: number }, sha2
 }
 
 // 打开一个受管的 artifact 文件（不跟随符号链接），核对它是普通文件、长度和元数据一样。返回文件描述符，哈希由调用方核对。
-function openManagedFile(path: string, byteLength: number): number {
+function* openManagedFileSteps(path: string, byteLength: number): IoSteps<number> {
   let entry;
   try {
     entry = lstatSync(path);
@@ -604,7 +697,7 @@ function openManagedFile(path: string, byteLength: number): number {
   }
   let fd: number;
   try {
-    fd = openSync(path, constants.O_RDONLY | NO_FOLLOW);
+    fd = yield { op: "open", path, flags: constants.O_RDONLY | NO_FOLLOW };
   } catch (error) {
     throwIntegrityFsError(error, "type", "managed artifact could not be opened safely", [
       "ENOENT", "ENOTDIR", "ELOOP",
@@ -625,7 +718,15 @@ function openManagedFile(path: string, byteLength: number): number {
   }
 }
 
-function verifyManagedBlob(dataDir: string, storageKey: string, sha256: string, byteLength: number): void {
+// 核对一个受管文件：路径和拓扑、长度、哈希。trusted 是上一次核对记下的身份：文件的身份没变，就不再读内容。
+// 返回这次核对能担保的身份：读内容前后身份一样才能担保，否则是 null（下次照样整个重算）。
+function* verifyManagedBlobSteps(
+  dataDir: string,
+  storageKey: string,
+  sha256: string,
+  byteLength: number,
+  trusted: BlobIdentity | null = null,
+): IoSteps<BlobIdentity | null> {
   if (storageKey !== storageKeyForSha(sha256)) {
     throw new ArtifactIntegrityError("metadata", "managed artifact storage key is invalid");
   }
@@ -644,8 +745,15 @@ function verifyManagedBlob(dataDir: string, storageKey: string, sha256: string, 
     || !isContained(root!.canonicalPath, canonicalPath)) {
     throw new ArtifactIntegrityError("path", "managed artifact escaped storage root");
   }
-  const fd = openVerifiedFile(path, sha256, byteLength);
+  const fd = yield* openManagedFileSteps(path, byteLength);
   try {
+    const before = blobIdentity(fd);
+    let vouched: BlobIdentity | null = before;
+    const unchanged = trusted !== null && sameIdentity(before, trusted);
+    if (!unchanged) {
+      assertVerifiedHash(yield* hashSteps(fd, byteLength), sha256, byteLength);
+      if (!sameIdentity(before, blobIdentity(fd))) vouched = null;
+    }
     let afterOpenPath: string;
     try {
       afterOpenPath = realpathSync(path);
@@ -661,11 +769,21 @@ function verifyManagedBlob(dataDir: string, storageKey: string, sha256: string, 
       || opened.ino !== current.ino) {
       throw new ArtifactIntegrityError("topology", "managed artifact changed during verification");
     }
-    fchmodSync(fd, 0o400);
-    fsyncSync(fd);
+    // 已经是 0400 就不再 chmod：chmod 会改 ctime，记下的身份就作废了。
+    if ((opened.mode & 0o777) !== 0o400) {
+      fchmodSync(fd, 0o400);
+      vouched = null;
+    }
+    // 身份和上一次核对时一样：那一次的 fsync 已经把同样的内容落了盘，不在提交事务里再等一次 fsync。
+    if (!unchanged || vouched === null) yield { op: "fsync", fd };
+    return vouched;
   } finally {
     closeSync(fd);
   }
+}
+
+function verifyManagedBlob(dataDir: string, storageKey: string, sha256: string, byteLength: number): void {
+  runIoSync(verifyManagedBlobSteps(dataDir, storageKey, sha256, byteLength));
 }
 
 function itemArtifactCount(db: Db, itemId: number): number {
@@ -717,10 +835,10 @@ function validateStageRelations(
   return item;
 }
 
-function inspectArtifactRegistration(
+function* inspectArtifactRegistrationSteps(
   input: StageArtifactInput,
   workdir: string | null,
-): InspectedArtifactRegistration {
+): IoSteps<InspectedArtifactRegistration> {
   if (input.relativePath === null) {
     return {
       input,
@@ -731,9 +849,9 @@ function inspectArtifactRegistration(
     };
   }
   if (!workdir) throw new Error(`item ${input.itemId} has no artifact workdir`);
-  const source = openCanonicalSource(workdir, input.relativePath);
+  const source = yield* openCanonicalSourceSteps(workdir, input.relativePath);
   try {
-    const inspected = hashDescriptor(source.fd, source.size);
+    const inspected = yield* hashSteps(source.fd, source.size);
     assertSourceUnchanged(source, inspected.byteLength);
     return {
       input,
@@ -768,6 +886,21 @@ export function preflightArtifactRegistrations(
   db: Db,
   registrations: ArtifactRegistrationSet,
 ): void {
+  runIoSync(preflightSteps(db, registrations));
+}
+
+/** preflightArtifactRegistrations 的异步版：检查一样，读源文件算哈希是异步的。daemon 用它（lead-scheduler P0b）。 */
+export function preflightArtifactRegistrationsAsync(
+  db: Db,
+  registrations: ArtifactRegistrationSet,
+): Promise<void> {
+  return runArtifactIo(() => preflightSteps(db, registrations));
+}
+
+function* preflightSteps(
+  db: Db,
+  registrations: ArtifactRegistrationSet,
+): IoSteps<void> {
   if (!Array.isArray(registrations)) throw new Error("artifact registrations must be an array");
   if (registrations.length > MAX_ARTIFACTS_PER_CHECKPOINT) {
     throw new Error(`checkpoint artifact quota exceeds ${MAX_ARTIFACTS_PER_CHECKPOINT} registrations`);
@@ -795,7 +928,8 @@ export function preflightArtifactRegistrations(
     throw new Error(`item artifact quota exceeds ${MAX_ARTIFACTS_PER_ITEM} refs`);
   }
 
-  const inspected = normalized.map((input) => inspectArtifactRegistration(input, item.workdir));
+  const inspected: InspectedArtifactRegistration[] = [];
+  for (const input of normalized) inspected.push(yield* inspectArtifactRegistrationSteps(input, item.workdir));
   for (const item of inspected) {
     const existing = existingByRef.get(item.input.ref);
     if (existing && !inspectedMatchesExisting(existing, item)) {
@@ -896,6 +1030,26 @@ export function stageArtifact(
   rawInput: StageArtifactInput,
   options?: ArtifactStageOptions,
 ): StagedArtifact {
+  return runIoSync(stageArtifactSteps(db, rawInput, options));
+}
+
+/**
+ * stageArtifact 的异步版：检查一样，复制、哈希和 fsync 文件内容是异步的，不占住调用方的主线程。
+ * daemon 用它（lead-scheduler P0b）；提交前再调 prepareCommit，提交事务里就只核对文件身份。
+ */
+export function stageArtifactAsync(
+  db: Db,
+  rawInput: StageArtifactInput,
+  options?: ArtifactStageOptions,
+): Promise<StagedArtifact> {
+  return runArtifactIo(() => stageArtifactSteps(db, rawInput, options));
+}
+
+function* stageArtifactSteps(
+  db: Db,
+  rawInput: StageArtifactInput,
+  options?: ArtifactStageOptions,
+): IoSteps<StagedArtifact> {
   const input = normalizeStageInput(rawInput);
   const item = validateStageRelations(db, input);
   if (input.relativePath === null) {
@@ -912,13 +1066,14 @@ export function stageArtifact(
       byteLength: null,
       storageKey: null,
       availability: "metadata_only",
+      async prepareCommit() {},
       verifyStorage() {},
       cleanup() {},
     };
   }
   if (!item.workdir) throw new Error(`item ${input.itemId} has no artifact workdir`);
 
-  const source = openCanonicalSource(item.workdir, input.relativePath);
+  const source = yield* openCanonicalSourceSteps(item.workdir, input.relativePath);
   let roots: ManagedArtifactRoots;
   let stagingDir: ValidatedDirectory;
   let temporaryPath: string | null = null;
@@ -926,6 +1081,8 @@ export function stageArtifact(
   let storageKey: string | null = null;
   let createdBlob = false;
   let linkedCandidate: { dev: number; ino: number } | null = null;
+  // 最近一次整个读过、核对过的文件身份。prepareCommit、verifyStorage 拿它判断要不要再读内容。
+  let verifiedIdentity: BlobIdentity | null = null;
   try {
     roots = establishManagedArtifactRoots(input.dataDir);
     stagingDir = ensureChildDirectory(
@@ -940,7 +1097,7 @@ export function stageArtifact(
       "managed artifact staging directory",
       { parent: roots.artifacts, expected: stagingDir },
     )!;
-    const copied = copyDescriptorToFile(source.fd, source.size, temporaryPath);
+    const copied = yield* copySteps(source.fd, source.size, temporaryPath);
     const afterCopy = fstatSync(source.fd);
     if (!afterCopy.isFile()
       || afterCopy.dev !== source.dev
@@ -975,7 +1132,7 @@ export function stageArtifact(
     prefixDir = validateDirectoryUnderRoot(prefixDir.path, roots.blobs, prefixDir);
     if (entryExists(finalizedPath)) {
       try {
-        verifyManagedBlob(input.dataDir, storageKey, copied.sha256, copied.byteLength);
+        verifiedIdentity = yield* verifyManagedBlobSteps(input.dataDir, storageKey, copied.sha256, copied.byteLength);
         unlinkSync(temporaryPath);
       } catch (error) {
         if (existsSync(temporaryPath)) unlinkSync(temporaryPath);
@@ -1027,7 +1184,7 @@ export function stageArtifact(
       } catch (error: any) {
         if (error?.code !== "EEXIST") throw error;
         try {
-          verifyManagedBlob(input.dataDir, storageKey, copied.sha256, copied.byteLength);
+          verifiedIdentity = yield* verifyManagedBlobSteps(input.dataDir, storageKey, copied.sha256, copied.byteLength);
           unlinkSync(temporaryPath);
         } catch (verifyError) {
           if (existsSync(temporaryPath)) unlinkSync(temporaryPath);
@@ -1047,7 +1204,7 @@ export function stageArtifact(
       }
       roots = revalidateManagedArtifactRoots(roots);
       prefixDir = validateDirectoryUnderRoot(prefixDir.path, roots.blobs, prefixDir);
-      fsyncDirectory(prefixDir.path);
+      yield* fsyncDirectorySteps(prefixDir.path);
     }
     roots = revalidateManagedArtifactRoots(roots);
     stagingDir = validateRealDirectory(
@@ -1055,7 +1212,7 @@ export function stageArtifact(
       "managed artifact staging directory",
       { parent: roots.artifacts, expected: stagingDir },
     )!;
-    fsyncDirectory(stagingDir.path);
+    yield* fsyncDirectorySteps(stagingDir.path);
 
     const staged: StagedArtifact = {
       itemId: input.itemId,
@@ -1070,8 +1227,15 @@ export function stageArtifact(
       byteLength: copied.byteLength,
       storageKey,
       availability: "available",
+      async prepareCommit() {
+        verifiedIdentity = await runArtifactIo(() => verifyManagedBlobSteps(
+          input.dataDir, storageKey!, copied.sha256, copied.byteLength, verifiedIdentity,
+        ));
+      },
       verifyStorage() {
-        verifyManagedBlob(input.dataDir, storageKey!, copied.sha256, copied.byteLength);
+        verifiedIdentity = runIoSync(verifyManagedBlobSteps(
+          input.dataDir, storageKey!, copied.sha256, copied.byteLength, verifiedIdentity,
+        ));
       },
       cleanup() {
         if (!createdBlob || !finalizedPath || !existsSync(finalizedPath)) return;
@@ -1255,7 +1419,7 @@ export function openArtifactContent(
   artifactId: number,
 ): ArtifactContent {
   const target = artifactContentTarget(db, dataDir, itemId, artifactId);
-  return finishArtifactContent(target, openVerifiedFile(target.canonicalPath, target.row.sha256!, target.row.byte_length!));
+  return finishArtifactContent(target, runIoSync(openVerifiedFileSteps(target.canonicalPath, target.row.sha256!, target.row.byte_length!)));
 }
 
 /**
@@ -1269,7 +1433,13 @@ export async function openArtifactContentAsync(
   artifactId: number,
 ): Promise<ArtifactContent> {
   const target = artifactContentTarget(db, dataDir, itemId, artifactId);
-  return finishArtifactContent(target, await openVerifiedFileAsync(target.canonicalPath, target.row.sha256!, target.row.byte_length!));
+  const { sha256, byte_length: byteLength } = target.row;
+  const read = () => runArtifactIo(() => openVerifiedFileSteps(target.canonicalPath, sha256!, byteLength!));
+  // 大文件登记成后台作业，卡顿时探针能点名（host-jobs）。
+  const fd = byteLength! >= LARGE_ARTIFACT_BYTES
+    ? await trackHostJob("artifact-read", `artifact #${artifactId} (${Math.round(byteLength! / 1024 / 1024)} MB)`, read)
+    : await read();
+  return finishArtifactContent(target, fd);
 }
 
 interface ArtifactContentTarget {

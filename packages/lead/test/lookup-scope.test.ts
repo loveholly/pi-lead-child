@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { tempDir } from "@pi-lead-child/core/testing";
 import { openDb } from "@pi-lead-child/store";
 import {
-  deniedSegment, headSha, isDeniedName, listLookupCandidates, parseGithubRemote, readScopedFile, resolveScopedPath,
+  deniedSegment, headSha, isDeniedName, listLookupCandidates, listLookupCandidatesAsync, parseGithubRemote, refreshLookupCandidates, readScopedFile, resolveScopedPath,
 } from "../src/lookup/index.js";
 
 function fakeRepo(root: string, remote: string | null, head = "a".repeat(40)): void {
@@ -87,7 +87,7 @@ describe("git helpers", () => {
 });
 
 describe("listLookupCandidates", () => {
-  it("lists project repositories and git repositories two levels under the roots, without duplicates", () => {
+  it("lists project repositories and git repositories two levels under the roots, without duplicates", async () => {
     const base = tempDir("plc-lookup-candidates-");
     const workspace = join(base, "Workspace");
     const direct = join(workspace, "widgets");
@@ -115,7 +115,11 @@ describe("listLookupCandidates", () => {
     db.prepare("INSERT INTO project_repositories (project_id, repo_root, remote_url, repo_name, role) VALUES (?, ?, ?, ?, ?)")
       .run(projectId, direct, "https://github.com/acme/widgets.git", "widgets", "primary");
 
-    const candidates = listLookupCandidates({ db, roots: [workspace] });
+    const candidates = await listLookupCandidatesAsync({ db, roots: [workspace] });
+    // 同步版不扫目录：缓存还没有时只给登记过的项目，后台列完以后给同样的结果（lead-scheduler P0b）。
+    expect(listLookupCandidates({ db, roots: [workspace] }).map((candidate) => candidate.source)).toEqual(["project"]);
+    await refreshLookupCandidates({ db, roots: [workspace] });
+    expect(listLookupCandidates({ db, roots: [workspace] })).toEqual(candidates);
     expect(candidates.map((candidate) => [candidate.repo, candidate.source])).toEqual([
       ["acme/widgets", "project"],
       ["gadgets", "local"],

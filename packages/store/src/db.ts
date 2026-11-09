@@ -1,4 +1,5 @@
 import Database from "better-sqlite3";
+import { schedLine } from "@pi-lead-child/core";
 import { basename } from "node:path";
 import {
   CHECKPOINT_CONTROL_PLANE_SCHEMA,
@@ -61,6 +62,8 @@ export function setSlowStatementLog(sink: ((line: string) => void) | null, thres
   slowStatementSink = sink;
   slowStatementThresholdMs = thresholdMs;
   slowStatementSeen.clear();
+  lockWaitLoggedAt = 0;
+  lockWaitSuppressed = 0;
 }
 
 function noteStatementTime(source: string, method: string, ms: number, inTransaction: boolean): void {
@@ -76,6 +79,70 @@ function noteStatementTime(source: string, method: string, ms: number, inTransac
   if (slowStatementSeen.size > STATEMENT_CACHE_SIZE) slowStatementSeen.delete(slowStatementSeen.keys().next().value!);
   const sql = source.replace(/\s+/g, " ").trim().slice(0, 160);
   slowStatementSink(`[slow-sql] ${Math.round(ms)} ms ${method}${inTransaction ? " in a transaction" : ""}${more}: ${sql}`);
+}
+
+// 等写锁的时间（lead-scheduler P0b，2026-11-09 审计第 3 项）。daemon 的写大多走 db.transaction(...).immediate()：
+// BEGIN IMMEDIATE 要等别的进程（直接写库的 pi 子进程、plc 命令）放开写锁，最长等 busy_timeout（5 秒），
+// 这段时间 daemon 的主线程什么都做不了。better-sqlite3 在原生层编译 BEGIN，上面的慢语句计时看不到它，
+// 所以这里另外量：从调用事务函数到事务体开始执行，就是等锁的时间（已经在事务里时是 SAVEPOINT，不等锁，不量）。
+// 超过慢语句的阈值记一行 [sched] db.lock_wait，一秒最多一行，带上这期间又等了几次。
+const LOCK_WAIT_LOG_INTERVAL_MS = 1_000;
+let lockWaitLoggedAt = 0;
+let lockWaitSuppressed = 0;
+
+function noteLockWait(ms: number, mode: string, error?: string): void {
+  if (!slowStatementSink || ms < slowStatementThresholdMs) return;
+  const now = Date.now();
+  if (now - lockWaitLoggedAt < LOCK_WAIT_LOG_INTERVAL_MS) {
+    lockWaitSuppressed++;
+    return;
+  }
+  const fields: Record<string, string | number> = { waitedMs: Math.round(ms), mode, thresholdMs: slowStatementThresholdMs };
+  // 等到 busy_timeout 还没拿到锁：BEGIN 抛 SQLITE_BUSY，这次写没有做。
+  if (error) fields.error = error;
+  if (lockWaitSuppressed) fields.moreSinceLastLine = lockWaitSuppressed;
+  lockWaitLoggedAt = now;
+  lockWaitSuppressed = 0;
+  slowStatementSink(schedLine("db.lock_wait", fields));
+}
+
+const TRANSACTION_MODES = ["default", "deferred", "immediate", "exclusive"] as const;
+
+function timeLockWaits(db: Db): void {
+  const transaction = db.transaction.bind(db);
+  db.transaction = ((fn: (...args: unknown[]) => unknown) => {
+    let calledAt: number | null = null;
+    let calledMode = "default";
+    const original = transaction(function (this: unknown, ...args: unknown[]) {
+      if (calledAt !== null) {
+        noteLockWait(performance.now() - calledAt, calledMode);
+        calledAt = null;
+      }
+      return fn.apply(this, args);
+    }) as unknown as Record<(typeof TRANSACTION_MODES)[number], (...args: unknown[]) => unknown>;
+    const variants = Object.fromEntries(TRANSACTION_MODES.map((mode) => [mode, function (this: unknown, ...args: unknown[]) {
+      if (!db.inTransaction) {
+        calledAt = performance.now();
+        calledMode = mode;
+      }
+      try {
+        return original[mode].apply(this, args);
+      } catch (error) {
+        // 事务体还没开始就失败了：BEGIN 没拿到锁。
+        if (calledAt !== null) noteLockWait(performance.now() - calledAt, mode, (error as { code?: string }).code ?? "error");
+        throw error;
+      } finally {
+        calledAt = null;
+      }
+    }])) as Record<(typeof TRANSACTION_MODES)[number], (...args: unknown[]) => unknown>;
+    // 和 better-sqlite3 一样：每个版本都带 default、deferred、immediate、exclusive 和 database。
+    const properties: PropertyDescriptorMap = {
+      ...Object.fromEntries(TRANSACTION_MODES.map((mode) => [mode, { value: variants[mode] }])),
+      database: { value: db, enumerable: true },
+    };
+    for (const mode of TRANSACTION_MODES) Object.defineProperties(variants[mode], properties);
+    return variants.default;
+  }) as Db["transaction"];
 }
 
 export function cacheStatements(db: Db, size = STATEMENT_CACHE_SIZE): Db {
@@ -120,6 +187,7 @@ export function cacheStatements(db: Db, size = STATEMENT_CACHE_SIZE): Db {
     if (cache.size > size) cache.delete(cache.keys().next().value!);
     return statement;
   }) as Db["prepare"];
+  timeLockWaits(db);
   return db;
 }
 
