@@ -25,7 +25,12 @@ vi.mock('expo-router', () => ({ useRouter: () => ({ push: vi.fn() }) }));
 const SESSION = 'lead-session';
 const UNAVAILABLE = '503: {"message":"upstream connect error or disconnect/reset before headers (providers=claude)"}';
 // 用户实际遇到的失败：代理返回 503 auth_unavailable，里面包着上游的 403 forbidden "Request not allowed"。
+// 代理的 503 auth_unavailable 里包着上游真正的认证失败（401）。
 const LIVE_AUTH = '503: {"message":"auth_unavailable: no auth available (providers=claude, model=claude-sonnet-5-5; '
+  + 'last upstream error: {\\"error\\": {\\"type\\": \\"authentication_error\\", '
+  + '\\"message\\": \\"invalid x-api-key\\"}}","type":"server_error"}';
+// 包着上游的 403 "Request not allowed"：到模型服务的路被拦了（2026-11-06），不是账号的问题。
+const ROUTE_BLOCKED = '503: {"message":"auth_unavailable: no auth available (providers=claude, model=claude-sonnet-5-5; '
   + 'last upstream error: {\\n  \\"error\\": {\\n    \\"type\\": \\"forbidden\\",\\n    '
   + '\\"message\\": \\"Request not allowed\\"}}","type":"server_error"}';
 
@@ -252,7 +257,7 @@ describe('failures in the Lead conversation', () => {
     expect(switchLeadModel).toHaveBeenCalledWith({ model: 'vibeproxy/claude-opus-5-5', effort: null });
   });
 
-  it('does not promise a retry for the proxy\'s 503 auth_unavailable around an upstream 403', () => {
+  it('does not promise a retry for the proxy\'s 503 auth_unavailable around an upstream 401', () => {
     const runtime = createCompanionStateRuntime({
       client: {} as CompanionRuntimeDependencies['client'],
       credentials: {} as CompanionRuntimeDependencies['credentials'],
@@ -280,6 +285,28 @@ describe('failures in the Lead conversation', () => {
     // 认证失败时直接重发也一样失败：一行里先说要检查什么，不引用你那句话。
     expect(user.textContent).toContain('No answer · Check the model account of Paimon first, then resend');
     for (const card of [heartbeat, user]) expect(card.textContent).not.toMatch(/tries again|retries|try again/i);
+  });
+
+  it('says the system continues when the network is back, not to check the account, when the route to the model is blocked', () => {
+    const runtime = createCompanionStateRuntime({
+      client: {} as CompanionRuntimeDependencies['client'],
+      credentials: {} as CompanionRuntimeDependencies['credentials'],
+      scheduler: { schedule: () => 0, cancel: () => {}, now: () => 0 },
+    });
+    runtime.control.setState({
+      phase: 'ready', connectionState: 'connected',
+      overview: overview({ ...degraded, reason: '网络不可用', detail: ROUTE_BLOCKED }),
+    });
+    runtime.control.getState().replaceConversation(SESSION, [
+      turn('heartbeat-route', {
+        originKind: 'system:heartbeat', state: 'failed', error: ROUTE_BLOCKED,
+        createdAt: '2026-11-06T13:43:00.000Z', updatedAt: '2026-11-06T13:43:00.000Z',
+      }),
+    ]);
+    renderUI(<CompanionRuntimeProvider runtime={runtime}><LeadConversation /></CompanionRuntimeProvider>);
+    const heartbeat = screen.getAllByTestId('failure-card').find((card) => card.textContent?.includes('Heartbeat check'))!;
+    expect(heartbeat.textContent).toContain('The system continues when the network is back');
+    expect(heartbeat.textContent).not.toMatch(/account/i);
   });
 
   // 2026-10-15 用户决定（方案 A）：主会话里发往工单的消息只留一行灰色的「消息尾巴」，不画红框、不给「重发」。

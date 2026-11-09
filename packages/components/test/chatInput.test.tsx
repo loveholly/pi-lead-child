@@ -132,7 +132,7 @@ describe('ChatInput', () => {
 
   it('removes its measuring textarea when it unmounts', () => {
     const view = renderUI(<Controlled />);
-    const shadows = () => [...document.body.querySelectorAll('textarea[aria-hidden="true"]')];
+    const shadows = () => [...document.body.querySelectorAll<HTMLTextAreaElement>('textarea[aria-hidden="true"]')];
     expect(shadows()).toHaveLength(1);
     expect(shadows()[0]!.style.visibility).toBe('hidden');
     view.unmount();

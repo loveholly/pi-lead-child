@@ -1763,7 +1763,7 @@ describe("daemon 插话回答的归属", () => {
 
   it("存下模型错误的原文时遮住里面的密钥", async () => {
     const token = "ghp_FAKEaaaaBBBBccccDDDDeeeeFFFFgggg1234";
-    const stub = stubSessionFactory({ response: "error", errorMessage: `403 forbidden: Request not allowed (token ${token})` });
+    const stub = stubSessionFactory({ response: "error", errorMessage: `401 Unauthorized (token ${token})` });
     const daemon = await startDaemon({
       dataDir: dir, dbPath, sessionFactory: stub.factory as any, log: () => {}, gatewayPort: 0,
     });
@@ -1772,7 +1772,7 @@ describe("daemon 插话回答的归属", () => {
       const result = await client.chat("现在有什么要我处理");
       await vi.waitFor(() => expect(readTurn(result.turnId).state).toBe("failed"));
       const { error } = db.prepare("SELECT error FROM channel_turns WHERE id=?").get(result.turnId) as { error: string };
-      expect(error).toContain("403 forbidden: Request not allowed");
+      expect(error).toContain("401 Unauthorized");
       expect(error).not.toContain(token);
       expect(error).not.toContain("请重试");
       const notice = db.prepare(

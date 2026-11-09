@@ -1,6 +1,6 @@
 // 等 ensure_running 的期限（P0-4 返工）：客户端不能比 supervisor 先放弃。supervisor 等 daemon 就绪最多 10 分钟，
 // 以前 desktop-install 只等 150 秒，机器忙时把还在启动的服务报成失败。
-import { createServer } from "node:net";
+import { createServer, type Socket } from "node:net";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { tempDir } from "@pi-lead-child/core/testing";
@@ -29,7 +29,10 @@ describe("supervisorRequest", () => {
   // 要在数据目录里监听一个 Unix socket。PLC 执行器的沙箱不允许（listen EPERM），那里跳过。
   it("marks a request that gets no answer in time with its own code", async (context) => {
     const dir = tempDir("plc-client-timeout-");
-    const server = createServer(() => {});
+    // 服务端收下连接，从不回答。收尾时自己断开这些连接：server.close 要等所有连接都关掉才回调，客户端超时后断开，
+    // 服务端这一侧没人读数据，不一定看到对方已经关了。ubuntu runner 上用例因此等满 15 秒超时（2026-11-09，PR #17 的 CI）。
+    const peers = new Set<Socket>();
+    const server = createServer((peer) => { peers.add(peer); });
     const listening = await new Promise<boolean>((resolve) => {
       server.once("error", () => resolve(false));
       server.listen(join(dir, "supervisor.sock"), () => resolve(true));
@@ -39,6 +42,7 @@ describe("supervisorRequest", () => {
       const error = await supervisorRequest({ type: "status" }, { dataDir: dir, timeoutMs: 100 }).catch((e: unknown) => e);
       expect((error as { code?: string }).code).toBe(SUPERVISOR_REQUEST_TIMEOUT);
     } finally {
+      for (const peer of peers) peer.destroy();
       await new Promise((resolve) => server.close(resolve));
     }
   });

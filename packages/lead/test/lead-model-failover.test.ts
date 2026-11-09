@@ -28,6 +28,8 @@ describe("which Lead failures switch the model", () => {
     expect(leadModelFailureCause('{"error":{"code":"insufficient_quota"}}')).toBe("quota");
     // 网络断了（09:06 的 DNS）：不换，等网络恢复。认不出的错误也不换。
     expect(leadModelFailureCause("getaddrinfo ENOTFOUND api.anthropic.com")).toBeNull();
+    // 2026-11-06：到模型服务的路被拦了（403 "Request not allowed"）。所有模型走同一条路，换一个就让代理多冷却一个账号：不换。
+    expect(leadModelFailureCause('403: {"type":"forbidden","message":"Request not allowed"}')).toBeNull();
     expect(leadModelFailureCause("lookup api.anthropic.com: no such host")).toBeNull();
     expect(leadModelFailureCause("something odd happened")).toBeNull();
     // Bedrock 的限流写着 too many tokens：是限流，不是溢出。
@@ -207,8 +209,9 @@ describe("the Lead model failover", () => {
   // a 坏了换 b，b 坏了本该换 c，可 a 的 30 分钟从 a 坏的那一刻算，下一轮开始前已经到了，又换回 a；一整夜在 a、b 之间来回，
   // 只有一次轮到 c，16 分钟后又被拉回坏掉的 a。
   it("stays on the model that works and backs off, instead of pulling Lead back to a first model that is still broken", () => {
+    // 当时上游回的是 403 "Request not allowed"，现在它算路被拦了（不换模型）。这里用上游的 401，测的仍是换模型的顺序。
     const AUTH_503 = '503: {"message":"auth_unavailable: no auth available (providers=claude, model=a; last upstream error: '
-      + '{\\"error\\": {\\"type\\": \\"forbidden\\", \\"message\\": \\"Request not allowed\\"}})"}';
+      + '{\\"error\\": {\\"type\\": \\"authentication_error\\", \\"message\\": \\"invalid x-api-key\\"}})"}';
     const minutes = (value: number) => value * 60_000;
     const failover = createLeadModelFailover({ models: ["p/a", "p/b", "p/c"] });
     failover.turnSucceeded();

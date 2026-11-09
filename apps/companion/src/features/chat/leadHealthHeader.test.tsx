@@ -100,14 +100,24 @@ describe('the Lead status in the conversation header', () => {
     expect(dotLabel()).toBe('Paimon is degraded: Lead 的模型服务暂时连不上');
   });
 
-  it('does not promise an automatic retry for the proxy\'s 503 auth_unavailable around an upstream 403', () => {
-    // 用户实际遇到的失败。daemon 的健康状态给出原文（detail），顶栏按原文分类。
+  it('does not promise an automatic retry for the proxy\'s 503 auth_unavailable around an upstream 401', () => {
+    // daemon 的健康状态给出原文（detail），顶栏按原文分类。
     const live = '503: {"message":"auth_unavailable: no auth available (providers=claude, model=claude-sonnet-5-5; '
-      + 'last upstream error: {\\n  \\"error\\": {\\n    \\"type\\": \\"forbidden\\",\\n    '
-      + '\\"message\\": \\"Request not allowed\\"}}","type":"server_error"}';
+      + 'last upstream error: {\\"error\\": {\\"type\\": \\"authentication_error\\", '
+      + '\\"message\\": \\"invalid x-api-key\\"}}","type":"server_error"}';
     render(runtimeWith({ ...degraded, reason: 'Lead 的模型账号认证失败', detail: live }));
     expect(screen.getByText('Model authentication failed. Check the configuration.')).toBeTruthy();
     expect(screen.queryByText(/Tries again at/)).toBeNull();
+  });
+
+  // 2026-11-06：休眠中短暂唤醒，流量没有走 VPN，Anthropic 按地区拒绝请求。以前顶栏叫人检查账号。
+  it('says the network is down, not the account, when the route to the model is blocked (403 Request not allowed)', () => {
+    const blocked = '503: {"message":"auth_unavailable: no auth available (providers=claude, model=claude-sonnet-5-5; '
+      + 'last upstream error: {\\n  \\"error\\": {\\n    \\"type\\": \\"forbidden\\",\\n    '
+      + '\\"message\\": \\"Request not allowed\\"}}","type":"server_error"}';
+    render(runtimeWith({ ...degraded, reason: '网络不可用', detail: blocked }));
+    expect(screen.getByText('Offline: no network. It continues when the network comes back.')).toBeTruthy();
+    expect(screen.queryByText(/authentication|Check the configuration/)).toBeNull();
   });
 
   it('says the network is down, not the model, and promises no time while it is', () => {

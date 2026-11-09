@@ -29,7 +29,7 @@ import { userMessagePlacement } from "./user-placement.js";
 import { createLeadInput, defaultDigestBatch, isReminderFireEvent, type DigestBatchPolicy } from "./lead-input.js";
 import { compactionEndOutcome, createLeadHealthTracker, isEmptyLengthStop, leadContextFullError } from "./lead-health.js";
 import { serverMessages } from "./server.messages.js";
-import { dnsProbe, NetworkMonitor, type NetworkProbe } from "./network.js";
+import { dnsProbe, keylessProbe, NetworkMonitor, type NetworkProbe } from "./network.js";
 import { DEFAULT_MODEL_CATALOG_REFRESH_MS, startModelCatalogWatch } from "./model-catalog-watch.js";
 import { recordRunFinished, recordRunFinishedAtTerminalEvent } from "./run-finished.js";
 import { recordConnectionAttention } from "./connection-attention.js";
@@ -573,6 +573,9 @@ export interface DaemonOpts {
   // 网络通不通（叫醒 Lead 之前探一次）。缺省：真实 daemon 解析 PLC_NETWORK_PROBE_HOST（缺省 api.anthropic.com）；
   // 注入了 sessionFactory 的测试总当网络是通的。
   networkProbe?: NetworkProbe;
+  // 到模型服务的路通不通（模型回了 403 "Request not allowed" 以后探）。缺省：真实 daemon 向 PLC_NETWORK_PROBE_HOST
+  // 发一个不带 key 的请求（network.ts 的 keylessProbe）；注入了 sessionFactory 的测试没有它，用 networkProbe。
+  networkRouteProbe?: NetworkProbe;
   // 连接（ConnectionHub）的测试注入：假厂商的 fetch、保险库密钥、gh。缺省：真实 daemon 用 Keychain 和本机的 gh；
   // 注入了 sessionFactory 的测试用数据目录里的密钥文件，没有 gh。
   connections?: { fetch?: FetchLike; keySource?: VaultKeySource; gh?: GhTokenSource; tickMs?: number };
@@ -3163,19 +3166,22 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     locale: () => getLocale(db),
   });
   // 断网不是模型的问题（2026-10-16）：系统回合叫醒 Lead 之前先探网络，不通时等它恢复，恢复后马上接着做。
+  const networkProbeHost = process.env.PLC_NETWORK_PROBE_HOST ?? "api.anthropic.com";
   const network = new NetworkMonitor({
-    probe: opts.networkProbe ?? (opts.sessionFactory
-      ? async () => null
-      : dnsProbe(process.env.PLC_NETWORK_PROBE_HOST ?? "api.anthropic.com")),
+    probe: opts.networkProbe ?? (opts.sessionFactory ? async () => null : dnsProbe(networkProbeHost)),
+    routeProbe: opts.networkRouteProbe ?? (opts.sessionFactory ? undefined : keylessProbe(networkProbeHost)),
     retryBaseMs: Number(process.env.PLC_NETWORK_RETRY_MS ?? 15_000),
+    ...(process.env.PLC_NETWORK_ROUTE_MAX_WAIT_MS ? { routeMaxWaitMs: Number(process.env.PLC_NETWORK_ROUTE_MAX_WAIT_MS) } : {}),
     onDown: (detail) => {
       log(`network unreachable: ${detail}`);
       leadHealth.networkDown(detail);
     },
     // 网络恢复：等它的那一轮用户消息接着试，积压的事叫醒 Lead 处理。Lead 的健康状态和唤醒退避不动：
     // 探测通过不等于模型能用，只有一次成功的模型调用才算恢复（发布评审 f796c1c 的 B1）。
-    onRestored: () => {
-      log("network is back: resuming Lead");
+    onRestored: (how) => {
+      log(how === "waited"
+        ? "the route to the model is still blocked after the longest wait: trying the model once"
+        : "network is back: resuming Lead");
       dispatchLeadWork();
     },
   });

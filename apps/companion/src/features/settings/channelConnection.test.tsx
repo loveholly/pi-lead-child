@@ -108,22 +108,30 @@ describe('the Slack connection on the settings page', () => {
     expect(screen.getByTestId('channel-slack-input-PLC_SLACK_APP_TOKEN')).toBeTruthy();
   });
 
+  // 剩余时间按组件自己记下的 now 算（ChannelConnection 的 useState(() => Date.now())），等待开始以后每秒才刷新一次。
+  // 以前用真时钟：组件挂上以后过了 500ms 以上才算 expiresAt（整套跑时机器一忙就会），四舍五入成 300 秒，显示「5:00」，
+  // 和「4:5x」对不上（2026-11-06，#279）。现在冻住 Date.now()，组件和测试用同一个时刻，剩余时间固定是 4:59。
   it('signs in after you accept the risks, waits with the time left, and can cancel', async () => {
-    const { client, next } = setup(appSource(), connection());
-    await screen.findByTestId('channel-slack-connection');
-    fireEvent.click(radio('session'));
-    next(connection({ signIn: { mode: 'session', state: 'waiting', startedAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 299_000).toISOString(), code: null } }));
-    await act(async () => { fireEvent.click(screen.getByTestId('channel-slack-connection-sign-in')); });
-    expect(client.performUiAction).toHaveBeenCalledWith('channel_connection', 'slack', 'sign_in', { input: { mode: 'session' } });
-    const waiting = await screen.findByTestId('channel-slack-connection-waiting');
-    expect(waiting.textContent).toContain('A sign-in window is open on this Mac.');
-    expect(waiting.textContent).toMatch(/Time left 4:5\d/);
-    const button = screen.getByText('Waiting for you to sign in…').closest('[role="button"], button');
-    expect(button?.getAttribute('aria-disabled') === 'true' || button?.hasAttribute('disabled')).toBe(true);
-    next(connection({ signIn: { mode: 'session', state: 'cancelled', startedAt: new Date().toISOString(), expiresAt: null, code: 'cancelled' } }));
-    await act(async () => { fireEvent.click(screen.getByTestId('channel-slack-connection-cancel')); });
-    expect(client.performUiAction).toHaveBeenLastCalledWith('channel_connection', 'slack', 'cancel_sign_in', { input: {} });
-    expect((await screen.findByTestId('channel-slack-connection-result')).textContent).toBe('Sign-in cancelled. Nothing changed.');
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(Date.now());
+    try {
+      const { client, next } = setup(appSource(), connection());
+      await screen.findByTestId('channel-slack-connection');
+      fireEvent.click(radio('session'));
+      next(connection({ signIn: { mode: 'session', state: 'waiting', startedAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 299_000).toISOString(), code: null } }));
+      await act(async () => { fireEvent.click(screen.getByTestId('channel-slack-connection-sign-in')); });
+      expect(client.performUiAction).toHaveBeenCalledWith('channel_connection', 'slack', 'sign_in', { input: { mode: 'session' } });
+      const waiting = await screen.findByTestId('channel-slack-connection-waiting');
+      expect(waiting.textContent).toContain('A sign-in window is open on this Mac.');
+      expect(waiting.textContent).toMatch(/Time left 4:5\d/);
+      const button = screen.getByText('Waiting for you to sign in…').closest('[role="button"], button');
+      expect(button?.getAttribute('aria-disabled') === 'true' || button?.hasAttribute('disabled')).toBe(true);
+      next(connection({ signIn: { mode: 'session', state: 'cancelled', startedAt: new Date().toISOString(), expiresAt: null, code: 'cancelled' } }));
+      await act(async () => { fireEvent.click(screen.getByTestId('channel-slack-connection-cancel')); });
+      expect(client.performUiAction).toHaveBeenLastCalledWith('channel_connection', 'slack', 'cancel_sign_in', { input: {} });
+      expect((await screen.findByTestId('channel-slack-connection-result')).textContent).toBe('Sign-in cancelled. Nothing changed.');
+    } finally {
+      clock.mockRestore();
+    }
   });
 
   it('says why the sign-in did not work', async () => {

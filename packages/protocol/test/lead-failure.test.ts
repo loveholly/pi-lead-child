@@ -2,20 +2,27 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  classifyLeadModelError, isLeadTransportFailure, LEAD_RESTART_INTERRUPTED_ERROR, leadModelFailureNeedsUser, leadModelFailureReason,
-  leadOutageCause, leadTurnFailureSentence, leadTurnWaitingSentence, markUpstreamFailure,
+  classifyLeadModelError, isLeadRouteBlock, isLeadTransportFailure, LEAD_RESTART_INTERRUPTED_ERROR, leadModelFailureNeedsUser,
+  leadModelFailureReason, leadOutageCause, leadTurnFailureSentence, leadTurnWaitingSentence, markUpstreamFailure,
 } from "../src/index.ts";
 
-// 用户实际遇到的失败：代理返回 503 auth_unavailable，里面包着上游的 403 forbidden "Request not allowed"。
-const LIVE_AUTH = '503: {"message":"auth_unavailable: no auth available (providers=claude, model=claude-sonnet-5-5; '
+// 代理返回 503 auth_unavailable，里面包着上游的 403 forbidden "Request not allowed"。
+// 2026-11-06 查清：这是 Anthropic 按来源地区拒绝请求（休眠中短暂唤醒时流量没有走 VPN），不是账号的问题。
+const LIVE_ROUTE_BLOCK = '503: {"message":"auth_unavailable: no auth available (providers=claude, model=claude-sonnet-5-5; '
   + 'last upstream error: {\\n  \\"error\\": {\\n    \\"type\\": \\"forbidden\\",\\n    '
   + '\\"message\\": \\"Request not allowed\\"}}","type":"server_error"}';
+// 代理返回 503 auth_unavailable，里面包着上游真正的认证失败（401）。
+const UPSTREAM_401 = '503: {"message":"auth_unavailable: no auth available (providers=claude, model=claude-sonnet-5-5; '
+  + 'last upstream error: {\\"error\\": {\\"type\\": \\"authentication_error\\", '
+  + '\\"message\\": \\"invalid x-api-key\\"}}","type":"server_error"}';
 
 describe("classifyLeadModelError", () => {
-  it("treats the proxy's 503 auth_unavailable around an upstream 403 forbidden as an auth failure", () => {
-    expect(classifyLeadModelError(LIVE_AUTH)).toBe("auth");
-    expect(leadModelFailureNeedsUser(classifyLeadModelError(LIVE_AUTH))).toBe(true);
-    expect(classifyLeadModelError('403 {"error":{"type":"forbidden","message":"Request not allowed"}}')).toBe("auth");
+  it("treats the proxy's 503 auth_unavailable around an upstream 401 as an auth failure", () => {
+    expect(classifyLeadModelError(UPSTREAM_401)).toBe("auth");
+    expect(leadModelFailureNeedsUser(classifyLeadModelError(UPSTREAM_401))).toBe(true);
+    // 账号没有权限：Anthropic 的 403 permission_error。
+    expect(classifyLeadModelError('403 {"type":"error","error":{"type":"permission_error","message":"no access to this model"}}'))
+      .toBe("auth");
     // 没有认证字样的 503 仍然是连不上，系统会自己再试。
     expect(classifyLeadModelError("503 Service Unavailable: upstream connect error")).toBe("unavailable");
     expect(leadModelFailureReason("unavailable")).toBe("Paimon 的模型服务暂时连不上");
@@ -23,7 +30,7 @@ describe("classifyLeadModelError", () => {
 
   // 发布评审（Lead 信任修复留下的一项）：代理在所有账号都在冷却、或者上游暂时 5xx 时也回 503 auth_unavailable。
   // 只凭 auth_unavailable 就判成认证失败，短暂的 5xx 会被说成「要检查账号」，系统也不再自己重试。
-  // 只有里面真的带着上游的 401、403（forbidden、unauthorized、Request not allowed）才是认证失败。
+  // 只有里面真的带着上游的 401、403（forbidden、unauthorized）才是认证失败。403 "Request not allowed" 除外，见下面的 describe。
   it("treats a proxy auth_unavailable without an upstream 401/403 as a passing outage, not an auth failure", () => {
     expect(classifyLeadModelError("503: auth_unavailable")).toBe("unavailable");
     expect(classifyLeadModelError('503: {"message":"auth_unavailable: no auth available (providers=claude, model=claude-sonnet-5-5)"}'))
@@ -32,7 +39,7 @@ describe("classifyLeadModelError", () => {
       .toBe("unavailable");
     expect(classifyLeadModelError('503: {"message":"auth_unavailable: no auth available; last upstream error: 429 rate_limit_error"}'))
       .toBe("busy");
-    expect(classifyLeadModelError(LIVE_AUTH)).toBe("auth");
+    expect(classifyLeadModelError(UPSTREAM_401)).toBe("auth");
     expect(classifyLeadModelError('503: {"message":"auth_unavailable; last upstream error: 401 Unauthorized"}')).toBe("auth");
   });
 
@@ -60,7 +67,7 @@ describe("classifyLeadModelError", () => {
 
 describe("leadTurnFailureSentence", () => {
   it("does not ask to retry, or promise a retry, when the model account needs checking", () => {
-    for (const raw of [LIVE_AUTH, "401 Unauthorized", "Lead 模型连接认证失败，请重试。"]) {
+    for (const raw of [UPSTREAM_401, "401 Unauthorized", "Lead 模型连接认证失败，请重试。"]) {
       const user = leadTurnFailureSentence(raw, { system: false })!;
       expect(user).toBe("Paimon 的模型账号认证失败，这条消息没有得到回答；请先检查 Paimon 的模型账号，再发一次。");
       const system = leadTurnFailureSentence(raw, { system: true })!;
@@ -101,6 +108,29 @@ describe("network failures", () => {
     const raw = "getaddrinfo ENOTFOUND api.anthropic.com";
     expect(leadTurnFailureSentence(raw, { system: true })).toBe("网络不可用，Paimon 这次没能调用模型；网络恢复后系统会继续，你不需要操作。");
     expect(leadTurnFailureSentence(raw, { system: false })).toBe("网络不可用，这条消息没有得到回答；你可以再发一次。");
+  });
+});
+
+// 2026-11-06 21:43–23:00：Mac 合盖睡眠，短暂唤醒时 DNS 通了，流量却没有走 VPN。Anthropic 按来源地区拒绝请求，
+// 回 403 forbidden "Request not allowed"。以前它算账号认证失败：顶栏叫人检查账号，系统逐个换模型，
+// 每换一次代理就冷却一个账号，打开电脑以后还要再等约 30 分钟。这是到模型服务的路被拦了，不是账号的问题。
+describe("a blocked network route (403 Request not allowed)", () => {
+  it("is a network failure the system resumes from, not an account failure", () => {
+    for (const raw of [LIVE_ROUTE_BLOCK, '403: {"type":"forbidden","message":"Request not allowed"}']) {
+      expect(classifyLeadModelError(raw), raw).toBe("network");
+      expect(isLeadRouteBlock(raw), raw).toBe(true);
+    }
+    expect(leadModelFailureNeedsUser(classifyLeadModelError(LIVE_ROUTE_BLOCK))).toBe(false);
+    expect(leadTurnFailureSentence(LIVE_ROUTE_BLOCK, { system: true }))
+      .toBe("网络不可用，Paimon 这次没能调用模型；网络恢复后系统会继续，你不需要操作。");
+    expect(isLeadRouteBlock(UPSTREAM_401)).toBe(false);
+    expect(isLeadRouteBlock("getaddrinfo ENOTFOUND api.anthropic.com")).toBe(false);
+  });
+
+  it("counts as the model service once the daemon has checked that the route works", () => {
+    const marked = markUpstreamFailure(LIVE_ROUTE_BLOCK);
+    expect(classifyLeadModelError(marked)).toBe("unavailable");
+    expect(isLeadRouteBlock(marked)).toBe(false);
   });
 });
 

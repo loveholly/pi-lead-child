@@ -13,10 +13,11 @@ import { chatOutboxPath } from "../src/chat-outbox-file.js";
 import { ChatInput, ChatRenderer, runChat } from "../src/chat.js";
 import { explainClientError } from "../src/gateway-client.js";
 
-// 用户实际遇到的失败：代理返回 503 auth_unavailable，里面包着上游的 403 forbidden "Request not allowed"。
+// 代理返回 503 auth_unavailable，里面包着上游真正的认证失败（401）。
+// 上游的 403 "Request not allowed" 不算：那是到模型服务的路被拦了（2026-11-06），见 protocol 的 lead-failure。
 const LIVE_AUTH = '503: {"message":"auth_unavailable: no auth available (providers=claude, model=claude-sonnet-5-5; '
-  + 'last upstream error: {\\n  \\"error\\": {\\n    \\"type\\": \\"forbidden\\",\\n    '
-  + '\\"message\\": \\"Request not allowed\\"}}","type":"server_error"}';
+  + 'last upstream error: {\\"error\\": {\\"type\\": \\"authentication_error\\", '
+  + '\\"message\\": \\"invalid x-api-key\\"}}","type":"server_error"}';
 
 let seq = 0;
 function event(type: GatewayEvent["type"], payload: Record<string, unknown>, audienceBindingId: number | null = 9): GatewayEvent {

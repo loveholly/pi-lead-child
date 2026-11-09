@@ -7,13 +7,14 @@ import { DEFAULT_LEAD_NAME } from "./lead-profile.ts";
 export type LeadModelFailureKind =
   // 这台机器的网络断了：DNS 解析不了、网络不可达、离线、连接被拒或被重置（2026-10-15 19:11 起和
   // 2026-10-16 09:29 的 DarkWake：代理报 "lookup api.anthropic.com: no such host"）。不是模型的问题，
-  // 网络恢复以后系统接着做。
+  // 网络恢复以后系统接着做。到模型服务的路被拦了也算这一种（403 "Request not allowed"，见 ROUTE_BLOCK）。
   | "network"
   // 模型服务连不上（5xx、本机的模型代理没开）。系统会自己再试。
   | "unavailable"
   // 模型服务限流或过载。系统会自己再试。
   | "busy"
   // 模型账号认证失败，或者没有权限（401、403；代理的 auth_unavailable 里带着上游的 401、403）。再试也一样，要有人重新登录或换 key。
+  // 403 "Request not allowed" 不算：那是路被拦了，见 ROUTE_BLOCK。
   | "auth"
   // 模型配置有误（模型名不存在、不支持）。再试也一样，要有人改配置。
   | "config"
@@ -43,8 +44,18 @@ export function isLeadTransportFailure(raw: string): boolean {
   return !raw.startsWith(UPSTREAM_PREFIX) && TRANSPORT.test(raw) && !LOOPBACK.test(raw);
 }
 // auth_unavailable、no auth available 本身不算：代理在所有账号冷却、或者上游暂时 5xx 时也这么回，那是短暂的故障，
-// 系统应该自己再试（发布评审）。用户实际遇到的那条里带着上游的 403 forbidden，靠后面的上游错误认出来。
-const AUTH = /\b40[13]\b|unauthori[sz]ed|forbidden|request not allowed|invalid[ _-]?(?:x-)?api[ _-]?key|authentication failed|认证失败/i;
+// 系统应该自己再试（发布评审）。带着上游的 401、403 时，靠后面的上游错误认出来。
+const AUTH = /\b40[13]\b|unauthori[sz]ed|forbidden|invalid[ _-]?(?:x-)?api[ _-]?key|authentication failed|认证失败/i;
+// 到模型服务的路被拦了：Anthropic 按请求的来源（地区）拒绝，回 403 forbidden "Request not allowed"。代理的
+// 503 auth_unavailable 里也会带着它。2026-11-06：Mac 休眠中短暂唤醒时 DNS 通了，流量却没有走 VPN；同一条路上
+// 不带 key 的请求回 401（地区放行了，只是缺 key）。这不是账号的问题，换模型也一样（所有模型走同一条路）：
+// 路通了以后系统接着做。daemon 用不带 key 的探测确认路通不通（daemon 的 network.ts）。
+const ROUTE_BLOCK = /request not allowed/i;
+
+/** 到模型服务的路被拦了（403 "Request not allowed"），daemon 还没有确认路是通的。 */
+export function isLeadRouteBlock(raw: string): boolean {
+  return !raw.startsWith(UPSTREAM_PREFIX) && ROUTE_BLOCK.test(raw);
+}
 // 上下文满了：pi 的溢出恢复失败（"Context overflow recovery failed"），或者 daemon 记的「上下文满了」（lead-health.ts）。
 const CONTEXT = /context overflow|上下文满了/i;
 const CONFIG = /\b404\b|model[ _-]?not[ _-]?found|unknown[ _-]?model|invalid[ _-]?model|no such model|model .*not supported/i;
@@ -53,8 +64,9 @@ export function classifyLeadModelError(raw: string): LeadModelFailureKind {
   // 上下文满了排在最前面：原文里带着压缩时遇到的 503、超时一类的字样，也不能当成连不上（再试也一样）。
   if (CONTEXT.test(raw)) return "context";
   if (BUSY.test(raw)) return "busy";
-  // 认证排在"连不上"前面。用户实际遇到的失败是代理的 503 auth_unavailable，里面包着上游的
-  // 403 forbidden "Request not allowed"：状态码是 503，可再试也一样，要有人检查账号。
+  // 路被拦了排在认证前面：原文里带着 403 和 forbidden。daemon 探测过、路是通的（加了 UPSTREAM_PREFIX），就是模型服务的问题。
+  if (ROUTE_BLOCK.test(raw)) return raw.startsWith(UPSTREAM_PREFIX) ? "unavailable" : "network";
+  // 认证排在"连不上"前面。代理的 503 auth_unavailable 里包着上游的 401：状态码是 503，可再试也一样，要有人检查账号。
   if (AUTH.test(raw)) return "auth";
   if (raw.startsWith(UPSTREAM_PREFIX)) return "unavailable";
   if (NETWORK.test(raw) && !LOOPBACK.test(raw)) return "network";

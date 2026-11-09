@@ -80,9 +80,10 @@ function lead(failures: string[] = [], onFailure: () => void = () => {}) {
   return { factory, prompts };
 }
 
-async function start(stub: ReturnType<typeof lead>, net: ReturnType<typeof network>) {
+async function start(stub: ReturnType<typeof lead>, net: ReturnType<typeof network>, route?: ReturnType<typeof network>) {
   daemon = await startDaemon({
     dataDir: dir, dbPath, sessionFactory: stub.factory as never, log: () => {}, networkProbe: net.probe,
+    ...(route ? { networkRouteProbe: route.probe } : {}),
   });
   const token = redeemPairing(db, createPairing(db, { name: "app", kind: "companion", scopes: ["chat", "tickets:view"] }).code).accessToken;
   return async () => (await (await fetch(`http://127.0.0.1:${daemon!.pairedPort}/v1/overview?include=lead`, {
@@ -157,6 +158,71 @@ describe("a DarkWake: the DNS answers from cache, but the model call fails", () 
     await vi.waitFor(() => expect(stub.prompts.length).toBeGreaterThanOrEqual(2));
     await vi.waitFor(async () => expect((await overview()).lead!.state).toBe("online"));
     expect(turns().filter((turn) => turn.state === "failed")).toEqual([]);
+  });
+});
+
+// 2026-11-06 21:43–23:00：合盖睡眠，短暂唤醒时 DNS 通了，流量却没有走 VPN。Anthropic 按来源地区回
+// 403 "Request not allowed"。以前它算账号认证失败：系统逐个换模型，每换一次代理就冷却一个账号，
+// 打开电脑、VPN 也好了以后，Lead 还要再等约 30 分钟。现在：
+//   · 不带 key 的探测确认路还被拦着：按断网处理，不留失败卡片，不再调模型，用户的消息等网络恢复再答；
+//   · 探测回 401（路是通的）：Lead 马上接着做；
+//   · 探测说路是通的，模型却回 403：是模型服务的问题，按"模型服务连不上"处理，不叫人检查账号。
+const ROUTE_BLOCKED = '503: {"message":"auth_unavailable: no auth available (providers=claude, model=claude-sonnet-5-5; '
+  + 'last upstream error: {\\"error\\": {\\"type\\": \\"forbidden\\", \\"message\\": \\"Request not allowed\\"}}","type":"server_error"}';
+
+describe("a DarkWake: DNS answers, but the route to the model is blocked", () => {
+  it("leaves no failure card, does not call the model again, and resumes once a keyless probe gets through", async () => {
+    const route = network();
+    route.down("blocked");
+    const stub = lead([ROUTE_BLOCKED]);
+    const overview = await start(stub, network(), route);
+    backlog();
+
+    await vi.waitFor(() => expect(stub.prompts).toHaveLength(1));
+    await pause(300);
+    expect(stub.prompts).toHaveLength(1);
+    expect(turns()).toEqual([]);
+    const health = (await overview()).lead!;
+    expect(health.state).toBe("degraded");
+    expect(classifyLeadModelError(health.detail ?? "")).toBe("network");
+
+    route.up();
+    await vi.waitFor(() => expect(stub.prompts.length).toBeGreaterThanOrEqual(2));
+    await vi.waitFor(async () => expect((await overview()).lead!.state).toBe("online"));
+    expect(turns().filter((turn) => turn.state === "failed")).toEqual([]);
+  });
+
+  it("holds the user's message and answers it once the route works", async () => {
+    const route = network();
+    route.down("blocked");
+    const stub = lead([ROUTE_BLOCKED]);
+    await start(stub, network(), route);
+    const token = redeemPairing(db, createPairing(db, { name: "web", kind: "companion", scopes: ["chat"] }).code).accessToken;
+    const socket = new WebSocket(`ws://127.0.0.1:${daemon!.pairedPort}/v1/paired/events?token=${token}&protocol=2`);
+    const received: any[] = [];
+    socket.on("message", (raw) => received.push(JSON.parse(String(raw))));
+    await vi.waitFor(() => expect(received.some((entry) => entry.type === "hello.v2")).toBe(true));
+    socket.send(JSON.stringify({ type: "chat.send", id: "cmd-1", protocolVersion: 2, message: "在吗" }));
+
+    await vi.waitFor(() => expect(received.some((entry) => entry.type === "notice.created"
+      && entry.payload?.retry === "waiting" && entry.payload?.waitingFor === "network")).toBe(true));
+    await pause(200);
+    expect(stub.prompts.filter((prompt) => prompt.includes("在吗"))).toHaveLength(1);
+
+    route.up();
+    await vi.waitFor(() => expect(stub.prompts.filter((prompt) => prompt.includes("在吗"))).toHaveLength(2));
+    await vi.waitFor(() => expect(turns().filter((turn) => !turn.origin_kind.startsWith("system")).map((turn) => turn.state))
+      .toEqual(["completed"]));
+    socket.close();
+  });
+
+  it("counts the 403 as the model service's problem, not the account, when a keyless probe gets through", async () => {
+    const stub = lead([ROUTE_BLOCKED]);
+    const overview = await start(stub, network(), network());
+    backlog();
+
+    await vi.waitFor(() => expect(stub.prompts).toHaveLength(1));
+    await vi.waitFor(async () => expect(classifyLeadModelError((await overview()).lead!.detail ?? "")).toBe("unavailable"));
   });
 });
 
