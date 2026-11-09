@@ -6,6 +6,7 @@
 // 两条路上 agent 的输入开头都是系统现在的 TicketSummary（2026-10-16 #77：续接的会话按旧记忆答「还在 review」）。
 //
 // 走完整的落库路径：消息经网关进来，daemon 交给 agent；Lead 是假的 pi 会话（fake-pi-session.ts），什么都不说。
+import { execFileSync } from "node:child_process";
 import { mkdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -310,4 +311,25 @@ describe("buttons under a ticket reply, judged by the fast model", () => {
     const client = await plcClient(daemon!);
     expect((await client.getConversationTurns(itemId)).find((turn) => turn.id === turnId)).not.toHaveProperty("replyActions");
   }, 60_000);
+});
+
+// lead-scheduler spec P0（2026-11-09）：开对话 Run 时判定工作区要几个 git 事实。以前缓存里没有，daemon 就在主线程上
+// 同步跑 git（日志 "[git-facts] not warmed"）。现在消息先排队，事实异步查好以后再转交给 agent。
+describe("a ticket message for a ticket whose workdir is a git repository", () => {
+  it("is answered by the agent without running git on the daemon's main thread", async () => {
+    const { itemId } = doneTicket();
+    const repo = join(tempDir("plc-ticket-chat-repo-"), "repo");
+    execFileSync("git", ["init", "-q", "-b", "main", repo]);
+    db.prepare("UPDATE items SET workdir=? WHERE id=?").run(repo, itemId);
+    const logs: string[] = [];
+    const runtime = new ScriptedAgentRuntime(() => "agent 看过仓库了。");
+    const { send } = await start(silentLead(), { runtimeRegistry: new RuntimeRegistry([runtime]), log: (line) => logs.push(line) });
+
+    const { turnId } = await send("看一下这个仓库", { ticketId: itemId });
+    await settled(turnId, itemId);
+
+    expect(turnRow(turnId)).toMatchObject({ item_id: itemId, state: "completed", error: null, assistant_text: "agent 看过仓库了。" });
+    expect(runtime.requests).toHaveLength(1);
+    expect(logs.filter((line) => line.includes("not warmed"))).toEqual([]);
+  }, 30_000);
 });

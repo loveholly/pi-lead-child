@@ -20,6 +20,7 @@ import { deliveryFileOpenBlocker, openDeliveryFile } from "../coordinator/delive
 import { abandonDelivery, mergeDelivery, openDeliveryPullRequest, type DeliveryExpectation } from "../coordinator/delivery.js";
 import { autoPullRequestEnabled, setAutoPullRequest } from "../coordinator/auto-pull-request.js";
 import { createDispatcher } from "../coordinator/dispatch.js";
+import { warmRunWorkspaceFacts } from "../coordinator/workspace-policy.js";
 import { reviewerProgress, unreviewedDelivery, verificationState } from "../coordinator/review-authority.js";
 import { leadUserTurnOf } from "../ui-actions/authority.js";
 import { ACCEPTANCE_CRITERIA_ACTIONS } from "./acceptance-criteria.js";
@@ -321,7 +322,9 @@ export const TICKET_ACTIONS: TicketActionCatalog = {
       if (item.stage === "active" && !latestRunIn(env.db, item.id, RUN_TARGETS.stop.states)) return AVAILABLE;
       return unavailable(`工单现在是「${stageWord(item.stage)}」，不能开始执行。`);
     },
-    run: ({ db, env, item, input, by }) => {
+    run: async ({ db, env, item, input, by }) => {
+      // 拉起执行者时同步判定工作区：要的 git 事实先异步查好，判定只读缓存，不在 daemon 的主线程上跑 git（lead-scheduler spec P0）。
+      await warmRunWorkspaceFacts(db, item, { role: "executor", purpose: item.purpose ?? "execution" });
       const note = startItem(db, env.host, item.id, by, {
         ...(input.runtime ? { runtime: input.runtime as RuntimeId } : {}),
         ...(input.model ? { model: input.model } : {}),

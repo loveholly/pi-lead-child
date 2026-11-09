@@ -9,7 +9,9 @@ import { randomBytes } from "node:crypto";
 import {
   chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, utimesSync, writeFileSync,
 } from "node:fs";
+import { stat } from "node:fs/promises";
 import { join } from "node:path";
+import { runningHostJobs } from "@pi-lead-child/core";
 import { openDb, type Db } from "@pi-lead-child/store";
 import {
   createItem, createWorkspace, getItem, getWorkspace, listActivities, listInbox, resolveWorkspace,
@@ -718,6 +720,36 @@ describe("deleting a worktree", () => {
     await worktreeDeletionsSettled();
     expect(readdirSync(trash())).toHaveLength(0);
   });
+
+  // 2026-11-09: the background delete ran fs.promises.rm inside the daemon. Every file's unlink went
+  // through Node's I/O threadpool, and Lead's next model request, in the same process, waited 9–14 minutes
+  // behind it. The delete now runs in a child process: the threadpool stays free while it runs.
+  it("deletes the retired worktree in a child process, so the process's own file I/O does not wait for it", async () => {
+    // vitest.setup.ts runs background deletes at utility priority: taskpolicy -b would make this one take about a minute.
+    const itemId = codingTicket();
+    const worktree = isolatedFor(itemId);
+    writeFileSync(join(repo, ".git", "info", "exclude"), "node_modules/\n");
+    const files = 20_000;
+    for (let pkg = 0; pkg < files / 500; pkg += 1) {
+      const lib = join(worktree.path, "node_modules", `pkg${pkg}`, "lib");
+      mkdirSync(lib, { recursive: true });
+      for (let file = 0; file < 500; file += 1) writeFileSync(join(lib, `f${file}.js`), "module.exports = 1;\n");
+    }
+    commitIn(worktree.path, "feature.txt", "feature\n");
+    finish(itemId);
+
+    await integrateIsolatedWorkspace(db, worktree.id, { actor: "lead", reason: "merge it" });
+    const deleting = runningHostJobs().find((job) => job.kind === "worktree-delete");
+    const started = performance.now();
+    await stat(dir);
+    const statMs = performance.now() - started;
+
+    expect(statMs).toBeLessThan(1_000);
+    expect(deleting?.pid).toEqual(expect.any(Number));
+    await worktreeDeletionsSettled();
+    expect(readdirSync(trash())).toHaveLength(0);
+    expect(runningHostJobs()).toEqual([]);
+  }, 120_000);
 
   it("deletes what a stopped daemon left in the trash, and never asks the user about the trash", async () => {
     isolatedFor(codingTicket());

@@ -37,6 +37,10 @@ delete process.env.PLC_SOL_PI_ENTRY;
 // 同理，用户在设置里停用的 runtime（PLC_DISABLED_RUNTIMES）会被 plc 的执行器继承。测试不能跟着用户的开关变：
 // 设了 codex 以后，runtime-disabled.test.ts 有两条失败（2026-10-19 发布评审）。要它的测试自己用 vi.stubEnv 设置。
 delete process.env.PLC_DISABLED_RUNTIMES;
+// 测试里的后台删除用 utility 的 I/O 优先级（core 的 host-jobs.ts）。缺省的 taskpolicy -b 在机器忙的时候很慢：
+// 并发跑测试文件时，一个后台删除拖过了测试文件的结束，文件结束时删临时目录的这一步超时（2026-11-09）。
+// 要测缺省优先级的测试（core 的 host-jobs.test.ts）自己去掉它。
+process.env.PLC_BACKGROUND_DELETE_IO ??= "utility";
 // 网关的缺省端口 47130 也是用户 App 里真实 daemon 的端口。测试进程监听它时，在绑定之前就失败（reserved-ports.ts）。
 // 2026-11-05：daemon.test.ts 删除了 PLC_GATEWAY_PORT，它启动的 daemon 绑上了 127.0.0.1:47130，App 连到了测试 daemon 上。
 reserveTestPorts([DEFAULT_GATEWAY_PORT], "it is the gateway port of the user's real daemon. "

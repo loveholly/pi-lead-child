@@ -38,7 +38,7 @@ try {
   // skillDirs：用户给 agent 装的 skill（~/.agents/skills 这类），Lead 也加载。
   const d = await startDaemon({
     dataDir: dataDir(), dbPath: dbPath(), manageMemory: true, channels: { live: true }, skillDirs: userSkillDirs(),
-    relaxConnectionWrites: true,
+    relaxConnectionWrites: true, hostProbes: true,
   });
   void solPi.sync().then((activated) => {
     if (activated) d.reloadLeadExtensions("SoL-Pi installed");

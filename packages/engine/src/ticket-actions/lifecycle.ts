@@ -19,6 +19,7 @@ import {
 import { liveChildren } from "../children/manager.js";
 import { changeReviewer, suspendedReviewRuntime } from "../coordinator/change-reviewer.js";
 import { createDispatcher } from "../coordinator/dispatch.js";
+import { warmRunWorkspaceFacts } from "../coordinator/workspace-policy.js";
 import type { FileOpener } from "../coordinator/file-opener.js";
 import { reviewerProgress, unreviewedDelivery, verificationState } from "../coordinator/review-authority.js";
 import { automaticReviewRuntime } from "../pipeline/automatic-review.js";
@@ -364,6 +365,9 @@ export async function resumeItemRun(
 ): Promise<void> {
   const run = getRun(db, runId);
   if (!run) throw new Error(`run ${runId} not found`);
+  // 恢复的 Run 按它原来的角色和用途同步判定工作区：要的 git 事实先异步查好（lead-scheduler spec P0）。
+  const owner = getItem(db, run.item_id);
+  if (owner) await warmRunWorkspaceFacts(db, owner, { role: run.role, purpose: run.purpose });
   const blocker = runResumeBlocker(db, runId);
   if (blocker) throw new Error(blocker);
   if (!host.resumeRun) {

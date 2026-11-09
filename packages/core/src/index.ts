@@ -11,3 +11,5 @@ export * from "./sandbox-policy.js";
 export * from "./login-shell.js";
 export * from "./file-read.js";
 export * from "./home-paths.js";
+export * from "./host-jobs.js";
+export * from "./host-probes.js";

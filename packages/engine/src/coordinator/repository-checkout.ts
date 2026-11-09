@@ -9,10 +9,10 @@
 // 现在建单只用 ls-remote 确认仓库连得上（写错名字、没有权限当场就知道），clone 在后台跑；执行者的 Run 开跑前等它
 // （workspace-policy.ts）。daemon 重启丢了后台的 clone 时，Run 开跑前再 clone 一次。
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readdirSync, renameSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, renameSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-import type { Item } from "@pi-lead-child/core";
+import { removeTree, type Item } from "@pi-lead-child/core";
 import type { Db } from "@pi-lead-child/store";
 import { addActivity, getItem } from "@pi-lead-child/store";
 import { gitRun, NETWORK_TIMEOUT_MS } from "./delivery-source.js";
@@ -181,12 +181,13 @@ async function cloneInto(spec: RepositorySpec, plan: { parent: string; url: stri
   const cloned = await gitRun(["clone", "--quiet", plan.url, temporary], plan.parent, {
     timeout: CLONE_TIMEOUT_MS, env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
   });
+  // 删一半的 clone 在子进程里删（core 的 removeTree），不占 daemon 的线程池（lead-scheduler spec P0）。
   if (!cloned.ok) {
-    rmSync(temporary, { recursive: true, force: true });
+    await removeTree(temporary, { kind: "clone-delete", label: `${spec.owner}/${spec.name}`, priority: "utility" }).catch(() => undefined);
     throw new Error(`clone ${spec.owner}/${spec.name} 失败：${firstLine(cloned.stderr) || "git 没有说原因"}`);
   }
   if (existsSync(target)) {
-    rmSync(temporary, { recursive: true, force: true });
+    await removeTree(temporary, { kind: "clone-delete", label: `${spec.owner}/${spec.name}`, priority: "utility" }).catch(() => undefined);
     throw new Error(`${target} 在 clone 的时候出现了，没有覆盖它`);
   }
   renameSync(temporary, target);

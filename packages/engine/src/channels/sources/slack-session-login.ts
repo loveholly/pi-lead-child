@@ -6,10 +6,11 @@
 //   3. 成功、超时（缺省 5 分钟）、取消、用户关掉窗口：都关掉 Chrome，删掉临时目录。
 // cookie 只作为返回值交给调用方（daemon 存进保险库），不写日志，不出现在错误里。
 // 浏览器是可以换的（SlackSignInBrowser）：测试用假的，不启动 Chrome。
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { removeTree } from "@pi-lead-child/core";
 import { ChannelSignInError } from "../types.js";
 import { createGabrielCore, type SlackSessionNetwork } from "./slack-gabriel.js";
 import { SLACK_SESSION_COOKIE_PREFIX } from "./slack-session.js";
@@ -137,12 +138,11 @@ export function chromeBrowser(input: { path?: string } = {}): SlackSignInBrowser
         child.once("exit", () => resolve());
         child.once("error", () => resolve());
       });
+      // Chrome 的临时配置目录有上千个文件：在子进程里删（core 的 removeTree），不占 daemon 的线程池（lead-scheduler spec P0）。
       const cleanup = () => {
-        try {
-          rmSync(profile, { recursive: true, force: true });
-        } catch (error) {
+        removeTree(profile, { kind: "browser-profile-delete", label: "slack sign-in profile" }).catch((error: unknown) => {
           log(`sign-in: could not remove the temporary profile: ${errorText(error)}`);
-        }
+        });
       };
       void closed.then(cleanup);
       let socket: CdpSocket | null = null;

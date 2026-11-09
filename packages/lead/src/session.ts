@@ -50,6 +50,7 @@ import { createCredibilityExtension } from "./credibility/extension.js";
 import { LEAD_CODEMODE_TOOL, LEAD_HAND_TOOLS, leadHandsExtension } from "./hands.js";
 import { handbookGuardExtension } from "./handbook-guard.js";
 import { redLineGateExtension } from "./red-line.js";
+import { leadSchedulerExtension } from "./scheduler/extension.js";
 import { TurnEvidence } from "./credibility/evidence.js";
 import type { CreateSmartModelOptions, SmartTextComplete } from "@pi-lead-child/engine";
 
@@ -213,6 +214,10 @@ export async function createLeadSession(opts: {
   installedSkillsDir?: string;
   // 红线以后这一轮能用的工具（red-line.ts，用户 2026-11-03）；没有限制时为 null。daemon 给。
   toolGate?: () => ReadonlySet<string> | null;
+  // 调度器的日志（lead-scheduler spec D12，前缀 [sched]，同步写）：每一步的阶段耗时。daemon 给它自己的 log；不给时只写会话文件。
+  schedulerLog?: (line: string) => void;
+  // 一行说明宿主的负载（core 的 describeHostLoad）：阶段 A 超时的日志附上它，说出卡顿的原因。
+  hostLoad?: () => string;
 }): Promise<{
   session: LeadEngine; modelName: string; syncToolAccess: () => void; reloadExtensions: () => Promise<void>;
   models: string[]; switchModel: (spec: string) => Promise<void>; reportsInputDelivery: boolean; interruptStep: () => boolean;
@@ -367,6 +372,16 @@ export async function createLeadSession(opts: {
     agentDir: isolatedAgentDir,
     systemPromptOverride: () => systemPrompt,
     extensionFactories: [
+      // 调度器（scheduler/extension.ts，lead-scheduler spec D13）：每一步的阶段耗时（P0）。排在最前面：
+      // 它记下的一步的开始，早于别的扩展在 turn_start 里做的事。
+      {
+        name: "plc-lead-scheduler", hidden: true,
+        factory: leadSchedulerExtension({
+          ...(opts.schedulerLog ? { log: opts.schedulerLog } : {}),
+          ...(opts.hostLoad ? { hostLoad: opts.hostLoad } : {}),
+          ...(opts.currentTurnId ? { turnId: opts.currentTurnId } : {}),
+        }),
+      },
       { name: "plc-environment", factory: environmentExtension, hidden: true },
       { name: "plc-credential-guard", factory: credentialGuard, hidden: true },
       { name: "plc-credibility", factory: credibilityExtension, hidden: true },

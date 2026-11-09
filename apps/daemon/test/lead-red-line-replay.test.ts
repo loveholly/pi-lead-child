@@ -9,7 +9,7 @@
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { tempDir } from "@pi-lead-child/core/testing";
-import { createLoopbackBinding, openDb, type Db } from "@pi-lead-child/store";
+import { addInbox, createItem, createLoopbackBinding, openDb, type Db } from "@pi-lead-child/store";
 import { startDaemon } from "../src/server.js";
 import { deferred, fakePiLead, type FakeCall, type FakePiLeadOptions, type FakeReply } from "./fake-pi-session.js";
 
@@ -167,16 +167,43 @@ describe("the 2026-11-03 queue, replayed", () => {
     }, 20_000);
   }
 
+  // 回归 2026-11-09（人和原文换成编造的）：用户发了一个小请求，Lead 在用户自己的这一轮里卡了将近 10 分钟。红线判断
+  // 「没有人在等」，只提醒，不停；可是用户就是这一轮在回答的人，也正看着会话。10 分钟后一位同事的两个词闲聊 DM 到了，
+  // 红线才停下这一轮。这一轮正在回答的用户也算在等。
+  it("counts the user whose message the turn answers as waiting, and stops the turn at the red line", async () => {
+    lights(150, 300);
+    const { say, lead, turn, logs } = await boot((call) => {
+      if (has(call, RED)) return { say: "清理交给轻子 agent 了，好了告诉你。" };
+      if (has(call, "删掉 #42 的 worktree")) return { tools: [github] };
+      if (call.index === 1) return { say: [never] };
+      return { say: "好的。" };
+    });
+
+    const first = await say("e1", "删掉 #42 的 worktree，顺便看看有没有自动清理的机制");
+    await vi.waitFor(() => expect(lead.aborts()).toBe(1), { timeout: 5_000 });
+    await vi.waitFor(() => expect(turn(first.turnId).state).toBe("completed"), { timeout: 5_000 });
+
+    expect(logs.some((line) => line.includes("nobody is waiting"))).toBe(false);
+    expect(logs.some((line) => /lead red line: \d+s with 1 conversation\(s\) waiting/.test(line))).toBe(true);
+    const red = lead.calls.find((call) => has(call, RED));
+    expect(red?.inputs[0]).toContain("用户");
+  }, 20_000);
+
   it("only reminds when nobody is waiting", async () => {
     lights(150, 300);
-    const { say, lead, turn } = await boot((call) => {
-      if (has(call, "整理一下 acme/a 的依赖")) return { tools: [github] };
+    const { lead } = await boot((call) => {
+      if (call.index === 0 && has(call, "整理依赖的提醒")) return { tools: [github] };
       if (call.index === 1) return { say: [sleep(700), "整理完了。"] };
       return { say: "好的。" };
     });
 
-    const first = await say("c1", "整理一下 acme/a 的依赖");
-    await vi.waitFor(() => expect(turn(first.turnId).state).toBe("completed"), { timeout: 5_000 });
+    // 系统事件叫醒的一轮：没有人在等这一轮的回答。
+    addInbox(db, {
+      itemId: createItem(db, { title: "整理依赖的提醒", brief: "b", createdBy: "system" }),
+      severity: "blocker", source: "structural", summary: "整理依赖的提醒", lossless: true,
+    });
+    await vi.waitFor(() => expect(lead.calls.some((call) => call.inputs.some((input) => input.includes('kind="overflow"')))).toBe(true), { timeout: 5_000 });
+    await sleep(800);
 
     expect(lead.aborts()).toBe(0);
     const reminders = lead.calls.flatMap((call) => call.inputs).filter((input) => input.includes('kind="overflow"'));

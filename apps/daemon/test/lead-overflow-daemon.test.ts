@@ -3,7 +3,7 @@
 // 断言：提醒只插一次，而且是在第 N 次工具调用以后；这一轮正常结束。
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
-import { writeFileSync } from "node:fs";
+import { readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import WebSocket from "ws";
@@ -83,7 +83,7 @@ async function modelStub(): Promise<{ baseUrl: string; requests: ChatRequest[] }
   return { baseUrl: `http://127.0.0.1:${(server!.address() as AddressInfo).port}/v1`, requests };
 }
 
-async function start(baseUrl: string): Promise<{ send: (message: string) => Promise<string> }> {
+async function start(baseUrl: string, log: (line: string) => void = () => {}): Promise<{ send: (message: string) => Promise<string> }> {
   writeFileSync(join(dir, "config.json"), JSON.stringify({
     lead: {
       providers: { stub: { api: "openai-completions", baseUrl, apiKey: { value: "test" }, discover: false, models: ["m"] } },
@@ -91,7 +91,7 @@ async function start(baseUrl: string): Promise<{ send: (message: string) => Prom
     },
   }));
   daemon = await startDaemon({
-    dataDir: dir, dbPath, log: () => {}, notifyDesktop: () => {},
+    dataDir: dir, dbPath, log, notifyDesktop: () => {},
     sessionFactory: async (args) => createLeadSession(args as Parameters<typeof createLeadSession>[0]),
   });
   const issued = redeemPairing(db, createPairing(db, { name: "app", kind: "companion", scopes: ["chat"] }).code);
@@ -130,3 +130,25 @@ describe("Lead's in-place work that grows", () => {
     expect(text).toContain("剩下的我派给子 agent 了");
   }, 90_000);
 });
+
+// lead-scheduler spec D12：每一步的阶段耗时写进 daemon 的日志（[sched] step）和 Lead 的会话文件（scheduler 记录）。
+// 2026-11-09 Lead 卡了将近 10 分钟，会话文件里一条记录都没有。
+describe("the stage timing of a real Lead session", () => {
+  it("is written to the daemon log and the session file for every step", async () => {
+    const stub = await modelStub();
+    const logs: string[] = [];
+    const { send } = await start(stub.baseUrl, (line) => logs.push(line));
+    const turnId = await send("一步一步查这个目录");
+
+    const steps = logs.filter((line) => line.startsWith("[sched] step "));
+    expect(steps.length).toBeGreaterThanOrEqual(2);
+    expect(steps[0]).toMatch(new RegExp(`^\\[sched\\] step run=\\d+ step=1 turn=${turnId} A=\\d+ B1=\\d+ B2=\\d+ C=\\d+ stream=\\d+ tools=ls:\\d+ total=\\d+$`));
+    const sessionFiles = readdirSync(join(dir, "lead-sessions"), { recursive: true }).map(String).filter((name) => name.endsWith(".jsonl"));
+    const entries = sessionFiles.flatMap((name) => readFileSync(join(dir, "lead-sessions", name), "utf8").split("\n").filter(Boolean))
+      .map((line) => JSON.parse(line) as { type: string; customType?: string; data?: { kind?: string } })
+      .filter((entry) => entry.customType === "scheduler");
+    expect(entries.length).toBe(steps.length);
+    expect(entries.every((entry) => entry.data?.kind === "step")).toBe(true);
+  }, 90_000);
+});
+

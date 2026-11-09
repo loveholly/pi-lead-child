@@ -9,30 +9,67 @@
 //
 // 2026-11-06：DNS 通了，到模型服务的路不一定通。短暂唤醒时流量没有走 VPN，Anthropic 按来源地区回
 // 403 "Request not allowed"。模型回了这一种错误时，用不带 key 的探测（routeProbe）确认，路通了才接着调模型。
-import { lookup } from "node:dns/promises";
+import { lookup, Resolver } from "node:dns/promises";
+import { schedLine } from "@pi-lead-child/core";
 import { isLeadRouteBlock } from "@pi-lead-child/protocol";
 
 // 通了返回 null；不通返回原因（会被分类成 network，见 protocol 的 lead-failure）。
 export type NetworkProbe = () => Promise<string | null>;
 
+export interface DnsProbeDeps {
+  // 系统解析（getaddrinfo）。它在 Node 的 I/O 线程池里跑。
+  lookup?: (host: string) => Promise<unknown>;
+  // c-ares 解析。它不经过线程池。
+  resolve?: (host: string) => Promise<unknown>;
+  log?: (line: string) => void;
+}
+
+const TIMED_OUT = Symbol("timed out");
+
+async function within<T>(work: Promise<T>, ms: number): Promise<T | typeof TIMED_OUT> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      work,
+      new Promise<typeof TIMED_OUT>((resolve) => {
+        timer = setTimeout(() => resolve(TIMED_OUT), ms);
+        timer.unref();
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+function resolveWithCares(host: string, timeoutMs: number): Promise<unknown> {
+  const resolver = new Resolver({ timeout: timeoutMs, tries: 1 });
+  return Promise.any([resolver.resolve4(host), resolver.resolve6(host)]);
+}
+
 // 解析一个外网域名。缺省是 Lead 的模型服务的域名（PLC_NETWORK_PROBE_HOST 可以改）。
-export function dnsProbe(host: string, timeoutMs = 3_000): NetworkProbe {
+// 系统解析超时的时候，再用 c-ares 问一次（lead-scheduler spec P0）：getaddrinfo 在 I/O 线程池里跑，线程池被进程里的
+// 重活占满时（2026-11-09，后台删 worktree），它一直排不上，网络其实是通的。c-ares 不经过线程池：它解析得到就算网通。
+// 两个都答不上来才算断网。系统解析明确失败（例如 ENOTFOUND）时照旧算断网，不再问。
+export function dnsProbe(host: string, timeoutMs = 3_000, deps: DnsProbeDeps = {}): NetworkProbe {
+  const lookupHost = deps.lookup ?? ((name: string) => lookup(name));
+  const resolveHost = deps.resolve ?? ((name: string) => resolveWithCares(name, timeoutMs));
   return async () => {
-    let timer: NodeJS.Timeout | undefined;
+    const timedOut = `network unreachable: lookup ${host} timed out`;
     try {
-      await Promise.race([
-        lookup(host),
-        new Promise((_, reject) => {
-          timer = setTimeout(() => reject(new Error(`network unreachable: lookup ${host} timed out`)), timeoutMs);
-          timer.unref();
-        }),
-      ]);
-      return null;
+      if (await within(lookupHost(host), timeoutMs) !== TIMED_OUT) return null;
     } catch (error) {
       return error instanceof Error ? error.message : String(error);
-    } finally {
-      if (timer) clearTimeout(timer);
     }
+    const started = Date.now();
+    try {
+      if (await within(resolveHost(host), timeoutMs) === TIMED_OUT) return timedOut;
+    } catch {
+      return timedOut;
+    }
+    deps.log?.(schedLine("network.dns_lookup_slow", {
+      host, timeoutMs, resolvedBy: "c-ares", caresMs: Date.now() - started, note: "getaddrinfo is stuck, the network is up",
+    }));
+    return null;
   };
 }
 

@@ -21,7 +21,7 @@ import {
   addActivity, attachWorkspaceToRun, createWorkspace, getItem, getWorkspace, listWorkspaces, resolveWorkspace,
   transitionWorkspace,
 } from "@pi-lead-child/store";
-import { projectRoot } from "@pi-lead-child/core";
+import { projectRoot, removeTree } from "@pi-lead-child/core";
 import type { Actor, Item, RunPurpose, Workspace } from "@pi-lead-child/core";
 import {
   disposeCheckout, isDisposableCheckout, provisionWorkspace, provisionWorkspaceAsync, removeCheckoutFiles, workspaceRootFor,
@@ -272,8 +272,9 @@ function discardableFailedWorktree(workspace: Workspace, facts: GitFactSource): 
 async function removeFailedWorktree(workspace: Workspace): Promise<void> {
   const repo = workspace.repo_root!;
   try { await execFileAsync("git", ["-C", repo, "worktree", "remove", "--force", workspace.path], { timeout: 30_000 }); } catch { /* 没有登记 */ }
+  // 在子进程里删（core 的 removeTree），不在 daemon 的线程池里删整个目录（lead-scheduler spec P0）。
   if (existsSync(workspace.path) && dirname(realpathOr(workspace.path)) === realpathOr(workspaceRootFor(repo))) {
-    rmSync(workspace.path, { recursive: true, force: true });
+    await removeTree(workspace.path, { kind: "worktree-delete", label: `failed workspace #${workspace.id}`, priority: "utility" });
   }
   if (workspace.branch?.startsWith("plc/")) {
     try { await execFileAsync("git", ["-C", repo, "branch", "-D", workspace.branch], { timeout: 10_000 }); } catch { /* 保留 */ }

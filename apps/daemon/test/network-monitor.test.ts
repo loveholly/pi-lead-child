@@ -2,7 +2,7 @@
 // Anthropic 按来源地区回 403 "Request not allowed"。DNS 探测看不出这一种，要发一个不带 key 的请求：
 // 回 401 说明路是通的（只是缺 key），回 403 说明来源还被拦着。
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { NetworkMonitor } from "../src/network.js";
+import { dnsProbe, NetworkMonitor } from "../src/network.js";
 
 const ROUTE_BLOCKED = '403: {"type":"forbidden","message":"Request not allowed"}';
 const DNS_DOWN = "getaddrinfo ENOTFOUND api.anthropic.com";
@@ -87,5 +87,36 @@ describe("a blocked route to the model service", () => {
     state.dns = null;
     expect(await instance.check()).toBe(true);
     expect(probed).toEqual(["dns", "dns", "dns"]);
+  });
+});
+
+// 2026-11-09：daemon 在进程里后台删 worktree，占满了 I/O 线程池。dns.lookup（getaddrinfo）也在线程池里跑，
+// 一直排不上，3 秒超时；NetworkMonitor 当成断网，扣住了 Lead 的系统回合。现在 lookup 超时时，再用不经过线程池的
+// c-ares 解析问一次：解析得到就是网通的，线程池忙不算断网。
+describe("the DNS probe while the I/O threadpool is busy", () => {
+  const never = () => new Promise<never>(() => {});
+
+  it("counts the network as up when getaddrinfo is stuck but c-ares resolves the host", async () => {
+    const lines: string[] = [];
+    const probe = dnsProbe("api.example.com", 50, {
+      lookup: never, resolve: async () => ["192.0.2.1"], log: (line) => lines.push(line),
+    });
+    expect(await probe()).toBeNull();
+    expect(lines).toEqual([expect.stringMatching(/^\[sched\] network\.dns_lookup_slow host=api\.example\.com timeoutMs=50 resolvedBy=c-ares /)]);
+  });
+
+  it("still reports an outage when neither resolver answers", async () => {
+    const probe = dnsProbe("api.example.com", 50, { lookup: never, resolve: never });
+    expect(await probe()).toBe("network unreachable: lookup api.example.com timed out");
+  });
+
+  it("reports a DNS failure without asking c-ares again", async () => {
+    let asked = false;
+    const probe = dnsProbe("api.example.com", 50, {
+      lookup: async () => { throw new Error("getaddrinfo ENOTFOUND api.example.com"); },
+      resolve: async () => { asked = true; return ["192.0.2.1"]; },
+    });
+    expect(await probe()).toBe("getaddrinfo ENOTFOUND api.example.com");
+    expect(asked).toBe(false);
   });
 });

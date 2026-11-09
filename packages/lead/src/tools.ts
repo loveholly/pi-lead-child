@@ -55,7 +55,7 @@ import { sandboxHealth } from "@pi-lead-child/engine";
 import { acceptanceCriteriaText, recordedDeliverySnapshot } from "@pi-lead-child/engine";
 import { ACCEPTANCE_CRITERIA_LIMITS, addAcceptanceCriteria, normalizeCriterionTexts } from "@pi-lead-child/store";
 import { localIso, projectRoot, readTailLines, tildeHome } from "@pi-lead-child/core";
-import type { RuntimeId, Item, ItemPriority, ItemStage, Run, VerificationPolicy, Workspace } from "@pi-lead-child/core";
+import type { RuntimeId, Item, ItemPriority, ItemStage, Run, RunPurpose, VerificationPolicy, Workspace } from "@pi-lead-child/core";
 import type { AttachableLaunch } from "@pi-lead-child/runtime";
 import {
   createDefaultRuntimeRegistry, createLocalRuntime, disabledRuntimes, findRuntimeAdapter, isRuntimeDisabled,
@@ -119,7 +119,8 @@ import {
 import { setAutoPullRequest, workspaceOfItem } from "@pi-lead-child/engine";
 import {
   integrateIsolatedWorkspace, provisionWorkspace, provisionWorkspaceAsync, requestSharedWorkspace,
-  runWorkspaceRefusal, setPullRequestReviewTarget, warmRepositoryIdentity, warmRunWorkspaceFacts, warmWorkdirFacts,
+  runWorkspaceFactsReady, runWorkspaceRefusal, setPullRequestReviewTarget, warmRepositoryIdentity, warmRunWorkspaceFacts,
+  warmWorkdirFacts,
 } from "@pi-lead-child/engine";
 import { listWorkspaces, resolveWorkspace } from "@pi-lead-child/store";
 import { setReviewerSetting } from "@pi-lead-child/store";
@@ -410,10 +411,15 @@ function queuedFollowUps(db: Db, itemId: number): Array<{ id: number; instructio
 }
 
 /** 这张工单排着的追问：没有 child 在跑时，一起发给续接的会话。发不出去时记下原因，告诉 Lead。 */
-export function deliverQueuedFollowUps(deps: LeadDeps, itemId: number): void {
+export function deliverQueuedFollowUps(deps: LeadDeps, itemId: number, warmed = false): void {
   try {
     const queued = queuedFollowUps(deps.db, itemId);
     if (!queued.length || running.has(itemId) || liveChildren().get(itemId)?.streaming) return;
+    // 工作区判定要的 git 事实先异步查好，查好再发（lead-scheduler spec P0：不在主线程上同步跑 git）。
+    if (!warmed && !ticketConversationFactsReady(deps.db, itemId)) {
+      void warmTicketConversationFacts(deps.db, itemId).catch(() => undefined).then(() => deliverQueuedFollowUps(deps, itemId, true));
+      return;
+    }
     const message = queued.length === 1
       ? queued[0]!.instruction
       : queued.map((entry, index) => `${index + 1}. ${entry.instruction}`).join("\n\n");
@@ -609,6 +615,16 @@ function withDraftStartGuidance(db: Db, itemId: number, error: unknown): unknown
   );
 }
 
+/**
+ * spawnItemChild 拉起的 Run 按哪个角色、用途判定工作区和闸门。缺省 purpose 和 runItem / createRun 算的一样。
+ * 调用方先用它异步备好 git 事实（warmRunWorkspaceFacts），spawnItemChild 里的判定就只读缓存（lead-scheduler spec P0）。
+ */
+export function childRunInput(
+  item: Pick<Item, "purpose">, role: "executor" | "reviewer" = "executor",
+): { role: "executor" | "reviewer"; purpose: RunPurpose } {
+  return { role, purpose: role === "reviewer" ? "review" : item.purpose ?? "execution" };
+}
+
 // spawn child 的核心逻辑（spawn_child 工具与 scheduler 自动派发共用）。
 // 返回状态文本；校验失败抛错。fire-and-forget（不 await child 完成）。
 export function spawnItemChild(
@@ -638,13 +654,9 @@ export function spawnItemChild(
   const role = opts.role ?? "executor";
   // fire-and-forget 之前必须前置校验：runItem 的报错发生在 promise 里，工具调用早已返回。
   // 缺省 purpose 必须与 runItem / createRun 算的一模一样，否则这里放行、那里拒绝。
-  assertRunAllowed(deps.db, {
-    itemId: t.id, role, purpose: role === "reviewer" ? "review" : t.purpose ?? "execution",
-  });
+  assertRunAllowed(deps.db, { itemId: t.id, ...childRunInput(t, role) });
   // 同样要前置：没有合适的工作区时（例如 workdir 是仓库里没有跟踪的目录），runItem 会在 promise 里拒绝。
-  const workspaceRefusal = runWorkspaceRefusal(deps.db, t, {
-    role, purpose: role === "reviewer" ? "review" : t.purpose ?? "execution",
-  });
+  const workspaceRefusal = runWorkspaceRefusal(deps.db, t, childRunInput(t, role));
   if (workspaceRefusal) throw new Error(workspaceRefusal);
   // 核查员没点名 runtime 时用这张工单的核查员（engine 的 reviewer-choice.ts 的 itemReviewer，工单 09）：建单时选好的能用就用它；
   // 否则换（只换模型，或者换 runtime：跳过停用的和有故障的，能跑命令的优先，避开执行者的 runtime）。换了就记一条活动（审查 L3）。
@@ -809,6 +821,30 @@ function directTicketMessagePrompt(message: string, source: string, pausedRunId:
   ].join("\n");
 }
 
+// 工单对话 Run 用哪个角色判定工作区：续接最近的会话（没有时用最近的 Run）的角色；都没有时按 stage。
+// routeTicketMessageToAgentRun 和下面的预热用同一份。
+function ticketConversationRole(db: Db, item: Item): "executor" | "reviewer" {
+  const sourceRun = latestSessionRun(db, item.id) ?? listRuns(db, item.id).at(-1) ?? null;
+  return sourceRun?.role ?? (item.stage === "review" ? "reviewer" : "executor");
+}
+
+/**
+ * 开工单对话 Run 之前，异步备好工作区判定要的 git 事实（engine 的 git-facts.ts）。之后同步的
+ * routeTicketMessageToAgentRun 只读缓存，不在 daemon 的主线程上同步跑 git（lead-scheduler spec P0）。
+ */
+export async function warmTicketConversationFacts(db: Db, itemId: number): Promise<void> {
+  const item = getItem(db, itemId);
+  if (!item) return;
+  await warmRunWorkspaceFacts(db, item, { role: ticketConversationRole(db, item), purpose: "conversation" });
+}
+
+/** 同上，同步：要的事实都在缓存里时为 true；缺的在后台开始查（不等）。 */
+export function ticketConversationFactsReady(db: Db, itemId: number): boolean {
+  const item = getItem(db, itemId);
+  if (!item) return true;
+  return runWorkspaceFactsReady(db, item, { role: ticketConversationRole(db, item), purpose: "conversation" });
+}
+
 export function routeTicketMessageToAgentRun(
   deps: LeadDeps,
   args: {
@@ -826,7 +862,7 @@ export function routeTicketMessageToAgentRun(
   const latestRun = runs.at(-1) ?? null;
   const resumableRun = latestSessionRun(deps.db, item.id) ?? null;
   const sourceRun = resumableRun ?? latestRun;
-  const role = sourceRun?.role ?? (item.stage === "review" ? "reviewer" : "executor");
+  const role = ticketConversationRole(deps.db, item);
   const purpose = "conversation";
   const runtimeId = deps.childPi
     ? LOCAL_RUNTIME_ID
@@ -3190,6 +3226,8 @@ export function createLeadTools(deps: LeadDeps): ToolDefinition<any>[] {
           const finishing = running.get(run.item_id);
           if (finishing) await Promise.race([finishing, new Promise((resolve) => setTimeout(resolve, 10_000).unref())]);
         }
+        // 重发可能开一个工单对话 Run：工作区判定要的 git 事实先异步查好（lead-scheduler spec P0）。
+        await warmTicketConversationFacts(deps.db, params.ticket_id);
         return text(JSON.stringify(recoverTicketRun(deps.db, {
           itemId: params.ticket_id,
           failedRunId: params.run_id,
@@ -3263,6 +3301,7 @@ export function createLeadTools(deps: LeadDeps): ToolDefinition<any>[] {
             resumedSessionId: null,
           }));
         }
+        await warmTicketConversationFacts(deps.db, params.ticket_id);
         const routed = routeTicketMessageToAgentRun(deps, {
           itemId: params.ticket_id,
           message: params.instruction,
@@ -3299,6 +3338,7 @@ export function createLeadTools(deps: LeadDeps): ToolDefinition<any>[] {
         }
         if (child.settled) {
           await releaseSettledChild(params.ticket_id, "Lead steered a run whose turn had ended");
+          await warmTicketConversationFacts(deps.db, params.ticket_id);
           const routed = routeTicketMessageToAgentRun(deps, {
             itemId: params.ticket_id,
             message: params.instruction,

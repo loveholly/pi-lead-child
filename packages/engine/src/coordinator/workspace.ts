@@ -9,6 +9,7 @@ import { promisify } from "node:util";
 import type { Db } from "@pi-lead-child/store";
 import { addActivity, addInbox, getItem } from "@pi-lead-child/store";
 import type { Actor, Workspace, WorkspaceKind, WorkspaceMode, WorkspaceState } from "@pi-lead-child/core";
+import { removeTree } from "@pi-lead-child/core";
 import {
   createWorkspace, getWorkspace, listWorkspaces, resolveWorkspace, transitionWorkspace,
 } from "@pi-lead-child/store";
@@ -100,7 +101,9 @@ async function buildWorkspaceSnapshot(db: Db, workspace: Workspace, contentHash:
     const content = Buffer.from(JSON.stringify({ ...metadata, commits, bundle: (await readFile(bundlePath)).toString("base64") }), "utf8");
     return content.length > MAX_ARTIFACT_BYTES ? withoutBundle("too_large", { commits, bundleBytes }) : content;
   } finally {
-    await rm(bundleDir, { recursive: true, force: true });
+    // 临时目录里只有一个 bundle 文件：逐个删，不递归删目录（宿主隔离的架构测试）。
+    await rm(bundlePath, { force: true });
+    await rmdir(bundleDir).catch(() => undefined);
   }
 }
 
@@ -187,12 +190,33 @@ async function removalInterrupted(workspace: Workspace): Promise<boolean> {
 // the directory into <repo>.plc-workspaces/.trash (same disk, so the rename is instant), removes git's
 // registration, and deletes the renamed directory in the background. A daemon that stops half way
 // leaves the rest in .trash; the next sweep deletes it (deleteWorktreeTrash).
+//
+// The delete runs in a child process (core's removeTree: rm -rf at background I/O priority), never with
+// fs.promises.rm in the daemon. On 2026-11-09 an in-process rm of a retired worktree filled Node's I/O
+// threadpool for 9–14 minutes, and Lead, in the same process, could not send its next model request.
+// At most two deletes run at a time; the rest wait in the queue.
 export const WORKTREE_TRASH_DIR = ".trash";
 const pendingDeletions = new Map<string, Promise<void>>();
+const BACKGROUND_DELETE_SLOTS = 2;
+let backgroundDeletesRunning = 0;
+const backgroundDeleteQueue: Array<() => void> = [];
+
+async function backgroundDeleteSlot<T>(work: () => Promise<T>): Promise<T> {
+  if (backgroundDeletesRunning >= BACKGROUND_DELETE_SLOTS) {
+    await new Promise<void>((resolveSlot) => { backgroundDeleteQueue.push(resolveSlot); });
+  }
+  backgroundDeletesRunning += 1;
+  try {
+    return await work();
+  } finally {
+    backgroundDeletesRunning -= 1;
+    backgroundDeleteQueue.shift()?.();
+  }
+}
 
 function deleteInBackground(path: string): void {
   if (pendingDeletions.has(path)) return;
-  const deletion = rm(path, { recursive: true, force: true })
+  const deletion = backgroundDeleteSlot(() => removeTree(path, { kind: "worktree-delete", label: basename(path) }))
     .catch(() => { /* the next sweep tries again */ })
     .finally(() => { pendingDeletions.delete(path); });
   pendingDeletions.set(path, deletion);
@@ -258,7 +282,7 @@ async function removeWorktreeDirectory(workspace: Workspace, beforeRemove: () =>
     // git stopped half way, or does not accept a directory whose .git file is gone. What is left is
     // part of the content checked above, so delete the rest here instead of failing on every retry.
     if (!insideWorkspaceRoot(workspace) || (existsSync(workspace.path) && !(await removalInterrupted(workspace)))) throw error;
-    await rm(workspace.path, { recursive: true, force: true });
+    await removeTree(workspace.path, { kind: "worktree-delete", label: `workspace #${workspace.id}`, priority: "utility" });
     await git(["worktree", "prune"], repoRoot);
   }
 }
@@ -706,7 +730,9 @@ export async function removeCheckoutFiles(workspace: Workspace): Promise<void> {
   if (existsSync(workspace.path) && insideWorkspaceRoot(workspace)) await retireWorktree(workspace.path, repoRoot);
   // 目录已经不在时，git worktree remove --force 也删掉 git 里登记的这一条。
   try { await git(["worktree", "remove", "--force", workspace.path], repoRoot); } catch { /* 下面再看目录还在不在 */ }
-  if (existsSync(workspace.path) && insideWorkspaceRoot(workspace)) await rm(workspace.path, { recursive: true, force: true });
+  if (existsSync(workspace.path) && insideWorkspaceRoot(workspace)) {
+    await removeTree(workspace.path, { kind: "checkout-delete", label: `workspace #${workspace.id}`, priority: "utility" });
+  }
   if (existsSync(workspace.path)) throw new Error(`checkout ${workspace.path} could not be removed`);
   if (workspace.branch?.startsWith("refs/plc/")) {
     try { await git(["update-ref", "-d", workspace.branch], repoRoot); } catch { /* 引用已经不在 */ }

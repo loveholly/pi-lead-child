@@ -63,13 +63,14 @@ import type { LeadDaemonEnvironment, LeadEngine, LeadEngineFactoryResult } from 
 import { channelPolicy, coreMemoryRefreshPrefix } from "@pi-lead-child/store";
 import { createSetupTracker, type SetupTracker } from "./setup-status.js";
 import {
-  adoptRunChild, childRuntimeProfile, liveTicketMessagePrompt, releaseSettledChild, resumeItemChild, routeTicketMessageToAgentRun,
-  runningChildren, spawnClaimedItem, spawnItemChild, type LeadDeps,
+  adoptRunChild, childRunInput, childRuntimeProfile, liveTicketMessagePrompt, releaseSettledChild, resumeItemChild,
+  routeTicketMessageToAgentRun, runningChildren, spawnClaimedItem, spawnItemChild, ticketConversationFactsReady,
+  warmTicketConversationFacts, type LeadDeps,
 } from "@pi-lead-child/lead";
 import { createTicketReplyActionsJudge, type TicketReplyActionsJudge } from "./ticket-reply-actions.js";
 import {
   acceptRunningChildren, CHANNEL_TASK_CALLBACK, conversationWorkspaceChecksSettled, deliverySnapshotsSettled, detachRunningChildren, effectiveRunPurpose,
-  killIdleChildren, liveChildren, setGitFactsLog, UiActionError, type DecisionModelCredentials, type FollowUpEntry, type InstallFetch, type LeadModelService, type UiActionServices,
+  killIdleChildren, liveChildren, runWorkspaceFactsReady, setGitFactsLog, UiActionError, warmRunWorkspaceFacts, type DecisionModelCredentials, type FollowUpEntry, type InstallFetch, type LeadModelService, type UiActionServices,
 } from "@pi-lead-child/engine";
 import { attachJsonlReader, listenOwnerOnly } from "@pi-lead-child/runtime";
 import { appendBody, getBusyPlacement, getItem, transition } from "@pi-lead-child/store";
@@ -97,7 +98,10 @@ import {
 } from "@pi-lead-child/engine";
 import { createWatchLightTask, leadSandboxPolicyAsync, leadScratchDir } from "@pi-lead-child/lead";
 import { watchAgentChoice } from "@pi-lead-child/store";
-import { envConfigPath, loadPlcConfig, localIso, projectRoot, warmSandboxTrustBundle } from "@pi-lead-child/core";
+import {
+  describeHostLoad, envConfigPath, loadPlcConfig, localIso, projectRoot, schedLine, setHostJobLog, startHostProbes, warmSandboxTrustBundle,
+  type HostProbes,
+} from "@pi-lead-child/core";
 import { createConfigWatch } from "./config-watch.js";
 import {
   contextUsageRatio, createLeadModelFailover, createTurnUserActions, nextWeeklyReset, PRECIPITATE_PROMPT, PRECIPITATE_RATIO,
@@ -547,7 +551,13 @@ export interface DaemonOpts {
     environment?: () => LeadDaemonEnvironment;
     // 红线以后这一轮能用的工具（lead 的 red-line.ts）；没有限制时为 null。
     toolGate?: () => ReadonlySet<string> | null;
+    // 调度器的日志和宿主的负载（lead 的 scheduler/extension.ts，lead-scheduler spec D12）。
+    schedulerLog?: (line: string) => void;
+    hostLoad?: () => string;
   }) => Promise<LeadEngineFactoryResult>;
+  // 宿主探针（core 的 host-probes.ts，lead-scheduler spec D7）：主线程延迟、I/O 线程池延迟、worker 心跳。main.ts 传 true；
+  // worker 把主线程被卡住的那一行直接写进标准输出（daemon 的日志）。测试里起的 daemon 不开。
+  hostProbes?: boolean;
   // 托管 Hindsight 记忆服务（memory-controller.ts）。main.ts 传 true。缺省不托管：记忆只用 notes 的全文检索，
   // /v1/memory 回 503。测试传一组替身（launchd、下载、网络、Keychain），走真的设置、确认和收件箱。
   manageMemory?: boolean | MemoryControllerHooks;
@@ -1713,6 +1723,13 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       commandId: command.commandId,
       userText: command.message,
     };
+    // 开对话 Run 的工作区判定要几个 git 事实（engine 的 git-facts.ts）。还没查好时不在主线程上同步跑 git
+    // （lead-scheduler spec P0）：消息先排队，事实异步查好以后由 deliverQueuedTicketMessages 转交，和 Run 结束后转交一样。
+    if (!ticketConversationFactsReady(db, item.id)) {
+      const turn = queueTicketMessage(command);
+      warmThenDeliverTicketMessages(item.id);
+      return { mode: "started", turnId: turn.id };
+    }
     let routed: ReturnType<typeof routeTicketMessageToAgentRun>;
     try {
       routed = routeTicketMessageToAgentRun(schedDeps, { itemId: item.id, message: command.message });
@@ -1800,11 +1817,23 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     return turn;
   }
 
+  // 工作区判定要的 git 事实异步查好，再转交排队的工单消息。
+  function warmThenDeliverTicketMessages(itemId: number): void {
+    void warmTicketConversationFacts(db, itemId)
+      .catch((error: unknown) => log(`[git-facts] warming item #${itemId} failed: ${error instanceof Error ? error.message : String(error)}`))
+      .then(() => deliverQueuedTicketMessages(itemId, true));
+  }
+
   // Run 结束后转交排队的消息：一次转交一条（开一个对话 Run）。这个对话 Run 结束时再转交下一条。
-  function deliverQueuedTicketMessages(itemId: number): void {
+  // 工作区判定要的 git 事实没查好时先异步查（warmed：已经查过一次，不再查，免得一直等）。
+  function deliverQueuedTicketMessages(itemId: number, warmed = false): void {
     if (liveChildren().get(itemId)) return;
     const [turn] = listQueuedTicketTurns(db, itemId);
     if (!turn) return;
+    if (!warmed && !ticketConversationFactsReady(db, itemId)) {
+      warmThenDeliverTicketMessages(itemId);
+      return;
+    }
     try {
       const routed = routeTicketMessageToAgentRun(schedDeps, { itemId, message: turn.user_text });
       startQueuedTurn(db, turn.id);
@@ -2407,6 +2436,14 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
   }
   // 接管不了的 Run 走孤儿回收（spec §C1）：孤儿如实标 crash；首次自动重派续做（redispatch 失败/二次孤儿回落 blocker）。
   // 和接管用同一个时间，所以接管失败后改走孤儿回收的 Run 不会被扣两次额度。
+  // 孤儿重派走 spawnItemChild（同步判定工作区）：它要的 git 事实先异步查好（lead-scheduler spec P0）。
+  if (restart.reclaim.size) {
+    await Promise.all([...restart.reclaim].map(async (runId) => {
+      const row = db.prepare("SELECT item_id FROM runs WHERE id=?").get(runId) as { item_id: number } | undefined;
+      const item = row ? getItem(db, row.item_id) : undefined;
+      if (item) await warmRunWorkspaceFacts(db, item, childRunInput(item)).catch(() => undefined);
+    }));
+  }
   const reclaimed = restart.reclaim.size ? recoverOrphans(db, {
     runIds: restart.reclaim,
     budget,
@@ -2802,6 +2839,9 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     currentTurnId: () => pendingSteerSink?.turn.id ?? activeChannelTurn?.turn.id ?? null,
     turnOrigin: () => runOrigin,
     toolGate: () => (redLine?.phase === "handoff" ? RED_LINE_TOOLS : null),
+    // 每一步的阶段耗时写进 daemon 的日志（lead-scheduler spec D12）；阶段 A 超时附上宿主的负载。
+    schedulerLog: log,
+    hostLoad: describeHostLoad,
     cancelBudgetTurnId: () => cancelBudgetTurnId,
     // set_lead_avatar 的结果按它算 Slack 署名 emoji 的生效值。
     configSlackEmoji,
@@ -3213,7 +3253,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
   // 断网不是模型的问题（2026-10-16）：系统回合叫醒 Lead 之前先探网络，不通时等它恢复，恢复后马上接着做。
   const networkProbeHost = process.env.PLC_NETWORK_PROBE_HOST ?? "api.anthropic.com";
   const network = new NetworkMonitor({
-    probe: opts.networkProbe ?? (opts.sessionFactory ? async () => null : dnsProbe(networkProbeHost)),
+    probe: opts.networkProbe ?? (opts.sessionFactory ? async () => null : dnsProbe(networkProbeHost, 3_000, { log })),
     routeProbe: opts.networkRouteProbe ?? (opts.sessionFactory ? undefined : keylessProbe(networkProbeHost)),
     retryBaseMs: Number(process.env.PLC_NETWORK_RETRY_MS ?? 15_000),
     ...(process.env.PLC_NETWORK_ROUTE_MAX_WAIT_MS ? { routeMaxWaitMs: Number(process.env.PLC_NETWORK_ROUTE_MAX_WAIT_MS) } : {}),
@@ -4996,12 +5036,17 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       if (secondReminded) return;
       secondReminded = true;
       log(`lead red line: ${Math.round(elapsed / 1_000)}s and nobody is waiting; reminding Lead again`);
+      log(schedLine("decide", { decision: "red_line_remind", elapsedMs: elapsed, budgetMs: limits.ms, waiting: "none" }));
       const usage = currentContextUsage();
       steerNotice(overflowSecondReminder(elapsed, { context: usage ? contextUsageLine(usage) : null }), "second overflow reminder");
       return;
     }
     redLine = { phase: "stopping", waiting, writeDeadline: now + limits.writeGraceMs, waitingFor: null };
     log(`lead red line: ${Math.round(elapsed / 1_000)}s with ${waiting.length} conversation(s) waiting; stopping the turn for a hand-off`);
+    log(schedLine("decide", {
+      decision: "red_line_stop", elapsedMs: elapsed, budgetMs: limits.ms,
+      waiting: waiting.map((entry) => `${entry.user ? "user" : "external"}:${entry.count}:${Math.round(entry.waitedMs / 1_000)}s`).join(","),
+    }));
     stopForRedLine();
   }
 
@@ -5094,7 +5139,10 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
   // 在等 Lead 的人，按对话：谁、在哪、几条、等了多久。外部的人来自 lead-input.ts 的 queue（和状态栏同一份）。
   // 用户本人（2026-11-03 以前不算，Lead 不知道用户在等）：在这一轮里排着的、插进来还没送到的、送到了 Lead 还没回的，
   // 带每条的第一句；等这一轮结束后单独开一轮的（D16）只算条数，原文不放进这一轮。
-  function waitingConversations(now: number): WaitingConversation[] {
+  // 这一轮正在回答的用户也在等（lead-scheduler spec P0，2026-11-09）：以前不算，红线判断「没有人在等」，只提醒不停；
+  // 用户等了 10 分钟，一条同事的闲聊 DM 到了以后红线才停下这一轮。排队说明（noticeQueue）不算它：
+  // 说明讲的是排在这一轮后面的消息，Lead 本来就在回答这一条。
+  function waitingConversations(now: number, options: { answering?: boolean } = {}): WaitingConversation[] {
     const people = leadInput.queue().map((entry): WaitingConversation => ({
       who: entry.senders.join("、") || entry.conversation, conversation: entry.conversation, count: entry.count,
       waitedMs: Math.max(0, now - Date.parse(entry.firstAt)),
@@ -5106,14 +5154,18 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       return true;
     });
     const unanswered = activeChannelTurn?.placement === "steer" && !activeChannelTurn.assistantText.trim() ? [activeChannelTurn] : [];
-    const inRun = fresh([...unanswered, ...queuedInputs.map((input) => input.entry)]);
+    const answering = options.answering !== false && activeChannelTurn && activeChannelTurn !== systemEntryThisTurn
+      && activeChannelTurn.turn.user_text.trim() ? [activeChannelTurn] : [];
+    const inRun = fresh([...answering, ...unanswered, ...queuedInputs.map((input) => input.entry)]);
     const held = fresh(carryOverTurns.map((carried) => carried.entry));
     const all = [...inRun, ...held];
     if (!all.length) return people;
     const since = Math.min(...all.map((entry) => Date.parse(entry.turn.created_at)).filter(Number.isFinite));
+    // 这一轮本来就在回答的那一条，Lead 看过原文：只算条数，不再列它的第一句。送到了还没回的插话照旧列第一句。
+    const quoted = inRun.filter((entry) => !answering.includes(entry) || unanswered.includes(entry));
     return [{
       who: "用户", conversation: "和你的对话", count: all.length, waitedMs: Math.max(0, now - since), user: true,
-      ...(inRun.length ? { firstLines: inRun.map((entry) => firstLine(entry.turn.user_text)) } : {}),
+      ...(quoted.length ? { firstLines: quoted.map((entry) => firstLine(entry.turn.user_text)) } : {}),
     }, ...people];
   }
 
@@ -5124,7 +5176,8 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     if (queueNoticed || draining || !busy || turnStartedAt === null || redLine) return;
     const threshold = queueNoticeMs();
     const userThreshold = userQueueNoticeMs();
-    const waiting = waitingConversations(now).filter((entry) => entry.waitedMs >= (entry.user ? userThreshold : threshold));
+    const waiting = waitingConversations(now, { answering: false })
+      .filter((entry) => entry.waitedMs >= (entry.user ? userThreshold : threshold));
     if (!waiting.length) return;
     queueNoticed = true;
     log(`lead queue: ${waiting.length} conversation(s) waited over ${Math.round(threshold / 1_000)}s, telling Lead in the running turn`);
@@ -5183,7 +5236,19 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
   // action_type='create_and_start' 的 trigger 复用 spawnItemChild（原 schedules.spawn=1）。
   // schedDeps 已在 onChildDone 之后定义（孤儿重派共用），此处直接复用。
   const scheduler = createScheduler(db, {
-    onStartRun: (itemId) => { spawnItemChild(schedDeps, itemId, {}); },
+    // 工作区判定要的 git 事实已经在缓存里时当场派出（失败照旧记在这次触发上）；还没查好时先异步查，查好再派，
+    // 不在主线程上同步跑 git（lead-scheduler spec P0）。那时派发失败只能记日志：触发已经记成成功。
+    onStartRun: (itemId) => {
+      const item = getItem(db, itemId);
+      const input = item ? childRunInput(item) : null;
+      if (!item || !input || runWorkspaceFactsReady(db, item, input)) {
+        spawnItemChild(schedDeps, itemId, {});
+        return;
+      }
+      void warmRunWorkspaceFacts(db, item, input)
+        .then(() => { spawnItemChild(schedDeps, itemId, {}); })
+        .catch((error: unknown) => log(`[scheduler] start #${itemId} failed after warming its git facts: ${error instanceof Error ? error.message : String(error)}`));
+    },
     // 不再接计时兜底（spec §4 的 onFallbackNotify）：2026-10-15 起由 Lead 决定怎样告诉用户，
     // 系统只在 Lead 不能工作时兜底（poller 里的 summarizeBacklogForUser）。
     // 提醒例外（工单 07，常设指令 reminder.fire）：到点、提前、没确认时的重复推送都由 daemon 直接推，不等 Lead。
@@ -5237,6 +5302,12 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
   schedDeps.preflight = preflight;
   // 没预热、只好同步跑 git 的路径记在日志里（engine 的 git-facts.ts），好把它们找出来改掉。
   setGitFactsLog(log);
+  // 宿主隔离（lead-scheduler spec P0、D7、D12）：后台重活（子进程里的 rm -rf）的起止记一行；宿主探针看主线程延迟、
+  // I/O 线程池和主线程有没有被同步调用卡住，越过阈值马上记一行，带上正在跑的后台重活。main.ts 打开探针；测试里起的 daemon 不开。
+  setHostJobLog(log);
+  const hostProbes: HostProbes | null = opts.hostProbes
+    ? startHostProbes({ log, dir: opts.dataDir, workerFd: 1 })
+    : null;
   // 主线程上超过 200 毫秒的 SQL 记一行（store 的 setSlowStatementLog），看 busy_timeout 的同步等待有没有发生。
   setSlowStatementLog(log, Number(process.env.PLC_SLOW_SQL_MS ?? 200));
   orchestrator = createOrchestrator(db, {
@@ -5858,6 +5929,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     leadQueueStopped = true;
     if (leadQueueTimer) clearNodeTimeout(leadQueueTimer);
     clearNodeInterval(poller); clearNodeInterval(wdTimer); clearNodeInterval(heartbeat); catalogWatch?.stop();
+    hostProbes?.stop();
     // 关库之前等影子分诊这一批停下（正在进行的调用被取消），通道的传输停下、这一拍跑完。
     closeStep = "stopping the shadow triage";
     await triageShadow?.stop();
