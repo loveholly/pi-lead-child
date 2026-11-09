@@ -387,6 +387,9 @@ export class ChannelActionError extends Error {
 }
 
 const EXCERPT_MAX = 280;
+// 用户本人在这个对话里亲手回过以后，排着的自动回复不再发（ChannelHub.ownReplySince）。给 Lead 的说明：发生了什么、下一步。
+const OWN_REPLY_HELD = "用户在这个对话里亲手回过，回复没有发出去";
+const OWN_REPLY_NEXT = "下一步：不要换个办法再发；要补充什么，在用户的对话里告诉用户";
 // 起点里放被回复的那条之前的几条（同一个对话里的）。只有根消息在另一个对话里时才放（例如私信的 thread，根消息在整段私信里）：
 // 私信里很多人直接在根上发消息，收到 thread 里的话时先看前面 10 条根消息（被回复的那条和它之前的 9 条，用户 2026-11-02）。
 const ORIGIN_BEFORE = 9;
@@ -1115,6 +1118,13 @@ export class ChannelHub {
       if (sent.nextAttemptAt && Date.parse(sent.nextAttemptAt) > now) continue;
       const adapter = this.options.registry.get(card.source);
       if (!adapter) continue;
+      // 没发成、等着再发的自动回复：排上以后你在这个对话里亲手回过，不再发。卡上的草稿留着。
+      if (sent.by === "auto" && this.ownReplySince(card.source, card.objectKey, { at: Date.parse(sent.at) }) !== null) {
+        updateChannelCard(this.db, card.id, { sent: null }, { at: this.now() });
+        this.log(`[channels] ${adapter.id}: the user replied in the conversation of card #${card.id}; the pending auto-reply was dropped`);
+        changed.push(card.id);
+        continue;
+      }
       await this.sendReply(adapter, card, sent.by === "auto" ? "auto_reply" : "user_reply", {
         revokeWindowMs: sent.by === "auto" ? this.revokeWindowFor(adapter, sent.key) : 0, resume: true,
       });
@@ -1137,10 +1147,14 @@ export class ChannelHub {
    * 发一条回复（用户点的，或者闸门放行的自动回复）。先在卡上占住（sent.status = pending，按版本），
    * 再用幂等键调用适配器。resume：daemon 重启或者上一次失败以后接着发，卡上已经占住了。
    * outgoing 是要发的文字（披露署名已经加好）；不给时发卡上的草稿原文。
+   * holdSince：自动回复排上的位置（ownReplySince）。等状态消息发完以后、占住卡以前，用户本人在这个对话里亲手说过话时不发，返回 null。
    */
   private async sendReply(
     adapter: ChannelAdapter, card: ChannelCard, purpose: "user_reply" | "auto_reply",
-    options: { revokeWindowMs: number; resume?: boolean; outgoing?: OutgoingReply; resolution?: { by: string; action: string } },
+    options: {
+      revokeWindowMs: number; resume?: boolean; outgoing?: OutgoingReply; resolution?: { by: string; action: string };
+      holdSince?: { seq: number } | { at: number };
+    },
   ): Promise<ChannelOutboundOutcome | null> {
     if (this.sending.has(card.id)) return null;
     let claimed = card;
@@ -1153,6 +1167,10 @@ export class ChannelHub {
         if (!fresh) return null;
         card = fresh;
         claimed = fresh;
+      }
+      if (purpose === "auto_reply" && options.holdSince && this.ownReplySince(card.source, card.objectKey, options.holdSince) !== null) {
+        this.log(`[channels] ${adapter.id}: the user replied in the conversation of card #${card.id}; the auto-reply was not sent`);
+        return null;
       }
       const outgoing: OutgoingReply | null = options.outgoing ?? (card.draft ? {
         by: purpose === "auto_reply" ? "auto" : "user",
@@ -1813,28 +1831,58 @@ export class ChannelHub {
    * 外部通道的出站扩展（统一消息事件 spec D9，工单 05）：Lead 不在用户这一轮里写的回复。Lead 自己判断（用户 2026-10-29），
    * 不过信心检验：草稿记到卡上（drafter 是 lead），带 auto-reply 署名代你发，留撤回窗口，卡结束；这张卡上还没决定的请求都记成 answer。
    * 卡正在发别的回复时抛 conflict。reasons：没发出去时写原因（系统会用同一个幂等键再试）。
+   * since：这条回复排上的位置（ownReplySince）。用户本人在这以后在这个对话里亲手回过时不发：回复只放到卡上，held 是 true。
    */
-  private async leadReply(adapter: ChannelAdapter, card: ChannelCard, text: string): Promise<{ card: ChannelCard; reasons: string[] }> {
+  private async leadReply(
+    adapter: ChannelAdapter, card: ChannelCard, text: string, since: { seq: number } | { at: number },
+  ): Promise<{ card: ChannelCard; reasons: string[]; held: boolean }> {
     // 派了活还没交回：子 agent 的结果交回以后由出站检验定代你回还是交给你，「正在处理」已经告诉了对方。现在回会让卡提前结束。
     const task = this.awaitingTask(card.id);
     if (task) throw new ChannelActionError("conflict", `${awaitingTaskNote(card.id, task)}，现在不用回复对方`);
+    if (this.ownReplySince(adapter.id, card.objectKey, since) !== null) return this.keepLeadReply(card, text);
     this.updateDraftByLead(card.id, text);
     const latest = getChannelCard(this.db, card.id)!;
     const draft = latest.draft!;
     const outcome = await this.sendReply(adapter, latest, "auto_reply", {
-      revokeWindowMs: AUTHORITY_REVOKE_WINDOW_MS,
+      revokeWindowMs: AUTHORITY_REVOKE_WINDOW_MS, holdSince: since,
       outgoing: {
         key: `answer:card:${latest.id}:seq:${draft.forSeq}`, by: "auto", fromDraft: true,
         ...autoReplyDisclosure(this.assistantFor(adapter), this.ownerNameFor(adapter), draft.text),
       },
     });
+    if (!outcome && this.ownReplySince(adapter.id, latest.objectKey, since) !== null) return this.keepLeadReply(latest, text);
     if (!outcome) throw new ChannelActionError("conflict", `卡 #${card.id} 正在发别的回复，等它发完再回`);
     const failed = outcome.status === "failed" ? `这一次没有发出去，系统会用同一个幂等键再试（${outcome.error ?? "未知原因"}）` : null;
     this.decidePending(latest.id, "answer", `Lead 的回复代你发了${failed ? `；${failed}` : ""}`);
     this.refreshLaneOf(latest);
     this.cardsChanged([latest.id]);
     await this.settleStatusNotices(latest.id);
-    return { card: getChannelCard(this.db, latest.id)!, reasons: failed ? [failed] : [] };
+    return { card: getChannelCard(this.db, latest.id)!, reasons: failed ? [failed] : [], held: false };
+  }
+
+  /** 用户本人亲手回过以后 Lead 的回复：放到卡上当草稿，不发，不推送（用户就在这个对话里）。这张卡上还没决定的请求记成 answer。 */
+  private keepLeadReply(card: ChannelCard, text: string): { card: ChannelCard; reasons: string[]; held: boolean } {
+    this.updateDraftByLead(card.id, text);
+    this.decidePending(card.id, "answer", `Lead 写了回复；${OWN_REPLY_HELD}，放在卡上`);
+    const after = getChannelCard(this.db, card.id)!;
+    this.refreshLaneOf(after);
+    this.cardsChanged([after.id]);
+    this.log(`[channels] ${card.source}: the user replied in the conversation of card #${card.id}; Lead's reply kept as a draft`);
+    return { card: after, reasons: [`${OWN_REPLY_HELD}，放在了卡 #${card.id} 上`], held: true };
+  }
+
+  /**
+   * Lead 自己的回复排上的位置（ownReplySince）：它回复的那条消息。给了消息事件时是这条消息（编辑也算）；给的是交回 Lead 的
+   * 子 agent 结果时是那次派活的消息。都没有时是 Lead 这一轮开始的时间，再没有时是等你的卡上最新的一条。
+   */
+  private leadReplySince(open: ChannelCard | undefined, input: { event?: number; seenBefore?: number | null }): { seq: number } | { at: number } | null {
+    const event = input.event === undefined ? undefined : getEvent(this.db, input.event);
+    const seqs = event?.kind === MESSAGE_EVENT_KIND && Array.isArray(event.payload.messages)
+      ? event.payload.messages.filter((seq): seq is number => typeof seq === "number") : [];
+    if (seqs.length) return { seq: Math.max(...seqs) };
+    if (event?.kind === CHANNEL_EVENT_KINDS.taskFinished && typeof event.payload.forSeq === "number") return { seq: event.payload.forSeq };
+    if (typeof input.seenBefore === "number") return { at: input.seenBefore };
+    return open ? { seq: open.lastSeq } : null;
   }
 
   // Lead 回复的是哪一条：给了消息事件时是它最后一条入站事件（编辑也算），否则是卡上最新的一条。
@@ -1932,6 +1980,17 @@ export class ChannelHub {
     // 上限：放手照常发；做好给你看、交给你、只告诉你、婉拒，回复放到卡上等用户点发送，不发出去。固定的拒绝走它自己的检查。
     // 连续对话不算（用户 2026-10-29：「连续对话和互动哪来那么多傻逼死锁机制」）：你或 Lead 在这个对话里最近 30 分钟说过话，
     // 对方在接着说，Lead 的回复按 Lead 自己的判断发。交接说明管的是别人找你的新消息。
+    const waitingAtStart = input.forUser ? undefined : getOpenChannelCard(this.db, place.objectKey);
+    const since = input.forUser ? null : this.leadReplySince(waitingAtStart, input);
+    // 用户本人在 Lead 回复的那条消息以后，在这个对话里亲手回过：Lead 的回复不发（不问 SmartModel）。有等你的卡时放到卡上，没有时不发。
+    if (!input.forUser && !input.refusal && since && this.ownReplySince(adapter.id, place.objectKey, since) !== null) {
+      if (!waitingAtStart) throw new ChannelActionError("conflict", `${OWN_REPLY_HELD}。${OWN_REPLY_NEXT}`);
+      const kept = this.keepLeadReply(waitingAtStart, input.text.trim());
+      return {
+        conversation: conversationId, label: place.label, objectKey: place.objectKey, text: input.text.trim(), outcome: "drafted",
+        reasons: kept.reasons, card: { id: kept.card.id, state: kept.card.state, note: `${kept.reasons[0]}。${OWN_REPLY_NEXT}` },
+      };
+    }
     if (!input.forUser && !input.refusal) {
       const open = getOpenChannelCard(this.db, place.objectKey);
       const ceiling = open ? this.replyCeilingOf(open.id) : null;
@@ -1957,7 +2016,13 @@ export class ChannelHub {
       if (this.sending.has(waiting.id) || waiting.sent?.status === "pending") {
         throw new ChannelActionError("conflict", `卡 #${waiting.id} 正在发别的回复，等它发完再回`);
       }
-      const replied = await this.leadReply(adapter, waiting, text);
+      const replied = await this.leadReply(adapter, waiting, text, since ?? { seq: waiting.lastSeq });
+      if (replied.held) {
+        return {
+          ...sent, outcome: "drafted", reasons: replied.reasons,
+          card: { id: replied.card.id, state: replied.card.state, note: `${replied.reasons[0]}。${OWN_REPLY_NEXT}` },
+        };
+      }
       this.log(`[channels] ${adapter.id}: Lead's own reply on card #${waiting.id}: auto_sent`);
       return {
         ...sent, text: replied.card.sent?.text ?? message.text, outcome: "auto_sent",
@@ -2033,8 +2098,12 @@ export class ChannelHub {
     if (card.lastSeq !== forSeq || !this.seenBy(card, input.seenBefore)) {
       throw new ChannelActionError("conflict", `卡 #${card.id} 上又来了新消息：先看新消息再定`);
     }
+    const since = { seq: forSeq };
+    const ownReply = () => this.ownReplySince(adapter.id, card.objectKey, since) !== null;
+    if (ownReply()) throw new ChannelActionError("conflict", `${OWN_REPLY_HELD}。${OWN_REPLY_NEXT}`);
     if (this.sending.has(card.id) || card.sent?.status === "pending") throw new ChannelActionError("conflict", `卡 #${card.id} 正在发别的回复`);
-    const outcome = await this.sendRefusal(adapter, card, forSeq);
+    const outcome = await this.sendRefusal(adapter, card, forSeq, since);
+    if (!outcome && ownReply()) throw new ChannelActionError("conflict", `${OWN_REPLY_HELD}。${OWN_REPLY_NEXT}`);
     if (!outcome) throw new ChannelActionError("conflict", `卡 #${card.id} 正在发别的回复`);
     const failed = outcome.status === "failed" ? `这一次没有发出去，系统会用同一个幂等键再试（${outcome.error ?? "未知原因"}）` : null;
     this.decidePending(card.id, "refuse", `Lead 用固定的话拒绝了涉密的请求${failed ? `；${failed}` : ""}`);
@@ -2666,8 +2735,9 @@ export class ChannelHub {
     const latest = getChannelCard(db, cardId);
     if (!latest || !(CHANNEL_CARD_OPEN_STATES as readonly ChannelCardState[]).includes(latest.state)) return;
     if (gate.decision === "auto_send" && latest.draft) {
+      // 查完以后你在这个对话里说过话时，信心模型不会给 auto_send（newerMessages）。发之前再看一次事实：等状态消息的时候你可能刚回了。
       await this.sendReply(adapter, latest, "auto_reply", {
-        revokeWindowMs: AUTHORITY_REVOKE_WINDOW_MS,
+        revokeWindowMs: AUTHORITY_REVOKE_WINDOW_MS, holdSince: { seq: forSeq },
         outgoing: {
           key: `task:card:${latest.id}:run:${outcome.runId}`, by: "auto", fromDraft: true,
           ...autoReplyDisclosure(this.assistantFor(adapter), this.ownerNameFor(adapter), latest.draft.text),
@@ -3028,7 +3098,9 @@ export class ChannelHub {
     if ((action === "send_draft" || action === "send_edited") && options.forUser === false) {
       const text = action === "send_draft" ? card.draft?.text ?? "" : options.text?.trim() ?? "";
       if (!text) throw new ChannelActionError("invalid_action", action === "send_draft" ? `卡 #${cardId} 上没有草稿` : "「改一下再发」要带要发的文字");
-      return (await this.leadReply(adapter, card, text)).card;
+      const replied = await this.leadReply(adapter, card, text, { seq: card.draft?.forSeq ?? card.lastSeq });
+      if (replied.held) throw new ChannelActionError("conflict", `${replied.reasons[0]}。${OWN_REPLY_NEXT}`);
+      return replied.card;
     }
     const now = this.now();
     const at = now.toISOString();
@@ -3918,14 +3990,18 @@ export class ChannelHub {
   private async refuse(adapter: ChannelAdapter, cardId: number, seq: number): Promise<void> {
     const card = getChannelCard(this.db, cardId);
     if (!card || card.state !== "open" || card.lastSeq !== seq) return;
+    // 你在这条消息以后亲手回过：不代你拒绝。
+    if (this.ownReplySince(adapter.id, card.objectKey, { seq }) !== null) return;
     await this.sendRefusal(adapter, card, seq);
     this.cardsChanged([card.id]);
   }
 
   // 用固定的话拒绝：带「auto-reply for 你」的署名，留撤回窗口（没有接 Lead 时的授权表、Lead 的固定拒绝都用它）。
-  private sendRefusal(adapter: ChannelAdapter, card: ChannelCard, seq: number): Promise<ChannelOutboundOutcome | null> {
+  private sendRefusal(
+    adapter: ChannelAdapter, card: ChannelCard, seq: number, holdSince: { seq: number } | { at: number } = { seq },
+  ): Promise<ChannelOutboundOutcome | null> {
     return this.sendReply(adapter, card, "auto_reply", {
-      revokeWindowMs: AUTHORITY_REVOKE_WINDOW_MS,
+      revokeWindowMs: AUTHORITY_REVOKE_WINDOW_MS, holdSince,
       outgoing: {
         key: `refuse:card:${card.id}:seq:${seq}`, by: "auto", fromDraft: false,
         ...autoReplyDisclosure(this.assistantFor(adapter), this.ownerNameFor(adapter), AUTHORITY_REFUSAL_TEXT),
@@ -4186,8 +4262,26 @@ export class ChannelHub {
   }
 
   /**
+   * 用户本人在这个对话里亲手说的话（role 是 self_reply）里，晚于 since 的最新一条的 seq。没有时是 null。
+   * since 是这条自动回复排上的位置：它回答的那条消息（seq），或者它排上的时间（毫秒，例如 Lead 这一轮开始的时间）。
+   * 有这样一句话时，排着的自动回复不再发，结果只留在卡上。只看事件日志里的事实，不问 SmartModel：判断失败时也成立。
+   */
+  private ownReplySince(source: string, objectKey: string, since: { seq: number } | { at: number }): number | null {
+    const rows = this.db.prepare(
+      `SELECT seq, occurred_at AS occurredAt FROM events
+       WHERE source = ? AND entity_key = ? AND json_valid(payload) AND json_extract(payload, '$.role') = 'self_reply'
+       ORDER BY seq DESC LIMIT 20`,
+    ).all(source, objectKey) as Array<{ seq: number; occurredAt: string }>;
+    const after = "seq" in since
+      ? (row: { seq: number }) => row.seq > since.seq
+      : (row: { occurredAt: string }) => Date.parse(row.occurredAt) >= since.at;
+    return rows.find(after)?.seq ?? null;
+  }
+
+  /**
    * 用户自己在来源里说的话（工单 04 第 7 条）：问 SmartModel 这句话是不是回答了对方。回答了，卡「别处已处理」；
    * 只是说收到、稍等（或者问不成），卡留着，标成「你在来源里回复过」（replying_self），不再推送。代查照常进行。
+   * 这里的判断只决定卡的状态。排着的自动回复不发，不靠它：发之前看 ownReplySince。
    */
   private async judgeOwnReply(adapter: ChannelAdapter, cardId: number, seq: number): Promise<void> {
     const db = this.db;
@@ -4290,7 +4384,8 @@ export class ChannelHub {
     if (card.state === "replying_self") return true;
     const lookup = getLatestLookupForCard(this.db, card.id);
     if (!lookup || isActiveLookupState(lookup.state)) return false;
-    return lookup.reply?.decision === "hand_over";
+    // 工单做完以后你在这个对话里亲手回过（在这条消息以后）：结果不再代你发，「正在处理」也不是真的了。
+    return lookup.reply?.decision === "hand_over" || this.ownReplySince(card.source, card.objectKey, { seq: lookup.forSeq }) !== null;
   }
 
   /** 删掉这张卡上已经不是真的「正在处理」（noticeOutlived）。同一个幂等键，删过的不再删；失败够了次数的不再试。不抛错。 */
