@@ -7,7 +7,7 @@
 //     和推来的 HTTP 请求（verify 按签名校验；没有公网端点，现在只有测试走这条）。认出这些事：
 //       别人发给用户的私信（slack.dm.received）、别人在频道里提到用户（slack.mention.received）、
 //       用户本人的回复（slack.self.reply，触发「别处已处理」）、
-//       用户的线程（已经有道）里没有提到用户的后续消息（slack.thread.message）、
+//       用户的线程（已经有道，或者用户的账号起头的 thread）里没有提到用户的后续消息（slack.thread.message）、
 //       别人改了、删了道里的一条消息（slack.message.edited、slack.message.deleted：对已有的道，只更新没结束的卡；
 //       订阅频道里没有道的线程也收，只记录，给记忆沉淀用）、
 //       订阅频道里的普通消息（slack.channel.message：只记录。这个频道 14 天内有过道就算订阅，hub 用 channel_lanes 回答；
@@ -250,7 +250,7 @@ export const SLACK_EVENT_KINDS = {
   edited: "slack.message.edited",
   deleted: "slack.message.deleted",
   channel: "slack.channel.message",
-  // 用户关注的 thread（用户在里面发起或者回复过，照 Slack 的自动关注规则）里别人的消息，没有提到用户。只记录，沉淀进记忆。
+  // 用户关注的 thread（用户或者系统替用户在里面回复过，照 Slack 的自动关注规则；用户的账号起头的按 thread 收）里别人的消息，没有提到用户。只记录，沉淀进记忆。
   followed: "slack.followed.message",
 } as const;
 
@@ -1163,7 +1163,7 @@ export function createSlackChannelAdapter(options: SlackChannelOptions): Channel
   async function inbound(input: {
     envelope: SlackEnvelope; message: SlackMessage; channel: string; channelType: string; ts: string;
     kind: string; role: ChannelInbound["role"]; deliveryId: string; text: string; echo: boolean; amends?: ChannelInbound["amends"];
-    occurredAt: Date; follows?: boolean;
+    occurredAt: Date; follows?: boolean; starts?: boolean;
   }, context: ChannelAdapterContext): Promise<ChannelInbound> {
     const place = placeOf(input.channel, input.channelType, input.ts, input.message.thread_ts);
     const senderId = isString(input.message.user) ? input.message.user : "unknown";
@@ -1201,6 +1201,7 @@ export function createSlackChannelAdapter(options: SlackChannelOptions): Channel
       },
       ...(input.amends ? { amends: input.amends } : {}),
       ...(input.follows ? { follows: true } : {}),
+      ...(input.follows && input.starts ? { starts: true } : {}),
     };
   }
 
@@ -1742,11 +1743,11 @@ export function createSlackChannelAdapter(options: SlackChannelOptions): Channel
       kind(SLACK_EVENT_KINDS.dm, "别人在 Slack 里给用户发了私信（或者在用户在的群聊里发了消息）。"),
       kind(SLACK_EVENT_KINDS.mention, "别人在 Slack 的频道里提到了用户。"),
       kind(SLACK_EVENT_KINDS.selfReply, "用户本人在 Slack 里说了话（echo=true 时是系统替用户发的回复被推回来）。对应的卡「别处已处理」。"),
-      kind(SLACK_EVENT_KINDS.thread, "别人在用户的 Slack 线程（已经有道）里发了后续消息，没有提到用户。"),
+      kind(SLACK_EVENT_KINDS.thread, "别人在用户的 Slack 线程（已经有道，或者用户本人、系统替用户发的消息起头的 thread）里发了后续消息，没有提到用户。"),
       kind(SLACK_EVENT_KINDS.edited, "别人改了 Slack 道里（或者订阅频道的线程里）的一条消息（text 是改后的文字，ts 是那条消息的）。只更新没结束的卡。"),
       kind(SLACK_EVENT_KINDS.deleted, "别人删了 Slack 道里（或者订阅频道的线程里）的一条消息（不带原文，ts 是那条消息的）。只更新没结束的卡。"),
       kind(SLACK_EVENT_KINDS.channel, "用户订阅的 Slack 频道（14 天内有过用户的对话）里，别人没有提到用户的普通消息。只记录。"),
-      kind(SLACK_EVENT_KINDS.followed, "用户关注的 Slack thread（用户在里面发起或者回复过）里，别人没有提到用户的消息。只记录，沉淀进记忆。"),
+      kind(SLACK_EVENT_KINDS.followed, "用户关注的 Slack thread（用户或者系统替用户在里面回复过，不是用户起头的）里，别人没有提到用户的消息。只记录，沉淀进记忆。"),
     ],
     standingOrders: SEEDS,
     memory: memorySpec,
@@ -1813,6 +1814,11 @@ export function createSlackChannelAdapter(options: SlackChannelOptions): Channel
       } else if (place.thread && context.interest?.laneExists(place.objectKey)) {
         kind = SLACK_EVENT_KINDS.thread;
         role = "message";
+      } else if (place.thread && context.interest?.started(place.objectKey) && await followable(channel, context)) {
+        // 用户的账号起头的 thread（用户本人发的，或者系统替用户发的）是用户的线程：别人接着说是在回用户的话，和有道的线程
+        // 一样投递（同事的进会话卡），开卡时开道。用户只是回复过的 thread 仍按下面的关注只记录。
+        kind = SLACK_EVENT_KINDS.thread;
+        role = "message";
       } else if (place.thread && context.interest?.followed(place.objectKey) && await followable(channel, context)) {
         // 用户关注的 thread（发起或者回复过）：只记录、沉淀进记忆。后来有人在这里提到用户时，上面的 mention 先认出来，
         // 开卡、开道；之后这个 thread 有道，按 thread 收，不会记两次（用户 2026-10-21）。
@@ -1824,13 +1830,17 @@ export function createSlackChannelAdapter(options: SlackChannelOptions): Channel
       } else {
         return [];
       }
-      // 用户本人在频道里说的话（不是私信，不是系统替用户发的）：照 Slack 的规则，发起或者回复一个 thread 就关注它。
+      // 用户的账号在频道里说的话：照 Slack 的规则，发起或者回复一个 thread 就关注它。系统替用户发的（推回来是 echo）一样算：
+      // 用户让 Lead 代发的消息也是用户的（2026-11-09：代发了一条 @ 同事的消息，同事在 thread 里的回复只记成了订阅频道的消息）。
       // 私信里的 thread 也这样记（只记录）：回复都进 thread（2026-11-02），上下文包要看得到用户和系统在 thread 里说了什么。
-      const follows = (role === "self_reply" && (!place.direct || place.thread !== null)
-        || role === "echo" && place.direct && place.thread !== null) && await followable(channel, context);
+      const follows = (role === "self_reply" || role === "echo") && (!place.direct || place.thread !== null)
+        && await followable(channel, context);
+      // 频道里的根消息起头一个 thread（对象键就是这个 thread）。
+      const starts = follows && !place.direct && place.thread === null;
       return [await inbound({
         envelope, message: event, channel, channelType, ts: event.ts, kind, role,
         deliveryId: `${channel}:${event.ts}`, text: await displayText(text, context), echo, occurredAt: occurred(envelope, event.ts), follows,
+        starts,
       }, context)];
     },
 

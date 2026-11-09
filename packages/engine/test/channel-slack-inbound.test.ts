@@ -77,6 +77,7 @@ describe("thread follow-ups", () => {
 
 // 用户 2026-10-21：照 Slack 自己的关注规则（发起、回复过的 thread 会关注），把这些 thread 里的讨论默默沉淀下来。
 // 只记录、沉淀进记忆：不开卡、不开道、不问模型，也不进 Lead 的上下文。被 @ 时照常开卡，之后按道收，不会记两次。
+// 用户的账号起头的 thread 不在此列（2026-11-09），见下面的「threads started from the user's account」。
 describe("threads the user follows, by Slack's own rules", () => {
   const level = (seq: number | null) => getEvent(db, seq!)!.level;
 
@@ -115,15 +116,6 @@ describe("threads the user follows, by Slack's own rules", () => {
     expect(adapter.memory!.kinds["slack.followed.message"]).toBe("message");
   });
 
-  it("follows a thread the user started", async () => {
-    const { hub } = setup();
-    const started = slack.selfReply("C0QUIET", "大家看下这个提案");
-    const mine = (await hub.receive("slack", started)).items[0]!;
-    expect(mine).toMatchObject({ role: "self_reply", delivery: "record" });
-    const reply = (await hub.receive("slack", slack.chatter("U0ZHANG", "我觉得可以", "C0QUIET", { thread: threadOf(started) }))).items[0]!;
-    expect(reply).toMatchObject({ kind: "slack.followed.message", delivery: "record", objectKey: mine.objectKey });
-  });
-
   it("does not follow threads in excluded channels, nor anything in direct messages", async () => {
     const adapter = createSlackChannelAdapter({ api: slack.api, now: () => clock, memory: { exclude: ["#quiet"] } });
     const hub = new ChannelHub({
@@ -134,6 +126,65 @@ describe("threads the user follows, by Slack's own rules", () => {
     expect((await hub.receive("slack", slack.selfReply("C0QUIET", "我回一句", { thread }))).items[0]).toMatchObject({ ignored: "no_lane" });
     expect(await hub.receive("slack", slack.chatter("U0LI", "接着说", "C0QUIET", { thread }))).toEqual({ accepted: true, items: [] });
     expect((await hub.receive("slack", slack.selfReply("D0NOBODY", "私信里自己说的话"))).items[0]).toMatchObject({ ignored: "no_lane" });
+  });
+});
+
+// 用户的账号起头的 thread 是用户的 thread：用户本人在 Slack 里发的，和 Lead 代用户发的（推回来是 echo）一样。
+// 同事在里面的回复是在回用户的话：进会话卡。只回复过、不是起头的 thread 仍然只记录（上面的「关注」）。
+// 回归：Lead 代用户在订阅频道里发了一条 @ 同事的消息，同事在它的 thread 里回了一个问题，只被记成订阅频道的普通消息。
+describe("threads started from the user's account", () => {
+  const by = "lead for user via turn:turn-1";
+
+  async function subscribe(hub: ChannelHub) {
+    // 频道里有过道就算订阅：先有一次提到用户。
+    await hub.receive("slack", slack.mention("U0ZHANG", "请看一下", { channel: "C0PROJ" }));
+  }
+
+  it("takes a colleague's reply into a card when Lead posted the root for the user", async () => {
+    const { hub } = setup();
+    await subscribe(hub);
+    await hub.sendMessage("slack:C0PROJ:main", { text: "<@U0LI> 退货运费这周能定吗？", words: "assistant", forUser: true, by });
+    const posted = slack.sent("C0PROJ").at(-1)!;
+    const objectKey = `slack:C0PROJ:${posted.ts}`;
+    const echo = (await hub.receive("slack", slack.echoOf(posted))).items[0]!;
+    expect(echo).toMatchObject({ kind: "slack.self.reply", role: "echo", inserted: true, delivery: "record", cardId: null, objectKey });
+
+    const reply = (await hub.receive("slack", slack.chatter("U0LI", "能定，不过要先确认一下仓库地址？", "C0PROJ", { thread: posted.ts }))).items[0]!;
+    expect(reply).toMatchObject({ kind: "slack.thread.message", role: "message", delivery: "card", objectKey });
+    expect(reply.cardId).not.toBeNull();
+    expect(getChannelLane(db, objectKey)).toBeDefined();
+    // 回复里 @ 了用户：一样进这张卡。
+    const mention = (await hub.receive("slack", slack.mention("U0LI", "你看下？", { channel: "C0PROJ", thread: posted.ts }))).items[0]!;
+    expect(mention).toMatchObject({ kind: "slack.mention.received", delivery: "card", cardId: reply.cardId });
+    expect(getChannelCard(db, reply.cardId!)).toMatchObject({ messageCount: 2 });
+  });
+
+  it("takes a colleague's reply into a card when the user started the thread in Slack", async () => {
+    const { hub } = setup();
+    const started = slack.selfReply("C0QUIET", "大家看下这个提案");
+    const mine = (await hub.receive("slack", started)).items[0]!;
+    expect(mine).toMatchObject({ role: "self_reply", delivery: "record" });
+    const reply = (await hub.receive("slack", slack.chatter("U0ZHANG", "我觉得可以", "C0QUIET", { thread: threadOf(started) }))).items[0]!;
+    expect(reply).toMatchObject({ kind: "slack.thread.message", delivery: "card", objectKey: mine.objectKey });
+    expect(reply.cardId).not.toBeNull();
+  });
+
+  it("still only records a thread the user or Lead only replied in, and other threads of a subscribed channel", async () => {
+    const { hub } = setup();
+    await subscribe(hub);
+    const root = slack.chatter("U0LI", "这周谁值班？", "C0PROJ");
+    const thread = threadOf(root);
+    expect((await hub.receive("slack", root)).items[0]).toMatchObject({ kind: "slack.channel.message", delivery: "record", cardId: null });
+    // Lead 代用户在别人的 thread 里回了一句：记下来（关注），但这个 thread 不是用户起头的。
+    await hub.sendMessage(`slack:C0PROJ:${thread}`, { text: "我这周值班", words: "user", forUser: true, by });
+    const echo = (await hub.receive("slack", slack.echoOf(slack.sent("C0PROJ").at(-1)!))).items[0]!;
+    expect(echo).toMatchObject({ role: "echo", inserted: true, delivery: "record", cardId: null });
+    const after = (await hub.receive("slack", slack.chatter("U0LI", "好的", "C0PROJ", { thread }))).items[0]!;
+    expect(after).toMatchObject({ kind: "slack.followed.message", delivery: "record", cardId: null });
+    // 和用户无关的 thread：订阅频道的普通消息，只记录。
+    const other = (await hub.receive("slack", slack.chatter("U0WANG", "别的讨论", "C0PROJ", { thread: "1760000000.000009" }))).items[0]!;
+    expect(other).toMatchObject({ kind: "slack.channel.message", delivery: "record", cardId: null });
+    expect(getEvent(db, other.seq!)!.level).toBe("record");
   });
 });
 

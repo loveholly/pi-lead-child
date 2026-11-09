@@ -773,6 +773,7 @@ export class ChannelHub {
       ...(item.messageId ? { messageId: item.messageId } : {}),
       ...(item.audience ? { audience: item.audience } : {}),
       ...(item.replyTo ? { replyTo: item.replyTo } : {}),
+      ...(item.starts && item.role !== "message" ? { starts: true } : {}),
       summary: `${item.sender.name}（${SENDER_TRUST_LABELS[item.sender.trust]}）在${item.laneLabel}：${oneLine(item.text, 300)}`,
       urgent: urgency?.urgent ?? false,
       ...(urgency ? { urgency: urgency.basis } : {}),
@@ -3500,10 +3501,16 @@ export class ChannelHub {
     return {
       laneExists: (objectKey) => own(objectKey) && getChannelLane(this.db, objectKey) !== undefined,
       recentLaneUnder: (prefix, sinceMs) => own(prefix) && Number.isFinite(sinceMs) && hasRecentChannelLane(this.db, prefix, new Date(sinceMs)),
-      // 记过用户本人在这个对象里说的话（有道或者关注时记的）。走 events_entity 索引。
+      // 记过用户本人在这个对象里说的话，或者系统替用户发出去、推回来的话（有道或者关注时记的）。走 events_entity 索引。
       followed: (objectKey) => own(objectKey) && this.db.prepare(
         `SELECT 1 FROM events WHERE entity_key = ? AND source = ?
-           AND json_valid(payload) AND json_extract(payload, '$.role') = 'self_reply' LIMIT 1`,
+           AND json_valid(payload) AND json_extract(payload, '$.role') IN ('self_reply', 'echo') LIMIT 1`,
+      ).get(objectKey, adapter.id) !== undefined,
+      // 上面的话里有起头这个对象的那一句（ChannelInbound.starts）。
+      started: (objectKey) => own(objectKey) && this.db.prepare(
+        `SELECT 1 FROM events WHERE entity_key = ? AND source = ?
+           AND json_valid(payload) AND json_extract(payload, '$.role') IN ('self_reply', 'echo')
+           AND json_extract(payload, '$.starts') = 1 LIMIT 1`,
       ).get(objectKey, adapter.id) !== undefined,
     };
   }
