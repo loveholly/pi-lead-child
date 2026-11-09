@@ -1,0 +1,23 @@
+// oxlint 的配置。CI 用 `npm run lint` 跑它（.github/workflows/pr-checks.yml）。
+// 只开默认的 correctness 类规则：报的是几乎一定有错的写法，误报少。
+// 第一次接入时（2026-11-06），仓库里有 10 条规则共报 199 处。下面把这 10 条降成 warn：
+// CI 照样把它们打印出来，但不会因为它们失败。修掉一条规则的全部报错以后，把它从这里删掉，它就回到 error。
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "categories": {
+    "correctness": "error"
+  },
+  "rules": {
+    "no-unused-vars": "warn",
+    "unicorn/no-useless-spread": "warn",
+    "unicorn/no-useless-fallback-in-spread": "warn",
+    "no-control-regex": "warn",
+    "unicorn/prefer-string-starts-ends-with": "warn",
+    "unicorn/no-thenable": "warn",
+    "no-useless-escape": "warn",
+    "no-unsafe-optional-chaining": "warn",
+    "no-misleading-character-class": "warn",
+    "require-yield": "warn"
+  },
+  "ignorePatterns": ["**/dist/**", "out/**"]
+}
