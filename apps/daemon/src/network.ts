@@ -6,7 +6,11 @@
 //   · 每隔一段时间再探（退避：PLC_NETWORK_RETRY_MS 起，翻倍，最多 2 分钟）；
 //   · 探通了就调 onRestored：daemon 马上接着做积压的事。
 // 模型调用本身因为断网失败时（DNS 还有缓存，探测是通的），由 markDown 记下，同样等网络恢复。
+//
+// 2026-11-06：DNS 通了，到模型服务的路不一定通。短暂唤醒时流量没有走 VPN，Anthropic 按来源地区回
+// 403 "Request not allowed"。模型回了这一种错误时，用不带 key 的探测（routeProbe）确认，路通了才接着调模型。
 import { lookup } from "node:dns/promises";
+import { isLeadRouteBlock } from "@pi-lead-child/protocol";
 
 // 通了返回 null；不通返回原因（会被分类成 network，见 protocol 的 lead-failure）。
 export type NetworkProbe = () => Promise<string | null>;
@@ -32,8 +36,32 @@ export function dnsProbe(host: string, timeoutMs = 3_000): NetworkProbe {
   };
 }
 
+// 不带 key 向模型服务发一个请求。请求里没有 key，不用任何账号，也不经过本机的模型代理（代理不会因此冷却账号）。
+// 路通时服务回 401（缺 key）；来源被拦时回 403。其他回答也算路通：探测只认 403。
+export function keylessProbe(host: string, timeoutMs = 5_000): NetworkProbe {
+  return async () => {
+    try {
+      const response = await fetch(`https://${host}/v1/messages`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "{}",
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+      await response.body?.cancel().catch(() => {});
+      // 原因里不写状态码：带着 403 的原因会被分类成认证失败（protocol 的 lead-failure）。
+      return response.status === 403 ? `network unreachable: ${host} refuses requests from this network` : null;
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    }
+  };
+}
+
+// 路被拦着时最多等多久，然后放一次模型调用过去（见 probeNow）。
+const ROUTE_MAX_WAIT_MS = 30 * 60_000;
+
 export class NetworkMonitor {
-  private down: { since: number; detail: string } | null = null;
+  // route：模型回过 403 "Request not allowed"，要等不带 key 的探测通过。
+  private down: { since: number; detail: string; route: boolean } | null = null;
   // 模型调用成功过、之后还没有一次确认是断网的失败：信模型，不信探测（发布评审 f796c1c 的 B1：DNS 探测一直不通，
   // 模型经本机代理却是好的，系统的唤醒不能一直被拦着）。
   private trustModel = false;
@@ -43,10 +71,14 @@ export class NetworkMonitor {
 
   constructor(private readonly options: {
     probe: NetworkProbe;
+    // 不带 key 的探测（keylessProbe）。没有时，路被拦了也用 probe 确认。
+    routeProbe?: NetworkProbe;
     onDown: (detail: string) => void;
-    onRestored: () => void;
+    // probe：探测通过；model：模型调用成功；waited：路被拦着，等满了 routeMaxWaitMs。
+    onRestored: (how: "probe" | "model" | "waited") => void;
     retryBaseMs?: number;
     retryMaxMs?: number;
+    routeMaxWaitMs?: number;
   }) {}
 
   // 最近一次知道的状态。断网以后在探通之前一直是 false。
@@ -68,27 +100,37 @@ export class NetworkMonitor {
   // 模型调用成功：网络（至少到模型服务的路）是通的。断网的状态结束，onRestored 照常调。
   modelSucceeded(): void {
     this.trustModel = true;
-    this.restored();
+    this.restored("model");
   }
 
   // 模型调用失败，错误看起来是断网（连接被拒、被重置、DNS）。探一次确认：不通就是断网（返回 true）；
   // 通的话是模型服务或它的代理的问题（返回 false），由调用方按"模型服务连不上"处理。
+  // 模型回了 403 "Request not allowed"（路被拦了）：DNS 看不出这一种，用不带 key 的探测确认。
   async confirmOutage(detail: string): Promise<boolean> {
-    const probed = await this.probe();
+    const route = this.options.routeProbe !== undefined && isLeadRouteBlock(detail);
+    const probed = await this.probe(route);
     if (probed === null) return false;
     this.trustModel = false;
-    this.markDown(detail);
+    this.markDown(detail, route);
     return true;
   }
 
-  private async probe(): Promise<string | null> {
-    return this.options.probe().catch((error: unknown) => (error instanceof Error ? error.message : String(error)));
+  private async probe(route = false): Promise<string | null> {
+    const probe = route && this.options.routeProbe ? this.options.routeProbe : this.options.probe;
+    return probe().catch((error: unknown) => (error instanceof Error ? error.message : String(error)));
   }
 
   private async probeNow(): Promise<boolean> {
-    const detail = await this.probe();
+    const route = this.down?.route ?? false;
+    const detail = await this.probe(route);
     if (detail === null) {
-      this.restored();
+      this.restored("probe");
+      return true;
+    }
+    // 路被拦着，已经等满了 routeMaxWaitMs：放一次模型调用过去。本机的模型代理可能走另一条路（配了自己的上游代理），
+    // daemon 的探测一直被拦，代理那边已经好了。那一次又被拦时，confirmOutage 重新开始等。
+    if (route && this.down && Date.now() - this.down.since >= (this.options.routeMaxWaitMs ?? ROUTE_MAX_WAIT_MS)) {
+      this.restored("waited");
       return true;
     }
     this.markDown(detail);
@@ -96,10 +138,10 @@ export class NetworkMonitor {
   }
 
   // 记下断网（探测不通，或者模型调用因为断网失败），然后按退避再探。
-  markDown(detail: string): void {
+  markDown(detail: string, route = false): void {
     if (this.stopped) return;
     if (!this.down) {
-      this.down = { since: Date.now(), detail };
+      this.down = { since: Date.now(), detail, route };
       this.options.onDown(detail);
     }
     this.schedule();
@@ -111,13 +153,13 @@ export class NetworkMonitor {
     this.timer = null;
   }
 
-  private restored(): void {
+  private restored(how: "probe" | "model" | "waited"): void {
     if (!this.down) return;
     this.down = null;
     this.failures = 0;
     if (this.timer) clearTimeout(this.timer);
     this.timer = null;
-    this.options.onRestored();
+    this.options.onRestored(how);
   }
 
   private schedule(): void {

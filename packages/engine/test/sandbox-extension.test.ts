@@ -1,5 +1,5 @@
 // pi 子进程的沙箱扩展（lead-tools-and-routing spec D2、D15）：真实的 pi 会话加载它，模型是 pi-ai 的假模型。
-// 沙箱是真的，只在 macOS 和 Linux 上跑。
+// 沙箱是真的，只在 macOS 上跑。
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -9,7 +9,9 @@ import { createAgentSession, DefaultResourceLoader, SessionManager, SettingsMana
 import { createSandboxExtension } from "../src/extension/sandbox.js";
 import { resetSandboxForTests } from "../src/sandbox/bash.js";
 
-const supported = process.platform === "darwin" || process.platform === "linux";
+// 用真的沙箱，只在 macOS 上跑。Linux 上的沙箱要 bubblewrap、socat 和 ripgrep，CI 的 ubuntu runner 不装它们，
+// 产品也只有 macOS 版，所以在别的系统上跳过（docs/testing.md 的「只在 macOS 上跑的测试」）。
+const supported = process.platform === "darwin";
 type Step = Parameters<ReturnType<typeof fauxProvider>["setResponses"]>[0][number];
 const call = (name: string, args: Record<string, unknown>): Step =>
   fauxAssistantMessage([fauxToolCall(name, args as never)], { stopReason: "toolUse" });

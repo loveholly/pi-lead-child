@@ -125,6 +125,9 @@ async function canListenOnUnixSocket(): Promise<boolean> {
   });
 }
 const sockets = await canListenOnUnixSocket();
+// 冒烟按 ps -o comm= 认进程名。macOS 上它是可执行文件的路径，硬链接 bin/lead-agent 就叫 lead-agent。Linux 上它是内核里的
+// 线程名，Node 把主线程叫 MainThread（2026-11-09，PR #17 在 ubuntu 上的 CI）。冒烟只在发版的 Mac 上跑，所以查进程名的用例只在 macOS 上跑。
+const processNames = sockets && process.platform === "darwin";
 
 let runtime: string;
 
@@ -227,7 +230,7 @@ describe("smokeEnv", () => {
 });
 
 describe("smokeRuntime", () => {
-  it.skipIf(!sockets)("starts the supervisor, waits for status on plc.sock, checks both process names and stops both", async () => {
+  it.skipIf(!processNames)("starts the supervisor, waits for status on plc.sock, checks both process names and stops both", async () => {
     write(join(runtime, "mode"), "ok");
     process.env.PLC_DEV = "1";
     const result = await smokeRuntime({ runtimeDir: runtime, workDir: tempDir("plc-dsm-") });
@@ -254,7 +257,7 @@ describe("smokeRuntime", () => {
     expect(existsSync(dirname(seen.HOME))).toBe(false);
   });
 
-  it.skipIf(!sockets)("fails when a smoke process writes a key to the Keychain, and stops both anyway", async () => {
+  it.skipIf(!processNames)("fails when a smoke process writes a key to the Keychain, and stops both anyway", async () => {
     write(join(runtime, "mode"), "keychain-write");
     await expect(smokeRuntime({ runtimeDir: runtime, workDir: tempDir("plc-dsm-") }))
       .rejects.toThrow(/冒烟进程想往钥匙串里写密钥：security -i add-generic-password/);
@@ -262,7 +265,7 @@ describe("smokeRuntime", () => {
     await expect.poll(() => alive(pids.supervisor) || alive(pids.daemon), { timeout: 5_000 }).toBe(false);
   });
 
-  it.skipIf(!sockets)("fails when the daemon process is not called lead-agent, and stops it anyway", async () => {
+  it.skipIf(!processNames)("fails when the daemon process is not called lead-agent, and stops it anyway", async () => {
     write(join(runtime, "mode"), "wrong-name");
     await expect(smokeRuntime({ runtimeDir: runtime, workDir: tempDir("plc-dsm-") })).rejects.toThrow(/daemon 的进程名是 other-node，不是 lead-agent/);
     const pids = JSON.parse(readFileSync(join(runtime, "pids.json"), "utf8")) as { supervisor: number; daemon: number };

@@ -163,7 +163,8 @@ describe("unpackRuntime", () => {
 });
 
 // 没变的部分不重写（设计第 7.5.4 节）：node_modules 共用一份，lead-agent 克隆，只解其余的。
-describe("unpackRuntime re-uses what did not change", () => {
+// 克隆真的跑 /bin/cp -cR（APFS 的 clonefile），GNU cp 没有 -c，所以只在 macOS 上跑。App 也只有 macOS 版（docs/testing.md）。
+describe.runIf(process.platform === "darwin")("unpackRuntime re-uses what did not change", () => {
   const unpack = async (paths: ReturnType<typeof setup>["paths"], dir: string, exec = recordingExec(), o: { switchCurrent?: boolean } = {}) => ({
     exec, result: await unpackRuntime({ bundled: findBundledRuntime(dir)!, paths, execFile: exec.execFile, ...o }),
   });

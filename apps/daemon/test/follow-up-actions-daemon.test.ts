@@ -5,12 +5,12 @@
 //   · steer：排着的第二条按插话送进这一轮，第一条仍按排队排着，先后不变；
 //   · cancel：这一条从 pi 的队列里没了，placement 是 cancelled，Lead 不回答它，另一条照常回答；没有失败卡；
 //   · 带图片的追问放回 pi 的队列时图片还在；
-//   · 这一轮读过外部内容、要单独开一轮的追问插不进这一轮，但可以取消。
+//   · 不是用户本人开的一轮（这里是到点的跟进叫醒的）读过外部内容时，追问要单独开一轮：插不进这一轮，但可以取消。
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import WebSocket from "ws";
 import { CHAT_FOLLOW_UP_ACTIONS_CAPABILITY, UI_ACTION_PERFORMED_KIND } from "@pi-lead-child/protocol";
-import { createPairing, listEvents, openDb, redeemPairing, type Db } from "@pi-lead-child/store";
+import { addLeadFollowUp, createPairing, listEvents, openDb, redeemPairing, type Db } from "@pi-lead-child/store";
 import { updateDesignPreferences } from "@pi-lead-child/engine";
 import { tempDir } from "@pi-lead-child/core/testing";
 import { startDaemon } from "../src/server.js";
@@ -208,13 +208,15 @@ describe("images of a queued follow-up", () => {
 });
 
 describe("a follow-up held for a turn of its own", () => {
+  // 2026-11-03 起（user-placement.ts）：用户本人开的一轮只读了连接、对话的结果时，追问照常排进 pi 的队列。
+  // 要单独开一轮的是别的来历的一轮，所以这一轮由到点的跟进叫醒（和 user-message-external-turn-daemon.test.ts 一样）。
   it("cannot be steered into a round that read external content, and can still be cancelled", async () => {
     const holdA = deferred();
     let read = false;
     const lead = fakePiLead(async (call) => {
       const input = call.inputs.join("\n");
       // 第一次调模型读了一个外部对话：这一轮算读过外部内容。
-      if (input.includes("问题 A")) { read = true; return { tools: ["read_channel_conversation"] }; }
+      if (input.includes("到点看一下 Slack 的 thread")) { read = true; return { tools: ["read_channel_conversation"] }; }
       if (read && call.index === 1) { await holdA.promise; return { say: "A 的回答。" }; }
       if (input.includes("追问 B")) return { say: "不该回答 B。" };
       if (input.includes("追问 D")) return { say: "D 的回答。" };
@@ -224,8 +226,8 @@ describe("a follow-up held for a turn of its own", () => {
     updateDesignPreferences(db, { request: { locale: "zh" }, caller: { kind: "user" } });
     const { send, act, http } = await start(lead);
 
-    await send("问题 A");
-    await vi.waitFor(() => expect(lead.calls).toHaveLength(2));
+    addLeadFollowUp(db, { at: new Date(Date.now() - 1_000), note: "到点看一下 Slack 的 thread" });
+    await vi.waitFor(() => expect(lead.calls).toHaveLength(2), { timeout: 10_000 });
     const b = await send("追问 B", { mode: "followUp" });
     const d = await send("追问 D", { mode: "followUp" });
     // 两条都等这一轮结束后单独开一轮，不在 pi 的队列里。

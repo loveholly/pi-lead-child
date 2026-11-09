@@ -1,5 +1,5 @@
 // Lead 的动手工具（lead-tools-and-routing spec D5、D8）：真实的 pi 会话，加载 Lead 的凭证防护、hands 扩展和 pi 内置的
-// codemode，模型是 pi-ai 的假模型，按脚本调用工具。沙箱是真的，只在 macOS 和 Linux 上跑。
+// codemode，模型是 pi-ai 的假模型，按脚本调用工具。沙箱是真的，只在 macOS 上跑。
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 
 import { join } from "node:path";
@@ -17,7 +17,9 @@ import {
 } from "../src/hands.js";
 import type { LeadTurnOrigin } from "../src/turn-origin.js";
 
-const supported = process.platform === "darwin" || process.platform === "linux";
+// 用真的沙箱，只在 macOS 上跑。Linux 上的沙箱要 bubblewrap、socat 和 ripgrep，CI 的 ubuntu runner 不装它们，
+// 产品也只有 macOS 版，所以在别的系统上跳过（docs/testing.md 的「只在 macOS 上跑的测试」）。
+const supported = process.platform === "darwin";
 type Step = Parameters<ReturnType<typeof fauxProvider>["setResponses"]>[0][number];
 const call = (name: string, args: Record<string, unknown>): Step =>
   fauxAssistantMessage([fauxToolCall(name, args as never)], { stopReason: "toolUse" });

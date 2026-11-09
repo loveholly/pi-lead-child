@@ -8,7 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import WebSocket from "ws";
 import { Value } from "typebox/value";
 import { MODEL_SETTINGS_RESOURCE, ModelSettingsDtoSchema, serviceUrlHost } from "@pi-lead-child/protocol";
-import { LegacyModelSettingsResponseSchema } from "../../../packages/client/test/legacyModelSettingsSchema.ts";
+import { LegacyModelSettingsResponseSchema } from "@pi-lead-child/client/testing";
 import { createPairing, openDb, redeemPairing, type Db } from "@pi-lead-child/store";
 import { tempDir } from "@pi-lead-child/core/testing";
 import { fileKeySource, lazyVault } from "@pi-lead-child/connections";
@@ -16,6 +16,7 @@ import { loadLeadModelConfig, registerLeadProviders } from "@pi-lead-child/lead"
 import { providerSecretName } from "../src/model-settings.js";
 import { SealedSecrets } from "../src/sealed-secrets.js";
 import { startDaemon } from "../src/server.js";
+import { memoryHarness } from "./memory-fakes.js";
 
 let dir: string;
 let dbPath: string;
@@ -207,7 +208,16 @@ describe("settings → models through the gateway", () => {
     await new Promise<void>((resolve) => gateway.listen(0, "127.0.0.1", resolve));
     try {
       const logs: string[] = [];
-      daemon = await startDaemon({ dataDir: dir, dbPath, sessionFactory: stubLead().factory as never, log: (line) => logs.push(line), notifyDesktop: () => {} });
+      // 「测试直觉」由记忆服务（MemoryController）发请求；daemon 不托管记忆服务时回 409 unavailable。真的 daemon（main.ts）
+      // 总是托管它。这里用 memory-fakes 的替身（launchd、Hindsight 的 /health），发往网关的请求走真的 fetch，到上面的假网关。
+      const harness = memoryHarness(dir);
+      const fakeFetch = harness.hooks.fetch!;
+      const routedFetch = ((input: string | URL | Request, init?: RequestInit) =>
+        (String(input).startsWith(`http://127.0.0.1:${(gateway.address() as { port: number }).port}/`) ? fetch(input, init) : fakeFetch(input, init))) as typeof fetch;
+      daemon = await startDaemon({
+        dataDir: dir, dbPath, sessionFactory: stubLead().factory as never, log: (line) => logs.push(line), notifyDesktop: () => {},
+        manageMemory: { ...harness.hooks, fetch: routedFetch },
+      });
       const issued = redeemPairing(db, createPairing(db, { name: "app", kind: "companion", scopes: ["chat", "tickets:view", "tickets:create"] }).code);
       const http = async (method: string, path: string, body?: unknown) => {
         const response = await fetch(`http://127.0.0.1:${daemon!.pairedPort}${path}`, {

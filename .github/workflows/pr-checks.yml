@@ -1,0 +1,262 @@
+# 向 master 提 pull request 时跑的检查，fork 来的 PR 也跑。命令取自 npm run verify。
+# 所有 job 都在 ubuntu-24.04 上，互相不等，同时开跑：
+# - lint-and-types：oxlint 和三次类型检查（根、packages/components、apps/companion）。
+# - ui-tests：packages/components 的测试，和 apps/companion 的测试分成 2 片（--shard）。
+# - root-tests：根 vitest（后端各包、apps/daemon、apps/cli、scripts/、desktop/）分成 4 片。每片里按文件并发跑：
+#   根测试缺省就并发；只有在受限沙箱里（有 SANDBOX_RUNTIME 等变量）或者设了 PLC_TEST_SERIAL=1 时串行，见 docs/testing.md。
+# - root-tests-report、companion-tests-report：把各片的 blob 报告合成一份（vitest --merge-reports），
+#   任何一片失败或者没有交出报告，这个 job 就失败。
+#
+# 根测试以前跑在 macos-15 上。macOS runner 要排队（两次没排到），也慢。产品只有 macOS 版，但大多数测试不依赖 macOS。
+# 真的依赖 macOS 的测试在别的系统上跳过（describe.runIf / it.skipIf），只在发版前的 Mac 上跑。清单见 docs/testing.md，
+# 现在是这些：
+#   packages/engine/test/sandbox-bash.test.ts        真的沙箱（sandbox-exec）
+#   packages/engine/test/sandbox-extension.test.ts   真的沙箱（sandbox-exec）
+#   packages/engine/test/sandbox-secrets.test.ts     真的沙箱（sandbox-exec）
+#   packages/lead/test/hands.test.ts                 真的沙箱（sandbox-exec）里的 Lead bash
+#   packages/core/test/sandbox-policy.test.ts        sandboxTrustEnv 一组：钥匙串里的证书（security）
+#   apps/daemon/test/vault-key.test.ts               the daemon's Keychain key 一组：钥匙串
+#   scripts/desktop/test/agent-bundle.test.ts        两条：codesign
+#   scripts/desktop/test/smoke.test.ts               smokeRuntime 里查进程名的三条：ps -o comm= 给出可执行文件的路径
+#   desktop/test/runtime-bundle.test.ts              unpackRuntime re-uses what did not change 一组：cp -c（APFS 克隆）
+# Linux 上的沙箱要 bubblewrap、socat 和 ripgrep，产品不在 Linux 上跑，所以不装它们，直接跳过。
+#
+# - lint 全仓库只用根目录的 .oxlintrc.json。npm run lint 从仓库根跑，apps/companion 的文件也在里面，所以不再单独跑
+#   companion 的 lint（它的 lint 脚本也是用同一份配置的 oxlint）。expo lint 写死了 ESLint，换不成 oxlint。
+# - 用 pull_request，不用 pull_request_target：fork 的代码拿不到写权限，也拿不到 secret。这里不读任何 secret。
+# - 只有 contents: read；第三方 action 固定到 commit SHA；不用 ${{ }} 把 PR 的内容拼进脚本。
+# - 同一个 PR 推了新提交，旧的那次运行会被取消。
+name: pr-checks
+
+on:
+  pull_request:
+    branches: [master]
+
+permissions:
+  contents: read
+
+# 界面的日期和时间测试按北京时间写（用例里的 15:43、18:00 都是 UTC+8）。runner 默认 UTC，不固定时区会差 8 小时。
+env:
+  TZ: Asia/Shanghai
+
+concurrency:
+  group: pr-checks-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  lint-and-types:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out the pull request
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node (the same version as the runtime bundle)
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: desktop/node-version
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint (oxlint)
+        run: npm run lint
+
+      - name: Type-check the root project
+        run: npm run typecheck
+
+      - name: Type-check packages/components
+        run: npm run typecheck:components
+
+      - name: Type-check apps/companion
+        run: npm run typecheck:companion
+
+  ui-tests:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2]
+    steps:
+      - name: Check out the pull request
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node (the same version as the runtime bundle)
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: desktop/node-version
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      # components 的测试只有几十秒，不分片，放在第 1 片里。
+      - name: Test packages/components
+        if: matrix.shard == 1
+        run: npm run test:components
+
+      # 直接调 vitest。经 npm run test:companion 传参数会多一层 npm（npm -w … test），那一层把 --reporter、--shard
+      # 当成 npm 自己的配置吃掉：每片都跑全部文件，也不写 blob 报告（2026-11-09 第一次 CI）。
+      - name: Test apps/companion (one shard)
+        working-directory: apps/companion
+        env:
+          SHARD: ${{ matrix.shard }}
+        run: npx vitest run --reporter=default --reporter=blob --shard="$SHARD/2"
+
+      - name: Keep the shard's report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: companion-blob-${{ matrix.shard }}
+          path: apps/companion/.vitest-reports
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 1
+
+  companion-tests-report:
+    if: ${{ !cancelled() }}
+    needs: [ui-tests]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out the pull request
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node (the same version as the runtime bundle)
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: desktop/node-version
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Fetch the shard reports
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: companion-blob-*
+          path: apps/companion/.vitest-reports
+          merge-multiple: true
+
+      - name: Merge the reports into one summary
+        working-directory: apps/companion
+        run: npx vitest run --merge-reports --reporter=default
+
+      # --merge-reports 只看交上来的报告。某一片在测试以前就失败（例如 npm ci 失败）时没有报告，这里要单独查。
+      - name: Fail when a shard failed
+        env:
+          SHARDS: ${{ needs.ui-tests.result }}
+        run: test "$SHARDS" = success
+
+  root-tests:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    steps:
+      # 测试会在临时目录下建 unix socket，路径要短。也不能是 /tmp 本身：engine 有的测试把 session 目录往上两级
+      # 当数据目录，TMPDIR=/tmp 时那是 /，写 /runtime-events 失败（EACCES）。RUNNER_TEMP 是 /home/runner/work/_temp。
+      # 不能写成 job 级的 env: TMPDIR: ${{ runner.temp }}：job 级 env 里没有 runner 上下文，整个 workflow 文件会无效。
+      - name: Use the runner's temp directory as TMPDIR
+        run: echo "TMPDIR=$RUNNER_TEMP" >> "$GITHUB_ENV"
+
+      - name: Check out the pull request
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node (the same version as the runtime bundle)
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: desktop/node-version
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      # 有的测试会在临时仓库里 git commit。runner 上的 git 没有身份，这里给一个假的；测试自己设的身份照样优先。
+      - name: Give git an identity for the tests that commit
+        run: |
+          git config --global user.name "pr-checks"
+          git config --global user.email "pr-checks@example.com"
+
+      # 沙箱外执行命令（run_on_host、免沙箱的 bash）用 /bin/zsh -lc，和 macOS 上一样。ubuntu runner 没有 zsh。
+      - name: Install zsh for the host-command tests
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends zsh
+
+      # runtime 目录按可执行文件在不在判断 codex、claude 能不能用（packages/runtime 的 locateExecutable）。
+      # 开发机上装着这两个 CLI，runner 上没有，点名 codex 的测试就退回 pi，报 "child runtime 'pi' is not configured"。
+      # 这些测试注入自己的假 runtime 和模型目录，不运行 CLI。这里放两个占位：在 PATH 上能找到，真被运行时报错退出。
+      # 占位放在 /opt 下，不放在 RUNNER_TEMP（也就是 TMPDIR）和 HOME 下：Lead 的建工单工具说明里写着 CLI 的完整路径，
+      # 有的测试把 HOME 设成 TMPDIR，再检查发给模型的文字里没有 HOME 下的路径（lead-self-knowledge.test.ts scenario 10）。
+      - name: Put placeholder codex and claude executables on PATH
+        run: |
+          sudo mkdir -p /opt/placeholder-cli
+          sudo chown "$(id -u):$(id -g)" /opt/placeholder-cli
+          for name in codex claude; do
+            printf '#!/bin/sh\necho "%s is a placeholder on CI; the tests must not run the real CLI" >&2\nexit 1\n' "$name" > "/opt/placeholder-cli/$name"
+            chmod +x "/opt/placeholder-cli/$name"
+          done
+          echo "/opt/placeholder-cli" >> "$GITHUB_PATH"
+
+      - name: Test the root project (one shard, files in parallel)
+        env:
+          SHARD: ${{ matrix.shard }}
+        run: npm test -- --reporter=default --reporter=blob --shard="$SHARD/4"
+
+      - name: Keep the shard's report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: root-blob-${{ matrix.shard }}
+          path: .vitest-reports
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 1
+
+  root-tests-report:
+    if: ${{ !cancelled() }}
+    needs: [root-tests]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out the pull request
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node (the same version as the runtime bundle)
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: desktop/node-version
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Fetch the shard reports
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: root-blob-*
+          path: .vitest-reports
+          merge-multiple: true
+
+      - name: Merge the reports into one summary
+        run: npx vitest run --merge-reports --reporter=default
+
+      - name: Fail when a shard failed
+        env:
+          SHARDS: ${{ needs.root-tests.result }}
+        run: test "$SHARDS" = success
