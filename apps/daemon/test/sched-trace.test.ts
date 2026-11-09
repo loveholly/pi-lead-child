@@ -22,6 +22,29 @@ const LOG = [
 ];
 
 describe("sched trace", () => {
+  // 空闲车道（P4）的作业：按作业编号查，连同它开的那个单元（整理笔记那一轮）一起列出来。
+  it("traces an idle-lane job with the unit it opened", () => {
+    expect(SCHED_TRACE_ID.test("idle_precipitate_mw9asd3m01")).toBe(true);
+    expect(SCHED_TRACE_ID.test("idle_x; rm -rf /")).toBe(false);
+    const lines = [
+      "[2026-11-09T06:00:00.000Z] [sched] idle.start job=precipitate id=idle_precipitate_k1 ratio=0.75 line=0.7 idleMs=15000 yields=0",
+      "[2026-11-09T06:00:00.010Z] [sched] unit.start unit=unit_cc3 lane=L4 turn=- source=system origin=system:precipitate deadlineMs=-",
+      "[2026-11-09T06:00:04.000Z] [sched] idle.yield job=precipitate id=idle_precipitate_k1 unit=unit_cc3 by=L0 what=user action=abort_at_yield_point runMs=3990",
+      "[2026-11-09T06:00:04.001Z] [sched] decide unit=unit_cc3 lane=L4 turn=- decision=idle_yield by=L0 steps=0",
+      "[2026-11-09T06:00:04.300Z] [sched] unit.end unit=unit_cc3 lane=L4 turn=- outcome=yielded ms=4290 steps=1 toolCalls=0 aborts=idle_yield:L0 redLine=-",
+      "[2026-11-09T06:00:04.310Z] [sched] idle.yielded job=precipitate id=idle_precipitate_k1 unit=unit_cc3 outcome=yielded ms=4310 yields=1",
+      "[2026-11-09T06:00:05.000Z] [sched] unit.start unit=unit_dd4 lane=L0 turn=turn_7 source=user origin=- deadlineMs=10000",
+    ];
+    const sources = { logLines: lines, sessionEntries: [], events: [] };
+    const units = unitsOf("idle_precipitate_k1", sources);
+    expect(units).toEqual(["idle_precipitate_k1", "unit_cc3"]);
+    const text = formatSchedTrace(schedTrace("idle_precipitate_k1", units, sources)).join("\n");
+    expect(text).toContain("idle.start job=precipitate");
+    expect(text).toContain("decision=idle_yield by=L0");
+    expect(text).toContain("outcome=yielded");
+    expect(text).not.toContain("unit_dd4");
+  });
+
   it("accepts unit and turn ids only", () => {
     expect(SCHED_TRACE_ID.test("unit_mw9asd3m002")).toBe(true);
     expect(SCHED_TRACE_ID.test("turn_575d99e3-b509-4ef5")).toBe(true);

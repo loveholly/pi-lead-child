@@ -32,7 +32,8 @@ afterEach(async () => {
 });
 
 // 不调用模型的 Lead。answer 按 prompt 决定说什么；tool 为真时先调一次工具。
-// contextFull 为真时，上下文水位一直在 90%，每一轮之后 daemon 都会安排一次整理笔记。
+// contextFull 为真时，第一次 prompt 以后上下文水位在 90%（之前 10%）：用户的一轮之后 daemon 安排一次整理笔记。
+// 空闲车道（lead-scheduler P4）在 Lead 空闲时整理：开头就 90% 的话，daemon 一起来就会整理，不是这里要测的。
 function stubLead(
   // tool：调一次工具（true 是 save_note，字符串是工具名）。error：这一轮的模型调用以这个错误结束。
   answer: (prompt: string) => { text: string; tool?: boolean | string; before?: string; error?: string },
@@ -44,6 +45,7 @@ function stubLead(
   const toolTurnIds: Array<string | null> = [];
   let deps: { currentTurnId?: () => string | null } = {};
   const emit = (event: unknown) => { for (const listener of listeners) listener(event); };
+  const usage = { input: 10, output: 0, cacheRead: 0 };
   const factory = async (args: typeof deps) => {
     deps = args;
     return {
@@ -52,11 +54,12 @@ function stubLead(
       sessionId: "stub-session",
       ...(options.contextFull ? {
         model: { contextWindow: 100 },
-        agent: { state: { messages: [{ role: "assistant", usage: { input: 90, output: 0, cacheRead: 0 } }] } },
+        agent: { state: { messages: [{ role: "assistant", usage }] } },
       } : {}),
       subscribe(listener: (event: any) => void) { listeners.push(listener); return () => {}; },
       async prompt(message: string) {
         prompts.push(message);
+        usage.input = 90;
         const { text, tool, before, error } = answer(message);
         if (before) emit({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: before } });
         if (tool) {
@@ -112,6 +115,9 @@ function attentionItem() {
 }
 
 describe("note keeping", () => {
+  // 空闲车道（lead-scheduler P4）缺省等 Lead 空闲 15 秒再整理；这里不等。
+  beforeEach(() => { vi.stubEnv("PLC_LEAD_IDLE_GRACE_MS", "0"); });
+
   it("posts nothing when Lead only saves notes and replies NO_REPLY", async () => {
     const lead = stubLead((prompt) => prompt.includes("沉淀检查")
       ? { text: "NO_REPLY", tool: true }

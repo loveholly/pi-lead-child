@@ -17,6 +17,8 @@ let db: Db;
 let daemon: Awaited<ReturnType<typeof startDaemon>> | null = null;
 
 beforeEach(() => {
+  // 空闲车道缺省等 Lead 空闲 15 秒再整理笔记；这里不等。
+  vi.stubEnv("PLC_LEAD_IDLE_GRACE_MS", "0");
   dir = tempDir("plc-lead-compaction-");
   dbPath = join(dir, "plc.db");
   db = openDb(dbPath);
@@ -48,13 +50,16 @@ function stubLead(plan: Array<Compaction | null>, options: { contextFull?: boole
   let endCompaction: (() => void) | null = null;
   const aborts: number[] = [];
   let factoryArgs: any = null;
+  // 第一次 prompt 以后上下文水位才到 90%：空闲车道（lead-scheduler P4）在 Lead 空闲时整理笔记，开头就 90% 的话
+  // daemon 一起来就会整理。
+  const usage = { input: 10, output: 0, cacheRead: 0 };
   const factory = async (args: any) => (factoryArgs = args, {
     modelName: "stub/model",
     session: {
       sessionId: "stub-session",
       ...(options.contextFull ? {
         model: { contextWindow: 100 },
-        agent: { state: { messages: [{ role: "assistant", usage: { input: 90, output: 0, cacheRead: 0 } }] } },
+        agent: { state: { messages: [{ role: "assistant", usage }] } },
       } : {}),
       subscribe(listener: (event: any) => void) { listeners.push(listener); return () => {}; },
       abortCompaction() {
@@ -63,6 +68,7 @@ function stubLead(plan: Array<Compaction | null>, options: { contextFull?: boole
       },
       async prompt(message: string) {
         prompts.push(message);
+        usage.input = 90;
         if (message.includes("沉淀检查")) {
           say("NO_REPLY");
           return;
