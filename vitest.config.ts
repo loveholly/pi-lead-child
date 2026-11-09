@@ -16,10 +16,12 @@ import { configDefaults, defineConfig } from "vitest/config";
 // 拿这个换掉随机红是划算的。
 // 另外，本仓库有大量测试会同时启动真实 HTTP/WebSocket/Unix socket server。受限执行环境下
 // 文件级并发会把这些 listener 放大成 `listen EPERM` 风暴，导致全量 `npm test` 红、单文件
-// 复跑绿。所以本机缺省串行跑根测试，牺牲一点墙钟时间，换来可复现的门禁结果。
+// 复跑绿。所以在受限沙箱里串行跑根测试，牺牲一点墙钟时间，换来可复现的门禁结果。
 //
-// CI（GitHub Actions 设了 CI=true）没有这个限制，按文件并发跑，每个 worker 是一个子进程（pool: forks）。
-// 本机想并发时设 PLC_TEST_PARALLEL=1；在 CI 上想串行时设 PLC_TEST_PARALLEL=0。见 docs/testing.md。
+// 其余地方（本机终端、CI）按文件并发跑，每个 worker 是一个子进程（pool: forks）。见 docs/testing.md。
+// - 认沙箱看环境变量：sandbox-runtime（Claude Code 和 PLC 执行器的沙箱）给沙箱里的进程设 SANDBOX_RUNTIME=1
+//   和 SRT_SSH_PROXY_COMMAND。有其中一个就串行（2026-11-09，Fairy 定：本机默认并发，沙箱里自动串行）。
+// - PLC_TEST_SERIAL=1 强制串行，例如排查一个只在并发时出现的失败。
 // 用 forks，不用 threads：vitest.setup.ts 的孤儿进程检查按进程认归属（看 process.pid 的子孙）。threads 下所有文件
 // 同在一个进程里，检查会把同时在跑的别的文件启动的进程算到这个文件头上。
 //
@@ -73,8 +75,9 @@ const SHARED_FILES = SHARED_PACKAGES.flatMap((dir) => readdirSync(join(ROOT, dir
   .map((file) => `${dir}/test/${file.split("\\").join("/")}`))
   .filter((file) => !STATEFUL.test(readFileSync(join(ROOT, file), "utf8")));
 
-const parallelSwitch = process.env.PLC_TEST_PARALLEL;
-const parallel = parallelSwitch === undefined || parallelSwitch === "" ? Boolean(process.env.CI) : parallelSwitch !== "0";
+const SANDBOX_VARIABLES = ["SANDBOX_RUNTIME", "SRT_SSH_PROXY_COMMAND"];
+const inSandbox = SANDBOX_VARIABLES.some((name) => Boolean(process.env[name]));
+const parallel = process.env.PLC_TEST_SERIAL !== "1" && !inSandbox;
 
 export default defineConfig({
   test: {

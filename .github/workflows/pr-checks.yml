@@ -3,7 +3,7 @@
 # - lint-and-types：oxlint 和三次类型检查（根、packages/components、apps/companion）。
 # - ui-tests：packages/components 的测试，和 apps/companion 的测试分成 2 片（--shard）。
 # - root-tests：根 vitest（后端各包、apps/daemon、apps/cli、scripts/、desktop/）分成 4 片。每片里按文件并发跑：
-#   vitest.config.ts 看到 CI=true 就打开 fileParallelism（本机缺省仍是串行，见 docs/testing.md）。
+#   根测试缺省就并发；只有在受限沙箱里（有 SANDBOX_RUNTIME 等变量）或者设了 PLC_TEST_SERIAL=1 时串行，见 docs/testing.md。
 # - root-tests-report、companion-tests-report：把各片的 blob 报告合成一份（vitest --merge-reports），
 #   任何一片失败或者没有交出报告，这个 job 就失败。
 #

@@ -10,23 +10,19 @@
 | `npm run test:companion` | `apps/companion` | `apps/companion/vitest.config.ts` |
 | `npm run test:components` | `packages/components` | `packages/components/vitest.config.ts` |
 
-## 根测试：本机串行，CI 并发
+## 根测试：并发跑，沙箱里串行
 
-本机缺省一次只跑一个测试文件。很多测试会起真实的 HTTP、WebSocket 和 Unix socket server。受限的沙箱（例如 PLC 的执行器）不允许监听 Unix socket，并发时会出现一片 `listen EPERM`。串行跑时，结果可以复现。
+缺省按文件并发跑，本机终端和 CI 都一样。每个 worker 是一个子进程（`pool: "forks"`）。
 
-CI 上（环境变量 `CI=true`）按文件并发跑。每个 worker 是一个子进程（`pool: "forks"`）。
+在受限的沙箱里（例如 Claude Code 或 PLC 执行器的沙箱）自动改成一次只跑一个文件。很多测试会起真实的 HTTP、WebSocket 和 Unix socket server。沙箱不允许监听 Unix socket，并发时会出现一片 `listen EPERM`。串行跑时，结果可以复现。
 
-开关是环境变量 `PLC_TEST_PARALLEL`：
+认沙箱看环境变量：有 `SANDBOX_RUNTIME` 或 `SRT_SSH_PROXY_COMMAND` 就串行。sandbox-runtime 给沙箱里的进程设这两个变量。
+
+强制串行，例如排查一个只在并发时出现的失败：
 
 ```sh
-# 本机并发跑（不在受限沙箱里时）
-PLC_TEST_PARALLEL=1 npm test
-
-# 在 CI 上串行跑，例如排查一个只在并发时出现的失败
-PLC_TEST_PARALLEL=0 npm test
+PLC_TEST_SERIAL=1 npm test
 ```
-
-不设这个变量时，有 `CI` 就并发，没有就串行。
 
 根测试分两组（vitest 的 projects）：
 
@@ -75,5 +71,5 @@ Linux 上的沙箱要 bubblewrap、socat 和 ripgrep。产品不在 Linux 上跑
 ## 本机复现一片 CI
 
 ```sh
-CI=true npm test -- --shard=2/4
+npm test -- --shard=2/4
 ```
