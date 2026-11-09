@@ -31,7 +31,8 @@ export function RecordBlock({ title, meta, toggle, children, testID }: RecordBlo
         <Box flex={1} w={1} bg="border" />
       </Column>
       <Column flex={1} minW={0} gap="list-row">
-        <Row items="center" gap="inline-item" minH={18}> {/* 和 Fairy 标记一样高（组件规格） */}
+        {/* 和 Fairy 标记一样高（组件规格） */}
+        <Row items="center" gap="inline-item" minH={18}>
           <Text shrink={1} size="meta" weight="semibold" tone="secondary" numberOfLines={1}>{title}</Text>
           {meta ? <Text flex={1} minW={0} size="meta" tone="muted" numberOfLines={1}>{meta}</Text> : <Box flex={1} />}
           {toggle ? (
