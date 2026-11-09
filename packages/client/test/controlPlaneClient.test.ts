@@ -96,7 +96,7 @@ describe('conversation turns with surfaces', () => {
     const client = new ControlPlaneClient({ fetch: fetcher, credentials });
     await expect(client.getConversationTurns()).resolves.toEqual([]);
     expect(asked).toEqual([
-      'tool_calls,surfaces,placement,reply_actions,images', 'tool_calls,surfaces,placement,reply_actions',
+      'tool_calls,surfaces,placement,reply_actions,images,answer_started', 'tool_calls,surfaces,placement,reply_actions,images', 'tool_calls,surfaces,placement,reply_actions',
       'tool_calls,surfaces,placement', 'tool_calls,surfaces', 'tool_calls',
     ]);
   });
@@ -117,7 +117,7 @@ describe('conversation turns with surfaces', () => {
     const client = new ControlPlaneClient({ fetch: fetcher, credentials });
     await expect(client.getConversationTurns()).resolves.toEqual([]);
     expect(asked).toEqual([
-      'tool_calls,surfaces,placement,reply_actions,images', 'tool_calls,surfaces,placement,reply_actions',
+      'tool_calls,surfaces,placement,reply_actions,images,answer_started', 'tool_calls,surfaces,placement,reply_actions,images', 'tool_calls,surfaces,placement,reply_actions',
       'tool_calls,surfaces,placement', 'tool_calls,surfaces',
     ]);
   });
@@ -143,7 +143,28 @@ describe('conversation turns with surfaces', () => {
     const client = new ControlPlaneClient({ fetch: fetcher, credentials });
     await expect(client.getConversationTurns(77)).resolves.toEqual([turn]);
     expect(asked).toEqual([
-      'tool_calls,surfaces,placement,reply_actions,images', 'tool_calls,surfaces,placement,reply_actions', 'tool_calls,surfaces,placement',
+      'tool_calls,surfaces,placement,reply_actions,images,answer_started', 'tool_calls,surfaces,placement,reply_actions,images', 'tool_calls,surfaces,placement,reply_actions', 'tool_calls,surfaces,placement',
+    ]);
+  });
+
+  // 2026-11-09：Lead 开始回答每一轮的时刻（include=answer_started，会话按它排）。只认识 images 的 daemon 回 400：退回不要它，
+  // 图片照样带着；这一轮的回答按 normalize.ts 的退路排。
+  it('asks for answer starts, and keeps images from a daemon that does not know them', async () => {
+    const credentials = createJsonCredentialStore(new MemoryKeyValueStorage());
+    await credentials.save({ baseUrl: 'http://daemon.test', accessToken: 'secret', binding, lastSeq: 0 });
+    const asked: string[] = [];
+    const fetcher = vi.fn(async (input: string | URL | Request) => {
+      const url = new URL(String(input));
+      asked.push(url.searchParams.get('include') ?? '');
+      if (url.searchParams.get('include')?.includes('answer_started')) {
+        return response({ error: { code: 'invalid_request', message: 'invalid include' } }, 400);
+      }
+      return response({ items: [] });
+    });
+    const client = new ControlPlaneClient({ fetch: fetcher, credentials });
+    await expect(client.getConversationTurns()).resolves.toEqual([]);
+    expect(asked).toEqual([
+      'tool_calls,surfaces,placement,reply_actions,images,answer_started', 'tool_calls,surfaces,placement,reply_actions,images',
     ]);
   });
 
@@ -175,7 +196,7 @@ describe('conversation turns with surfaces', () => {
     await expect(client.getOlderConversationTurns(turnAt('t2', 2), { limit: 30 })).resolves.toEqual({ items: [turnAt('t1', 1)], hasMore: true });
     expect(asked[1]!.searchParams.get('before')).toBe('t2');
     expect(asked[1]!.searchParams.get('limit')).toBe('30');
-    expect(asked[1]!.searchParams.get('include')).toBe('tool_calls,surfaces,placement,reply_actions,images');
+    expect(asked[1]!.searchParams.get('include')).toBe('tool_calls,surfaces,placement,reply_actions,images,answer_started');
   });
 
   // 旧 daemon 不认识 before，回最近的几轮、没有 hasMore：只留比游标更早的，当作没有更早的了。
@@ -189,7 +210,7 @@ describe('conversation turns with surfaces', () => {
     const newer = await turnsClient(() => response({ items: [turnAt('t3', 3)] }));
     await expect(newer.client.getConversationTurnsById(['t3', 't3'])).resolves.toEqual([turnAt('t3', 3)]);
     expect(newer.asked[0]!.searchParams.get('turn_id')).toBe('t3');
-    expect(newer.asked[0]!.searchParams.get('include')).toBe('tool_calls,surfaces,placement,reply_actions,images');
+    expect(newer.asked[0]!.searchParams.get('include')).toBe('tool_calls,surfaces,placement,reply_actions,images,answer_started');
 
     const older = await turnsClient(() => response({ items: [turnAt('t1', 1), turnAt('t2', 2), turnAt('t3', 3)] }));
     await expect(older.client.getConversationTurnsById(['t3', 't1'])).resolves.toEqual([turnAt('t1', 1), turnAt('t3', 3)]);
@@ -1532,7 +1553,7 @@ describe('a link that may be dead', () => {
     const client = new ControlPlaneClient({ fetch: fetcher as unknown as typeof fetch, credentials });
     await client.getConversationTurns();
     await expect(client.getChatImage('img_1')).resolves.toEqual({ id: 'img_1', mimeType: 'image/png', data: 'iVBORw0KGgo=' });
-    expect(asked).toEqual(['tool_calls,surfaces,placement,reply_actions,images']);
+    expect(asked).toEqual(['tool_calls,surfaces,placement,reply_actions,images,answer_started']);
   });
 
   it('keeps the client message id on the HTTP fallback', async () => {
