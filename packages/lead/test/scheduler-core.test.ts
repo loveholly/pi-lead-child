@@ -149,15 +149,17 @@ describe("the yellow light", () => {
 });
 
 describe("the red line", () => {
-  it("reminds a second time and does not stop when nobody waits on a system unit", () => {
+  // P2（spec 待定 9，用户 2026-11-09 的决定 10）：到了就地预算，没有人在等也交出去。以前只再提醒一次，不停。
+  it("stops a system unit at the budget even when nobody waits", () => {
     const m = machine();
     openUnit(m, "system", "system:blocker");
     m.advance(150_000);
     m.send({ type: "budget.check", facts: facts() });
     m.send({ type: "budget.check", facts: facts() });
-    expect(m.of("remind.second")).toHaveLength(1);
-    expect(m.of("abort")).toEqual([]);
-    expect(m.logs().some((line) => line.includes("decision=red_line_remind"))).toBe(true);
+    expect(m.of("remind.second")).toEqual([]);
+    expect(m.of("abort")).toEqual([{ type: "abort", reason: { kind: "budget" } }]);
+    expect(redLinePhase(m.state)).toBe("aborting");
+    expect(m.logs().some((line) => line.includes("decision=red_line_stop") && line.includes("waiting=none"))).toBe(true);
   });
 
   it("stops a system unit once someone starts to wait", () => {

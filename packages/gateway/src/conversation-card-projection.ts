@@ -44,6 +44,8 @@ const TOOL_LABELS: Record<string, string> = {
   create_reminder: "Create reminder",
   spawn_child: "Spawn child",
   recover_ticket_run: "Recover run",
+  // Lead 交接（lead-scheduler spec H4）：建单和派出合成一次调用。工单号只在结果里。
+  hand_off: "Hand off",
 };
 
 const ITEM_TARGETED_TOOLS = new Set([
@@ -125,8 +127,8 @@ function itemIdFromEvent(
   toolName: string,
   state: ItemOperationState,
 ): number | undefined {
-  // 建单类工具在调用时还没有 item id，只能从结果文本里回捞（spec §8 拆分后有两个入口）。
-  if (toolName === "create_task" || toolName === "create_reminder") {
+  // 建单类工具在调用时还没有 item id，只能从结果文本里回捞（spec §8 拆分后有两个入口；交接的 hand_off 也是）。
+  if (toolName === "create_task" || toolName === "create_reminder" || toolName === "hand_off") {
     return state === "completed"
       ? itemIdFromResult(event.payload.result)
       : undefined;
@@ -160,6 +162,7 @@ function operationDetail(name: string, state: ItemOperationState, itemId: number
   if (name === "create_task") return `Created task #${itemId}`;
   if (name === "create_reminder") return `Created reminder #${itemId}`;
   if (name === "spawn_child") return `Child started for item #${itemId}`;
+  if (name === "hand_off") return `Handed off to item #${itemId}`;
   if (name === "recover_ticket_run") return `Run recovered for item #${itemId}`;
   return "Operation completed";
 }

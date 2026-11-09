@@ -95,6 +95,9 @@ export const INTERNAL_TEXT_TOOLS: ReadonlySet<string> = new Set([
   "dispatch_agent_task", "reply_to_source",
   // 改选交接说明里的一句（自动代你处理方案 B，D1）：结果是用户写的句子和重算的上限，没有外部的原文。
   "repick_situation",
+  // 交接（lead-scheduler spec P2）：hand_off 的结果是建了哪张单、交接包多大。resume_unit 的结果是挂起时存下的交接包，
+  // 是账本记录；包里外部工具的结果不放原文（handoff-package.ts），所以不算。
+  "hand_off", "resume_unit",
 ]);
 
 /** 这个工具的输出算不算外部内容。没有声明的（例如以后加的）按外部内容算。 */

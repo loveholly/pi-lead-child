@@ -16,6 +16,13 @@
 // 只有 L0 的等待（用户本人的消息）算数：外部消息只排队，不让这个单元停下、不让 Lead 先去回他们。L0 单元本身就是
 // 用户在等，所以过了就地预算一定停下，不看用户的消息有没有文字。
 //
+// P2「交接」（spec H1、H10，用户 2026-11-09 的决定 10）：
+//   · 到了就地预算，没有人在等也交出去（待定 9）：Lead 是常驻的，下一条输入随时会来。以前没有人在等时只再提醒一次。
+//   · 让出点（D3、D4）：一步的工具结果回来以后、下一次模型请求之前（yield.check），用掉的时间加上一步的 p90 会超过就地预算时，
+//     在这里就停下，不再开一步做不完的。
+//   · 交接窗口里 Lead 调了 hand_off（handoff.made）：交出去了。窗口到时或者这一段结束时还没交，单元挂起（unit.suspend）：
+//     交接包存下来，下一轮由 Lead 决定，系统不替它派出子 agent。
+//
 // 所有决定都写一条 [sched] 日志（D12）：决定了什么、为什么、依据的数字、单元编号和 turn id。不写消息原文。
 import type { WaitingConversation } from "../overflow.js";
 import { abortReasonText, type LeadAbortReason } from "./controller.js";
@@ -92,6 +99,8 @@ export interface UnitState {
   tools: Record<string, ToolInFlight>;
   // 控制层的段号：每次中止以后在同一个单元里再送一次 prompt（红线的交接）时加一。
   segment: number;
+  // 这个单元用 hand_off 交出去了：交接包编号（P2）。
+  handedOff: string | null;
 }
 
 export interface SchedulerState {
@@ -129,7 +138,7 @@ export type SchedulerEvent =
   | { type: "budget.check"; facts: BudgetFacts }
   | { type: "queue.check"; facts: BudgetFacts }
   | { type: "write.recheck"; canAbort: boolean }
-  | { type: "budget.restart"; why: "follow_up" | "steer_after_handoff" }
+  | { type: "budget.restart"; why: "follow_up" | "steer_after_handoff" | "resume" }
   | { type: "prompt.returned"; limits: SchedulerLimits }
   | { type: "handoff.timeout" }
   | { type: "handoff.done" }
@@ -139,10 +148,15 @@ export type SchedulerEvent =
   | { type: "drain.expire" }
   | { type: "starting"; on: boolean }
   // 空闲车道（P4，idle-lane.ts）：L4 单元给更高车道的输入让路。调用方已经等正在跑的写操作做完（D5）。
-  | { type: "idle.yield"; by: Lane };
+  | { type: "idle.yield"; by: Lane }
+  // P2：让出点（一步的工具结果回来以后、下一次模型请求之前）。stepP90Ms：一步的 p90。
+  | { type: "yield.check"; facts: BudgetFacts; stepP90Ms: number }
+  // P2：Lead 用 hand_off 交出去了（packageId 是交接包）。
+  | { type: "handoff.made"; packageId: string; ticketId: number; entry: string };
 
 /** 要写进 events 表和会话文件的调度记录（D12）。payload 里只有编号、数字和种类。 */
-export type SchedulerRecordKind = "unit_started" | "unit_ended" | "decided" | "aborted" | "lane_changed" | "stage_slow";
+export type SchedulerRecordKind = "unit_started" | "unit_ended" | "decided" | "aborted" | "lane_changed" | "stage_slow"
+  | "handed_off" | "suspended" | "resumed";
 
 export type SchedulerEffect =
   | { type: "log"; line: string }
@@ -160,7 +174,9 @@ export type SchedulerEffect =
   // 写操作还在跑：afterMs 以后再看一次（write.recheck）。
   | { type: "redline.recheck"; afterMs: number }
   // 红线中断以后这一次 prompt 返回了：在同一个单元里送红线消息，并在 timeoutMs 以后发 handoff.timeout。
-  | { type: "redline.handoff"; elapsedMs: number; waiting: WaitingEntry[]; timeoutMs: number };
+  | { type: "redline.handoff"; elapsedMs: number; waiting: WaitingEntry[]; timeoutMs: number }
+  // P2：把这个单元挂起（H10）：交接包存下来，不需要模型调用。
+  | { type: "unit.suspend"; reason: "handoff_timeout" | "handoff_skipped" };
 
 export interface SchedulerStep {
   state: SchedulerState;
@@ -217,7 +233,7 @@ export function countedWaiting(unit: Pick<UnitState, "lane">, waiting: readonly 
   return unit.lane === 0 ? waiting.filter((entry) => entry.lane === 0) : [...waiting];
 }
 
-/** 过了就地预算时有没有人在等：L0 单元本身就是用户在等。 */
+/** 过了就地预算时有没有人在等：L0 单元本身就是用户在等。只用来写日志：P2 起没有人在等也停下（待定 9）。 */
 function someoneWaiting(unit: Pick<UnitState, "lane">, counted: readonly WaitingEntry[]): boolean {
   return unit.lane === 0 || counted.length > 0;
 }
@@ -280,32 +296,40 @@ function checkBudget(state: SchedulerState, facts: BudgetFacts, now: number): Sc
   }
   const elapsed = now - startedAt;
   if (elapsed < limits.budgetMs) return { state: withUnit(state, unit), effects };
+  const stopped = redLineStop(withUnit(state, unit), facts, now, { decision: "red_line_stop", elapsedMs: elapsed });
+  return { state: stopped.state, effects: [...effects, ...stopped.effects] };
+}
+
+/**
+ * 停下这一轮、请 Lead 交接（红线）。P2 起没有人在等也停下（待定 9）：日志里 waiting=none 照实写。
+ * decision 是 red_line_stop（就地预算到了）或 yield_budget（让出点上算出再做一步会超过预算）。
+ */
+function redLineStop(
+  state: SchedulerState, facts: BudgetFacts, now: number, why: { decision: "red_line_stop" | "yield_budget"; elapsedMs: number; stepP90Ms?: number },
+): SchedulerStep {
+  const effects: SchedulerEffect[] = [];
+  const { limits } = facts;
+  const elapsed = why.elapsedMs;
+  let unit = state.unit!;
   const all = facts.waiting();
   const counted = countedWaiting(unit, all);
   const held = all.filter((entry) => !counted.includes(entry));
-  if (!someoneWaiting(unit, counted)) {
-    if (unit.secondReminded) return { state: withUnit(state, unit), effects };
-    unit = { ...unit, secondReminded: true };
-    effects.push({ type: "log", line: `lead red line: ${Math.round(elapsed / 1_000)}s and nobody is waiting; reminding Lead again` });
-    effects.push({ type: "log", line: schedulerLine("decide", {
-      ...unitFields(unit), decision: "red_line_remind", elapsedMs: elapsed, budgetMs: limits.budgetMs, waiting: "none",
-    }) });
-    effects.push({ type: "record", kind: "decided", payload: { unitId: unit.id, turnId: unit.turnId, lane: laneName(unit.lane), decision: "red_line_remind", elapsedMs: elapsed, budgetMs: limits.budgetMs } });
-    effects.push({ type: "remind.second", elapsedMs: elapsed });
-    return { state: withUnit(state, unit), effects };
-  }
+  const alone = !someoneWaiting(unit, counted);
   unit = {
     ...unit,
     redLine: { phase: "stopping", waiting: counted, writeDeadline: now + limits.writeGraceMs, waitingFor: null, stoppedAt: now },
   };
-  effects.push({ type: "log", line: `lead red line: ${Math.round(elapsed / 1_000)}s with ${Math.max(counted.length, 1)} conversation(s) waiting; stopping the turn for a hand-off` });
+  effects.push({ type: "log", line: alone
+    ? `lead red line: ${Math.round(elapsed / 1_000)}s and nobody is waiting; stopping the turn for a hand-off`
+    : `lead red line: ${Math.round(elapsed / 1_000)}s with ${Math.max(counted.length, 1)} conversation(s) waiting; stopping the turn for a hand-off` });
   effects.push({ type: "log", line: schedulerLine("decide", {
-    ...unitFields(unit), decision: "red_line_stop", elapsedMs: elapsed, budgetMs: limits.budgetMs,
-    waiting: unit.lane === 0 && !counted.length ? "L0:unit" : waitingField(counted),
+    ...unitFields(unit), decision: why.decision, elapsedMs: elapsed, budgetMs: limits.budgetMs,
+    ...(why.stepP90Ms !== undefined ? { stepP90Ms: why.stepP90Ms } : {}),
+    waiting: alone ? "none" : unit.lane === 0 && !counted.length ? "L0:unit" : waitingField(counted),
     ...(held.length ? { queued: waitingField(held) } : {}),
   }) });
   effects.push({ type: "record", kind: "decided", payload: {
-    unitId: unit.id, turnId: unit.turnId, lane: laneName(unit.lane), decision: "red_line_stop", elapsedMs: elapsed,
+    unitId: unit.id, turnId: unit.turnId, lane: laneName(unit.lane), decision: why.decision, elapsedMs: elapsed,
     budgetMs: limits.budgetMs, waiting: counted.length, queued: held.length,
   } });
   const stopped = stopForRedLine(withUnit(state, unit), facts.canAbort, now);
@@ -406,7 +430,7 @@ export function schedulerStep(state: SchedulerState, event: SchedulerEvent, now:
         id: event.id, lane: event.lane, source: event.source, origin: event.origin, turnId: event.turnId,
         openedAt: now, beganAt: null, budgetStartedAt: null, toolCalls: 0, totalToolCalls: 0, steps: 0,
         yellowReminded: false, secondReminded: false, queueNoticed: false, queueHeld: false, redLine: null, aborts: [],
-        tools: {}, segment: 1,
+        tools: {}, segment: 1, handedOff: null,
       };
       const deadline = LANES[event.lane].firstResponseMs;
       return {
@@ -520,17 +544,50 @@ export function schedulerStep(state: SchedulerState, event: SchedulerEvent, now:
     case "handoff.timeout": {
       if (!unit?.redLine || unit.redLine.phase !== "handoff") return { state, effects: [] };
       const reason: LeadAbortReason = { kind: "handoff_timeout" };
+      // 交接窗口到了还没交（H1）：中止这一段，单元挂起（H10）。已经交了（Lead 还在写那句话）时只中止。
+      const suspend: SchedulerEffect[] = unit.handedOff ? [] : [
+        { type: "log", line: schedulerLine("decide", { ...unitFields(unit), decision: "suspend", reason: "handoff_timeout", sinceStopMs: now - unit.redLine.stoppedAt }) },
+        { type: "unit.suspend", reason: "handoff_timeout" },
+      ];
       return {
         state: withUnit(state, { ...unit, redLine: { ...unit.redLine, phase: "closing" }, aborts: [...unit.aborts, reason] }),
-        effects: abortEffects(unit, reason, now),
+        effects: [...abortEffects(unit, reason, now), ...suspend],
       };
     }
     case "handoff.done": {
       if (!unit?.redLine || unit.redLine.phase === "done") return { state, effects: [] };
+      // 交接这一段结束了却没有交（例如只写了一句话，或者用 follow_up 记了一条）：单元挂起（H1、H10）。窗口到时已经挂起过的不再挂。
+      const skipped = !unit.handedOff && unit.redLine.phase === "handoff";
       return {
         state: withUnit(state, { ...unit, redLine: { ...unit.redLine, phase: "done" } }),
-        effects: [{ type: "log", line: schedulerLine("decide", { ...unitFields(unit), decision: "handoff_done", sinceStopMs: now - unit.redLine.stoppedAt }) }],
+        effects: [
+          { type: "log", line: schedulerLine("decide", {
+            ...unitFields(unit), decision: "handoff_done", sinceStopMs: now - unit.redLine.stoppedAt, handedOff: unit.handedOff ?? "-",
+          }) },
+          ...(skipped ? [
+            { type: "log", line: schedulerLine("decide", { ...unitFields(unit), decision: "suspend", reason: "handoff_skipped" }) } as SchedulerEffect,
+            { type: "unit.suspend", reason: "handoff_skipped" } as SchedulerEffect,
+          ] : []),
+        ],
       };
+    }
+    case "handoff.made": {
+      if (!unit || unit.handedOff) return { state, effects: [] };
+      return {
+        state: withUnit(state, { ...unit, handedOff: event.packageId }),
+        effects: [{ type: "log", line: schedulerLine("decide", {
+          ...unitFields(unit), decision: "handed_off", pkg: event.packageId, ticket: event.ticketId, entry: event.entry,
+          elapsedMs: now - (unit.budgetStartedAt ?? unit.openedAt), redLine: unit.redLine?.phase ?? "-",
+        }) }],
+      };
+    }
+    case "yield.check": {
+      // 让出点（D3、D4）：用掉的时间加上一步的 p90 会超过就地预算时，这一步不再开始，在这里停下，请 Lead 交接。
+      if (!unit || state.draining || unit.budgetStartedAt === null || unit.redLine || event.facts.compacting) return { state, effects: [] };
+      const elapsed = now - unit.budgetStartedAt;
+      const { budgetMs } = event.facts.limits;
+      if (elapsed + event.stepP90Ms < budgetMs) return { state, effects: [] };
+      return redLineStop(state, event.facts, now, { decision: "yield_budget", elapsedMs: elapsed, stepP90Ms: event.stepP90Ms });
     }
     case "stop.request": {
       // /stop：Lead 空着（或者会话不能中断）时什么都不做。

@@ -109,9 +109,9 @@ export function overflowReminder(
     ...(extra.context ? [extra.context] : []),
     extra.waiting ? `现在在等你的：${extra.waiting}。` : "现在没有人在等你。",
     "二选一：",
-    "1. 把剩下的部分交给轻子 agent（create_task 的 light=true，再 spawn_child）：把已经查到的东西写进任务说明，子 agent 不用从头再查；"
-      + "然后用一句话告诉用户你派出去了、大约多久有结果。轻子 agent 通常要 3–5 分钟。",
+    "1. 用 hand_off 把剩下的交给子 agent（一次调用；交接包里有你做过的步骤和结果，子 agent 不用从头再查），note 写一句还剩什么；"
+      + "然后用一句话告诉用户你交出去了、大约多久有结果。轻子 agent 通常要 3–5 分钟。",
     "2. 自己接着做：先用一句话告诉用户你在做什么、还要多久，再接着做。",
-    ...(extra.redLine ? [`做到 ${extra.redLine} 时还有人在等，系统会停下这一轮，请你把没做完的交出去。`] : []),
+    ...(extra.redLine ? [`做到 ${extra.redLine} 时，系统会停下这一轮，请你把没做完的交出去。`] : []),
   ].join("\n"));
 }

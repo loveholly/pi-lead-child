@@ -16,6 +16,16 @@
 //
 // 阶段 A 的计时器在主线程上：线程池被占满时主线程是空闲的，计时器照常触发。主线程本身被卡住时由 daemon 的
 // worker 心跳发现（core 的 host-probes.ts）。
+//
+// P2（交接）加了三件事，都由 daemon 通过 hooks 给：
+//   · 交接包里「做过的步骤」：顶层的 tool_execution_start、tool_execution_end 报给 hooks.work（handoffs.ts）。
+//   · 每一步的预算状态（D3）：一步调了工具时，在 turn_end 里发一条不显示的自定义消息（pi.sendMessage，triggerTurn=false）。
+//     pi 在这一步的工具结果都进了会话以后把它接在后面，发给模型时是一段用户内容。它存进会话：下一次请求的前缀不变，
+//     提示缓存照常命中。临时加在上下文末尾（context 钩子）的一行每一步都不同，pi 只在最后一条消息上打缓存标记，
+//     那样每一步都要重读整段对话；附在工具结果里又会让界面和读结果的代码看到它。没调工具的一步（最后的回答）不发：
+//     多一条消息会让这次运行多调一次模型。
+//   · 让出点（D3、D4）：第二步起的 turn_start（工具结果回来以后、下一次模型请求之前）叫 hooks.yieldPoint，
+//     调度器在这里决定要不要停下这一轮、请 Lead 交接。
 import type { ExtensionFactory } from "@earendil-works/pi-coding-agent";
 import { redLineGateExtension } from "../red-line.js";
 import type { LeadSchedulerRuntime, LeadStageInfo } from "./runtime.js";
@@ -35,6 +45,17 @@ export interface LeadSchedulerExtensionOptions {
   scheduler?: Pick<LeadSchedulerRuntime, "unit" | "noteStage" | "bindSessionRecorder" | "unbindSessionRecorder" | "noteStageSlow">;
   // 红线以后这一轮能用的工具（red-line.ts）；没有限制时为 null。
   toolGate?: () => ReadonlySet<string> | null;
+  // P2：交接的钩子（daemon 给）。
+  hooks?: LeadSchedulerHooks;
+}
+
+export interface LeadSchedulerHooks {
+  // 这个单元做过的步骤（交接包，handoffs.ts）。
+  work?: { toolStart(call: { id: string; tool: string; args: unknown }): void; toolEnd(call: { id: string; result: unknown; error: boolean }): void };
+  // 每一步的预算状态（D3）：一行字，接在一步的工具结果后面。没有在做的单元时为 null。
+  budgetStatus?: () => string | null;
+  // 让出点：第 step 步就要开始（step ≥ 2）。
+  yieldPoint?: (step: number) => void;
 }
 
 export interface LeadStepTiming {
@@ -57,6 +78,8 @@ export interface LeadStepTiming {
 
 interface StepState {
   step: number;
+  // 这一步的模型回复里有几个顶层工具调用（有调用时 turn_end 发预算状态）。
+  toolCalls: number;
   startedAt: number;
   requestAt: number | null;
   responseAt: number | null;
@@ -101,6 +124,10 @@ export function leadSchedulerExtension(options: LeadSchedulerExtensionOptions = 
     let current: StepState | null = null;
     let stageATimer: ReturnType<typeof setTimeout> | null = null;
 
+    // 钩子出错不影响这一步。
+    const hook = (call: () => void) => {
+      try { call(); } catch (error) { log(`[sched] hook.failed error=${JSON.stringify(error instanceof Error ? error.message : String(error))}`); }
+    };
     const clearStageATimer = () => {
       if (stageATimer) clearTimeout(stageATimer);
       stageATimer = null;
@@ -159,10 +186,12 @@ export function leadSchedulerExtension(options: LeadSchedulerExtensionOptions = 
       const state: StepState = {
         step: stepInRun, startedAt: now(), requestAt: null, responseAt: null, status: null,
         firstOutputAt: null, lastOutputAt: null, maxGapMs: 0, modelEndAt: null, stop: null,
-        tools: new Map(), toolTimes: [], aWarned: false,
+        tools: new Map(), toolTimes: [], aWarned: false, toolCalls: 0,
       };
       current = state;
       stage(state, "A");
+      // 让出点（P2）：上一批工具的结果回来了，这一步的模型请求还没发。
+      if (state.step >= 2) hook(() => options.hooks?.yieldPoint?.(state.step));
       clearStageATimer();
       stageATimer = setTimeout(() => {
         stageATimer = null;
@@ -213,9 +242,10 @@ export function leadSchedulerExtension(options: LeadSchedulerExtensionOptions = 
 
     pi.on("message_end", (event) => {
       const state = current;
-      const message = event.message as { role?: string; stopReason?: string };
+      const message = event.message as { role?: string; stopReason?: string; content?: Array<{ type?: string }> };
       if (!state || message.role !== "assistant") return;
       state.modelEndAt = now();
+      state.toolCalls = Array.isArray(message.content) ? message.content.filter((block) => block?.type === "toolCall").length : 0;
       if (message.stopReason && message.stopReason !== "stop" && message.stopReason !== "toolUse") state.stop = message.stopReason;
     });
 
@@ -223,7 +253,9 @@ export function leadSchedulerExtension(options: LeadSchedulerExtensionOptions = 
       if (event.parentToolCallId) return;
       current?.tools.set(event.toolCallId, { name: event.toolName, startedAt: now() });
       stage(current, "tool", event.toolName);
+      hook(() => options.hooks?.work?.toolStart({ id: event.toolCallId, tool: event.toolName, args: event.args }));
     });
+
 
     pi.on("tool_execution_end", (event) => {
       const state = current;
@@ -232,12 +264,22 @@ export function leadSchedulerExtension(options: LeadSchedulerExtensionOptions = 
       state.tools.delete(event.toolCallId);
       const ms = typeof event.durationMs === "number" ? Math.round(event.durationMs) : started ? now() - started.startedAt : 0;
       state.toolTimes.push({ name: event.toolName, ms, error: Boolean(event.isError) });
+      hook(() => options.hooks?.work?.toolEnd({ id: event.toolCallId, result: event.result, error: Boolean(event.isError) }));
     });
 
-    pi.on("turn_end", () => {
+    pi.on("turn_end", (event) => {
       const state = current;
       current = null;
       if (state) finishStep(state);
+      // 每一步的预算状态（D3）：这一步调了工具，运行会接着调模型，这一行接在工具结果后面。
+      const results = (event as { toolResults?: unknown[] }).toolResults;
+      if (!options.hooks?.budgetStatus || !Array.isArray(results) || !results.length) return;
+      let line: string | null = null;
+      try { line = options.hooks.budgetStatus(); } catch { line = null; }
+      if (!line) return;
+      try {
+        pi.sendMessage({ customType: "plc-budget", content: line, display: false }, { triggerTurn: false });
+      } catch { /* 会话已经关了 */ }
     });
 
     pi.on("agent_end", () => {

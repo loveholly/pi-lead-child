@@ -18,7 +18,7 @@ import {
 export type LeadSystemEventKind =
   | "clock" | "presence" | "core_memory" | "inbox" | "child" | "context"
   | "heartbeat" | "digest" | "blocker" | "notification" | "precipitate" | "system" | "event" | "situation" | "message"
-  | "overflow" | "queue" | "red_line" | "steer";
+  | "overflow" | "queue" | "red_line" | "steer" | "budget";
 
 function body(text: string): string {
   return text.replace(/</gu, "&lt;").trim();

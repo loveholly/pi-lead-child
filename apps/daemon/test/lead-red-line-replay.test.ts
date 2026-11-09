@@ -189,9 +189,12 @@ describe("the 2026-11-03 queue, replayed", () => {
     expect(red?.inputs[0]).toContain("用户");
   }, 20_000);
 
-  it("only reminds when nobody is waiting", async () => {
+  // P2（lead-scheduler spec 待定 9，用户 2026-11-09 的决定 10）：到了就地预算，没有人在等也停下，请 Lead 交接。
+  // 以前这里只再提醒一次（overflow），不停。
+  it("stops for a hand-off even when nobody is waiting", async () => {
     lights(150, 300);
     const { lead } = await boot((call) => {
+      if (has(call, RED)) return { say: "交出去了。" };
       if (call.index === 0 && has(call, "整理依赖的提醒")) return { tools: [github] };
       if (call.index === 1) return { say: [sleep(700), "整理完了。"] };
       return { say: "好的。" };
@@ -202,13 +205,12 @@ describe("the 2026-11-03 queue, replayed", () => {
       itemId: createItem(db, { title: "整理依赖的提醒", brief: "b", createdBy: "system" }),
       severity: "blocker", source: "structural", summary: "整理依赖的提醒", lossless: true,
     });
-    await vi.waitFor(() => expect(lead.calls.some((call) => call.inputs.some((input) => input.includes('kind="overflow"')))).toBe(true), { timeout: 5_000 });
-    await sleep(800);
+    await vi.waitFor(() => expect(lead.calls.some((call) => has(call, RED))).toBe(true), { timeout: 5_000 });
 
-    expect(lead.aborts()).toBe(0);
-    const reminders = lead.calls.flatMap((call) => call.inputs).filter((input) => input.includes('kind="overflow"'));
-    expect(reminders.some((text) => text.includes("没有人在等你"))).toBe(true);
-    expect(lead.calls.some((call) => has(call, RED))).toBe(false);
+    expect(lead.aborts()).toBe(1);
+    const red = lead.calls.flatMap((call) => call.inputs).find((input) => input.includes(RED))!;
+    expect(red).toContain("现在没有人在等你");
+    expect(red).toContain("hand_off");
   }, 20_000);
 
   it("lets a running bash command finish before it stops the turn", async () => {

@@ -6,11 +6,12 @@ import {
 } from "../src/red-line.js";
 
 describe("red line limits", () => {
-  it("defaults to 2.5 minutes, waits up to 30 s for a running write and 3 minutes for the hand-off", () => {
+  // P2（lead-scheduler spec H8）：交接是一次 hand_off，窗口从 3 分钟缩到 30 秒。
+  it("defaults to 2.5 minutes, waits up to 30 s for a running write and 30 s for the hand-off", () => {
     expect(redLineLimits({})).toEqual({ ms: DEFAULT_RED_LINE_MS, writeGraceMs: DEFAULT_WRITE_GRACE_MS, handoffMs: DEFAULT_HANDOFF_MS });
     expect(DEFAULT_RED_LINE_MS).toBe(150_000);
     expect(DEFAULT_WRITE_GRACE_MS).toBe(30_000);
-    expect(DEFAULT_HANDOFF_MS).toBe(180_000);
+    expect(DEFAULT_HANDOFF_MS).toBe(30_000);
     expect(redLineLimits({ PLC_LEAD_RED_LINE_MS: "300", PLC_LEAD_WRITE_GRACE_MS: "0", PLC_LEAD_HANDOFF_MS: "x" }))
       .toEqual({ ms: 300, writeGraceMs: DEFAULT_WRITE_GRACE_MS, handoffMs: DEFAULT_HANDOFF_MS });
   });
@@ -31,11 +32,20 @@ describe("the red line message", () => {
     expect(text).toContain("2 分 30 秒");
     expect(text).toContain("用户（和你的对话，1 条）等了 4 分钟：「acme/b 已经有 PR 了」");
     expect(text).toContain("照纠正改，不要把旧的计划交出去");
-    expect(text).toContain("light=true");
-    expect(text).toContain("你已经查到的");
+    expect(text).toContain("调用一次 hand_off");
+    expect(text).toContain("交接包");
     expect(text).toContain("follow_up");
     expect(text).toContain("用一句话告诉用户");
+    expect(text).toContain("交接窗口是 30 秒");
     for (const tool of RED_LINE_HANDOFF_TOOLS) expect(text).toContain(tool);
+  });
+
+  // P2（spec 待定 9）：没有人在等也交出去。
+  it("asks for a hand-off when nobody waits, and does not ask to check for a correction", () => {
+    const text = redLineMessage(150_000, []);
+    expect(text).toContain("现在没有人在等你，但下一条输入随时会来，所以照样交出去");
+    expect(text).not.toContain("照纠正改");
+    expect(text).toContain("hand_off");
   });
 
   it("reminds again without stopping when nobody waits", () => {

@@ -8,6 +8,8 @@ import { registerEventKind, type EventKindDefinition } from "./events.ts";
 
 export const SCHEDULER_RECORD_KINDS = [
   "unit_started", "unit_ended", "decided", "aborted", "lane_changed", "stage_slow", "idle_job",
+  // P2 交接（spec H1–H10）：Lead 交出去了、单元挂起了、挂起的单元被恢复或丢下了。
+  "handed_off", "suspended", "resumed",
 ] as const;
 export type SchedulerRecordEventKind = typeof SCHEDULER_RECORD_KINDS[number];
 
@@ -45,6 +47,9 @@ const DESCRIPTIONS: Record<SchedulerRecordEventKind, string> = {
   lane_changed: "一个工作单元换了车道。",
   stage_slow: "一步在某个阶段等过了阈值（例如请求前准备超过 10 秒），带宿主的负载。",
   idle_job: "空闲车道（L4）的一件活：压缩、整理笔记的开始、让路、完成、失败、兜底。unitId 是作业编号（idle_…）。",
+  handed_off: "Lead 用 hand_off 把一个单元交给了轻子 agent：入口、交接包的大小、用了多久、工单号。",
+  suspended: "一个单元挂起了（交接窗口里没交、被抢占或卡死）：原因和交接包的编号。",
+  resumed: "Lead 处理了一个挂起的单元：接着做、丢下，或者交出去。",
 };
 
 export const LEAD_SCHEDULER_EVENT_KINDS: readonly EventKindDefinition[] = SCHEDULER_RECORD_KINDS.map((kind) => ({
@@ -86,6 +91,8 @@ export interface SchedulerSnapshot {
   };
   lanes: Array<{ lane: string; deadlineMs: number | null; waiting: Array<{ who: string; conversation: string; count: number; waitedMs: number; overdue: boolean }> }>;
   host: string | null;
+  // 挂起的单元（P2，spec H10）：交接包编号、原来的车道、为什么挂起、挂起了多久。没有交接的 daemon 不给。
+  suspended?: Array<{ id: string; unitId: string; lane: string; reason: string; sinceMs: number }>;
   // 空闲车道（L4，P4）：Lead 空闲了多久、上下文水位，以及压缩、整理笔记、回收区删除各自在做什么。旧的 daemon 没有这一项。
   idle?: IdleLaneSnapshot;
 }

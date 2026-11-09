@@ -26,6 +26,7 @@ export { LEAD_CODEMODE_TOOLS, LEAD_CODEMODE_TOOL_GROUPS } from "./tool-exposure.
 export * from "./turn-origin.js";
 export * from "./wait-tools.js";
 export * from "./ui-action-tools.js";
+export * from "./hand-off-tool.js";
 export { ticketRunAnnotation } from "./read-tools.js";
 export * from "./overflow.js";
 export * from "./red-line.js";

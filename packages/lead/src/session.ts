@@ -49,7 +49,8 @@ import { createLeadSmartModel } from "./smart-model.js";
 import { createCredibilityExtension } from "./credibility/extension.js";
 import { LEAD_CODEMODE_TOOL, LEAD_HAND_TOOLS, leadHandsExtension } from "./hands.js";
 import { handbookGuardExtension } from "./handbook-guard.js";
-import { leadSchedulerExtension } from "./scheduler/extension.js";
+import { leadSchedulerExtension, type LeadSchedulerHooks } from "./scheduler/extension.js";
+import type { LeadHandoffDeps } from "./hand-off-tool.js";
 import type { LeadSchedulerRuntime } from "./scheduler/runtime.js";
 import { idleLaneExtension, type IdleLaneRuntime } from "./scheduler/idle-runtime.js";
 import { TurnEvidence } from "./credibility/evidence.js";
@@ -223,6 +224,9 @@ export async function createLeadSession(opts: {
   scheduler?: LeadSchedulerRuntime;
   // 空闲车道（scheduler/idle-runtime.ts，lead-scheduler spec D8，P4）：pi 想压缩时问它。和 daemon 共用同一个实例。
   idleLane?: IdleLaneRuntime;
+  // 交接（lead-scheduler spec P2）：扩展的钩子（做过的步骤、每一步的预算状态、让出点）和 hand_off、resume_unit 用的服务。
+  schedulerHooks?: LeadSchedulerHooks;
+  handoff?: LeadHandoffDeps;
 }): Promise<{
   session: LeadEngine; modelName: string; syncToolAccess: () => void; reloadExtensions: () => Promise<void>;
   models: string[]; switchModel: (spec: string) => Promise<void>; reportsInputDelivery: boolean; interruptStep: () => boolean;
@@ -388,6 +392,7 @@ export async function createLeadSession(opts: {
           ...(opts.scheduler ? { scheduler: opts.scheduler } : {}),
           // 红灯（red-line.ts）：daemon 停下超时的一轮、叫 Lead 交接以后，这一轮只能用交接的工具。
           ...(opts.toolGate ? { toolGate: opts.toolGate } : {}),
+          ...(opts.schedulerHooks ? { hooks: opts.schedulerHooks } : {}),
         }),
       },
       { name: "plc-environment", factory: environmentExtension, hidden: true },
@@ -480,6 +485,7 @@ export async function createLeadSession(opts: {
     ...(opts.announceLeadStatus ? { announceLeadStatus: opts.announceLeadStatus } : {}),
     ...(opts.scheduleLeadModelRestart ? { scheduleLeadModelRestart: opts.scheduleLeadModelRestart } : {}),
     ...(opts.ticketActionHost ? { ticketActionHost: opts.ticketActionHost } : {}),
+    ...(opts.handoff ? { handoff: opts.handoff } : {}),
     ...(opts.uiActionServices ? { uiActionServices: opts.uiActionServices } : {}),
     ...(opts.pullRequestRunner ? { pullRequestRunner: opts.pullRequestRunner } : {}),
     ...(opts.ticketSummaries ? { ticketSummaries: opts.ticketSummaries } : {}),

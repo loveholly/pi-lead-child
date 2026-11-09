@@ -194,6 +194,7 @@ import {
 import { createWaitTools, withUserActionWaits, type TurnUserActions } from "./wait-tools.js";
 import { createConnectionTools } from "./connection-tools.js";
 import { createChannelActionTools, createReplyToSourceTool, createUiActionTools, performLeadUiAction } from "./ui-action-tools.js";
+import { createHandOffTools, type LeadHandoffDeps } from "./hand-off-tool.js";
 import {
   authorityTurnId, authorizationCardResult, coreMemoryRefusal, setTimerInTurn, turnOriginOf, type CoreMemoryRefusal, type LeadTurnOrigin,
 } from "./turn-origin.js";
@@ -279,6 +280,8 @@ export interface LeadDeps {
   // 这一轮里出现过的「需要用户做什么」（wait-tools.ts）：工具返回的，和 daemon 交给这一轮的事件里带的。
   // render_ui 用它检查卡片有没有给用户能点的控件。缺省时（测试）只认 render_ui 的 asks_user。
   turnUserActions?: TurnUserActions;
+  // 交接和挂起（lead-scheduler spec P2，hand-off-tool.ts）：daemon 给。缺省时（测试）没有 hand_off、resume_unit。
+  handoff?: LeadHandoffDeps;
   supervisor?: {
     status(): Promise<SupervisorStatus>;
     request(input: {
@@ -4796,6 +4799,15 @@ export function createLeadTools(deps: LeadDeps): ToolDefinition<any>[] {
     ...createWaitTools(deps),
     // 工单以外的 UI 操作（2026-10-22，AGENTS.md「UI Actions」）：执行器的停用和启用、设备……和页面是同一个操作。
     ...createUiActionTools(deps),
+    // 交接（lead-scheduler spec H4、H10，hand-off-tool.ts）：hand_off 把建单、写说明、派出合成一次调用；resume_unit 处理挂起的单元。
+    // 开跑和 spawn_child 一样走工单操作 start。
+    ...createHandOffTools(deps, {
+      db, dataDir: deps.dataDir, lightTaskDir,
+      startTicket: async (ticketId, reason) => {
+        const outcome = await runLeadTicketAction(ticketId, "start", undefined, reason);
+        return (outcome.result as { note?: string | null } | undefined)?.note ?? null;
+      },
+    }),
   ];
 }
 
