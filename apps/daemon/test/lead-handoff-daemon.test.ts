@@ -9,7 +9,7 @@ import { tempDir } from "@pi-lead-child/core/testing";
 import { createLeadToolset, runningChildren } from "@pi-lead-child/lead";
 import { ClaudeRuntime, RuntimeRegistry, type AgentRuntime, type RuntimeCapabilities, type RuntimeHandle, type RuntimeStartRequest } from "@pi-lead-child/runtime";
 import { ReplayRuntime, type RecordedEvent } from "@pi-lead-child/runtime/testing";
-import { createLoopbackBinding, getItem, isLightTask, itemHandoff, openDb, type Db } from "@pi-lead-child/store";
+import { addInbox, createItem, createLoopbackBinding, getItem, isLightTask, itemHandoff, openDb, type Db } from "@pi-lead-child/store";
 import { startDaemon } from "../src/server.js";
 import { fakePiLead, type FakeCall, type FakeReply } from "./fake-pi-session.js";
 
@@ -234,7 +234,7 @@ describe("a hand-off, from the user's request to the relayed result", () => {
     let suspendedId: string | null = null;
     const { say, lead, logs, turn } = await boot((call) => {
       if (has(call, RED)) return { say: [never] };
-      if (has(call, "挂起的单元") && call.situation?.includes("挂起的单元")) {
+      if (call.situation?.includes("挂起的单元") && (has(call, "有被打断的工作挂起了") || has(call, "acme/d 的 CI 红了"))) {
         suspendedId = /(hof_[a-z0-9]+)/u.exec(call.situation!)?.[1] ?? null;
         return { tools: [{ name: "resume_unit", args: { id: suspendedId, action: "resume" } }] };
       }
@@ -245,6 +245,9 @@ describe("a hand-off, from the user's request to the relayed result", () => {
     });
 
     const sent = await say("s1", "整理一下 acme/c 的 changelog");
+    // 用户的这一轮在跑时来了一件系统的事（L2）：它排着，这一轮结束后先开一轮。Lead 在那一轮的当前局面里看到挂起的单元，接着做。
+    await vi.waitFor(() => expect(lead.calls.length).toBe(2), { timeout: 5_000 });
+    addInbox(db, { itemId: createItem(db, { title: "acme/d 的 CI 红了", brief: "b", createdBy: "system" }), severity: "blocker", source: "structural", summary: "acme/d 的 CI 红了", lossless: true });
     await vi.waitFor(() => expect(logs.some((line) => line.startsWith("[sched] suspend ") && line.includes("reason=handoff_timeout"))).toBe(true), { timeout: 10_000 });
     // 用户在等的这一轮：系统写一句挂起了。
     await vi.waitFor(() => expect(turn(sent.turnId).assistant_text).toContain("worked on this for the full in-place budget and paused it"), { timeout: 5_000 });
@@ -257,6 +260,8 @@ describe("a hand-off, from the user's request to the relayed result", () => {
     await vi.waitFor(() => expect(storedState(suspendedId!).state).toBe("resumed"), { timeout: 5_000 });
     expect(logs.some((line) => line.startsWith("[sched] lane ") || line.includes("lane=L0"))).toBe(true);
     expect(logs.some((line) => line.includes("decision=budget_restart") && line.includes("why=resume"))).toBe(true);
+    // 恢复的是用户的事（L0）：叫醒它的单元是系统回合（L2），恢复以后车道跟着这件事提到 L0。
+    await vi.waitFor(() => expect(logs.some((line) => line.startsWith("[sched] lane ") && line.includes("from=L2") && line.includes("to=L0") && line.includes("why=resume"))).toBe(true), { timeout: 5_000 });
     // 系统没有派出子 agent。
     expect(existsSync(join(dir, "light-tasks"))).toBe(false);
     expect(lead.calls.some((call) => has(call, "接着做挂起的单元"))).toBe(true);

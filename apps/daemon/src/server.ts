@@ -2912,7 +2912,11 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       handoffs,
       forced: () => schedRedLinePhase(sched.state) === "handoff",
       made: (pkg, ticketId) => { sched.dispatch({ type: "handoff.made", packageId: pkg.id, ticketId, entry: pkg.entry }); },
-      resumed: () => { sched.dispatch({ type: "budget.restart", why: "resume" }); },
+      // 接着做挂起的单元：就地预算从现在重新算；这个单元做的是那件事，车道跟着它（用户的事是 L0，H10、D1）。
+      resumed: (pkg) => {
+        sched.dispatch({ type: "budget.restart", why: "resume" });
+        if (pkg.goal.lane < (sched.unit?.lane ?? 0)) sched.dispatch({ type: "unit.lane", lane: pkg.goal.lane, why: "resume" });
+      },
     },
     // 每一步的阶段耗时写进 daemon 的日志（lead-scheduler spec D12）；阶段 A 超时附上宿主的负载。
     schedulerLog: log,
