@@ -40,6 +40,14 @@ export function applyControlPlaneMutation(
       const nextState: LeadTurnEntity['state'] = mutation.payload.mode === 'steered'
         ? 'steered'
         : mutation.payload.mode === 'queued' ? 'queued' : 'streaming';
+      // 2026-11-09：排着的、插话的一轮开始回答了（送到 Lead）：Lead 的回答从这一刻算起。会话按它放这一轮（buildLeadTimeline），
+      // 回合头的用时也从这里量，不把排队等的时间算进去。
+      const answerStarts = nextState === 'streaming' && (turn.state === 'queued' || turn.state === 'steered');
+      // 正在回答的一轮被插话接走、和后面那一条一起答了：它在这一刻结束，用时量到这里（以前停在开始的时刻，写成「1 秒」）。
+      const handedOver = nextState === 'steered' && turn.state === 'streaming';
+      const times = answerStarts
+        ? { createdAt: mutation.occurredAt, updatedAt: mutation.occurredAt }
+        : handedOver ? { updatedAt: mutation.occurredAt } : {};
       // 用户的消息怎么放的（工单 04）。开始回答（started）而且没有说放置方式时，它已经是普通的一轮。
       const placement = mutation.payload.placement !== undefined
         ? { placement: mutation.payload.placement, answeredWith: mutation.payload.answeredWith ?? null }
@@ -49,13 +57,14 @@ export function applyControlPlaneMutation(
         [turn.id]: {
           ...turn,
           state: nextState,
+          ...(handedOver ? { updatedAt: mutation.occurredAt } : {}),
           ...(mutation.payload.originKind === undefined ? {} : { originKind: mutation.payload.originKind }),
           ...placement,
         },
       };
       const messagesById = assistant ? {
         ...state.messagesById,
-        [assistant.id]: { ...assistant, state: nextState },
+        [assistant.id]: { ...assistant, state: nextState, ...times },
       } : state.messagesById;
       const turnIdByCommandId = mutation.payload.commandId
         ? { ...state.turnIdByCommandId, [mutation.payload.commandId]: turn.id }

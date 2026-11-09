@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import WebSocket from "ws";
 import {
-  addInbox, createItem, createPairing, listInbox, openDb, redeemPairing, type Db,
+  addInbox, createItem, createPairing, listInbox, openDb, redeemPairing, writeBusyPlacement, type Db,
 } from "@pi-lead-child/store";
 import { SYSTEM_TURN_ORIGINS } from "@pi-lead-child/protocol";
 import { tempDir } from "@pi-lead-child/core/testing";
@@ -304,6 +304,8 @@ describe("a blocker wake-up", () => {
 });
 
 describe("a user who steers into a turn the lead started itself", () => {
+  // plc 发的消息不带 mode，daemon 按「Lead 忙时你发的消息」的设置放（缺省排队）。这一组测插话，所以先设成插话。
+  beforeEach(() => writeBusyPlacement(db, "steer"));
   it("gets the lead's tool calls and reply in their own turn, and no system turn is left behind", async () => {
     const lead = stubLead("hang");
     await start(lead);
@@ -417,6 +419,8 @@ describe("who counts as listening", () => {
 });
 
 describe("a system turn that fails while a user's steer waits", () => {
+  // plc 发的消息不带 mode，daemon 按「Lead 忙时你发的消息」的设置放（缺省排队）。这一组测插话，所以先设成插话。
+  beforeEach(() => writeBusyPlacement(db, "steer"));
   it("does not leave a failed system turn behind", async () => {
     const lead = stubLead("hang");
     await start(lead);
@@ -607,6 +611,8 @@ describe("the cancel budget", () => {
 });
 
 describe("a steer that does not land", () => {
+  // plc 发的消息不带 mode，daemon 按「Lead 忙时你发的消息」的设置放（缺省排队）。这一组测插话，所以先设成插话。
+  beforeEach(() => writeBusyPlacement(db, "steer"));
   it("does not reset the cancel budget", async () => {
     const lead = stubLead("hang", { steerRejects: true });
     await start(lead);

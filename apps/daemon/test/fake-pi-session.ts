@@ -10,6 +10,7 @@
 //   · prompt、steer、followUp 带的图片和那条消息一起送进上下文（消息的 content 里文字后面跟着图片块，和 pi 一样）；
 //   · abort()：中断正在等的回答，发 stopReason=aborted 的 message_end，等这次运行结束才返回。正在跑的工具不打断：
 //     这一批工具做完以后才以 aborted 结束（pi 等正在跑的工具做完）。
+//   · interruptStep()（interruptible 时才有）：只中止正在等的这一次回答，然后把排着的插话送进去、接着调模型（lead 的 step-interrupt.ts）。
 // script 决定每一次调模型的回答。回答可以先说一段、等一个 Promise（测试在这时发消息）、再接着说。
 
 export interface FakeCall {
@@ -75,6 +76,10 @@ export interface FakePiLeadOptions {
   // 中断怎样结束（2026-11-03）：error 时发 stopReason=error、errorMessage「This operation was aborted」，和 pi-ai 的
   // lazyStream 在准备请求时被中断一样；throws 时再让这次 prompt 以这个错误失败。不给时是 stopReason=aborted。
   abortedAs?: "error" | "throws";
+  // 会话支持打断式插话（lead 的 step-interrupt.ts，2026-11-09）：interruptStep() 在模型还在想（脚本的回答还没定）时
+  // 中止这一次调模型，发 stopReason=aborted 的 message_end，然后和 pi 一样把排着的插话送进去、再调一次模型（同一次运行）。
+  // 开始说话以后、跑工具时不中止，返回 false。
+  interruptible?: boolean;
 }
 
 export function fakePiLead(script: FakeScript, options: FakePiLeadOptions = {}) {
@@ -92,6 +97,9 @@ export function fakePiLead(script: FakeScript, options: FakePiLeadOptions = {}) 
   let running: Promise<void> | null = null;
   // 会话被中断的次数（daemon 调 abort()）。
   let aborts = 0;
+  // 正在等脚本回答的这一次调模型（还能被打断式插话中止），和被中止的次数。
+  let thinking: { stop: () => void } | null = null;
+  let interrupts = 0;
   let deps: any = {};
   const emit = (event: unknown) => { for (const listener of [...listeners]) listener(event); };
 
@@ -141,7 +149,20 @@ export function fakePiLead(script: FakeScript, options: FakePiLeadOptions = {}) 
       pendingImages = [];
       calls.push(call);
       const answer = Promise.resolve(script(call));
-      if (await waitOrAbort(answer, aborted) === "aborted") { endAborted(); return; }
+      let stopThinking!: () => void;
+      const stopped = new Promise<"interrupted">((resolve) => { stopThinking = () => resolve("interrupted"); });
+      thinking = { stop: stopThinking };
+      const first = await Promise.race([waitOrAbort(answer, aborted), stopped]);
+      thinking = null;
+      if (first === "aborted") { endAborted(); return; }
+      if (first === "interrupted") {
+        // 和 pi 一样：这一步以 aborted 结束，排着的插话接着送进去，再调一次模型。没有插话时这次运行就此结束。
+        emit({ type: "message_end", message: { role: "assistant", stopReason: "aborted", content: [] } });
+        const steered = takeSteering();
+        if (!steered.length) return;
+        deliver(steered);
+        continue;
+      }
       const reply = await answer;
       if (reply.error) { end("error", reply.error); return; }
       if (reply.cutOff !== undefined) {
@@ -195,6 +216,16 @@ export function fakePiLead(script: FakeScript, options: FakePiLeadOptions = {}) 
       modelName: "stub/model",
       // 和 pi 一样：用户消息送进上下文时发 message_start。
       reportsInputDelivery: true,
+      ...(options.interruptible ? {
+        interruptStep: () => {
+          if (!thinking) return false;
+          const current = thinking;
+          thinking = null;
+          interrupts += 1;
+          current.stop();
+          return true;
+        },
+      } : {}),
       ...(options.smartModel !== undefined ? { smartModel: options.smartModel } : {}),
       ...(options.complete !== undefined ? { complete: options.complete } : {}),
       session: {
@@ -262,6 +293,8 @@ export function fakePiLead(script: FakeScript, options: FakePiLeadOptions = {}) 
     deps: () => deps,
     // daemon 中断了几次会话。
     aborts: () => aborts,
+    // 打断式插话中止了几次调模型。
+    interrupts: () => interrupts,
   };
 }
 

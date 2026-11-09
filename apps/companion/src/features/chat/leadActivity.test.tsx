@@ -80,9 +80,10 @@ describe('Lead activity in the timeline', () => {
     });
 
     it('keeps what Lead has not handled yet as activity', () => {
+      // 2026-11-09：Lead 的回答按开始回答的时刻排（13:44:31），它答的时候才进来的事（13:44:33）排在它下面，不再因为回答 13:44:37 才结束而挪到上面。
       const open: LeadActivityCard = { ...activity(300, '2026-10-24T13:44:33.000Z', 'handled', 'x'), state: 'open', lead: null };
       const timeline = buildLeadTimeline([told], [], [], { leadActivity: [open] });
-      expect(timeline.map((item) => item.kind)).toEqual(['lead-activity', 'message']);
+      expect(timeline.map((item) => item.kind)).toEqual(['message', 'lead-activity']);
     });
   });
 

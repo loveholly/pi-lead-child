@@ -717,6 +717,40 @@ describe("paired HTTP control-plane", () => {
     }
   });
 
+  // 2026-11-09：排队、插话的消息要等前一轮答完才开始回答。会话按开始回答的时刻放 Lead 的回答，刷新以后也一样：
+  // 快照从账本里读最后一条 mode=started 的时刻。只在客户端要（include=answer_started）时才带，Lead 自己发起的一轮不带。
+  it("returns when Lead started answering each user turn only when asked", async () => {
+    const base = Date.parse("2026-11-05T10:10:00.000Z");
+    const queued = createTurn(db, { originKind: "paired:companion", userText: "排队的话", state: "queued", now: new Date(base) });
+    const system = createTurn(db, { originKind: "system:blocker", userText: "", state: "streaming", now: new Date(base + 1_000) });
+    const unstarted = createTurn(db, { originKind: "paired:companion", userText: "还在排", state: "queued", now: new Date(base + 2_000) });
+    const started = (turnId: string, mode: string, at: number) => publishGatewayEvent(db, {
+      type: "lead.turn.started", requiredScope: "chat", turnId,
+      payload: { messageId: `msg_${turnId}`, commandId: null, originKind: "paired:companion", mode }, now: new Date(at),
+    });
+    started(queued.id, "queued", base);
+    started(system.id, "started", base + 1_000);
+    started(queued.id, "started", base + 50_000);
+    started(unstarted.id, "queued", base + 2_000);
+    const server = await start();
+    try {
+      const { access_token } = await redeem(server.base, ["chat"]);
+      const headers = { authorization: `Bearer ${access_token}` };
+      const plain = await (await fetch(`${server.base}/v1/conversation/turns?include=tool_calls,surfaces,placement`, { headers }))
+        .json() as { items: Array<Record<string, unknown>> };
+      expect(plain.items.some((turn) => "answerStartedAt" in turn)).toBe(false);
+      const asked = await (await fetch(`${server.base}/v1/conversation/turns?include=placement,answer_started`, { headers }))
+        .json() as { items: Array<{ id: string; answerStartedAt?: string }> };
+      const byId = Object.fromEntries(asked.items.map((turn) => [turn.id, turn]));
+      expect(byId[queued.id]!.answerStartedAt).toBe(new Date(base + 50_000).toISOString());
+      expect(byId[unstarted.id]).not.toHaveProperty("answerStartedAt");
+      expect(byId[system.id]).not.toHaveProperty("answerStartedAt");
+      for (const turn of asked.items) expect(Value.Check(ConversationTurnSchema, turn)).toBe(true);
+    } finally {
+      await server.close();
+    }
+  });
+
   // companion 刷新会话时不带 limit：缺省的 100 轮必须是最近的 100 轮。
   it("returns the newest conversation turns, oldest first, when there are more than the default limit", async () => {
     const base = Date.parse("2026-09-01T00:00:00.000Z");

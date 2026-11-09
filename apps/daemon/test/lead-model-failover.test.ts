@@ -108,10 +108,11 @@ async function start(lead: ReturnType<typeof stubLead>, options: { networkUp?: (
   const issued = redeemPairing(db, createPairing(db, { name: "app", kind: "companion", scopes: ["chat", "tickets:view"] }).code);
   const headers = { authorization: `Bearer ${issued.accessToken}`, "content-type": "application/json" };
   let sent = 0;
-  const chat = async (message: string) => {
+  // mode：插话（steer）或排队（followUp）。不带时 daemon 按「Lead 忙时你发的消息」的设置放，缺省排队。
+  const chat = async (message: string, mode?: "steer" | "followUp") => {
     sent += 1;
     const response = await fetch(`http://127.0.0.1:${daemon!.pairedPort}/v1/chat/send`, {
-      method: "POST", headers, body: JSON.stringify({ id: `cmd-${sent}`, message }),
+      method: "POST", headers, body: JSON.stringify({ id: `cmd-${sent}`, message, ...(mode ? { mode } : {}) }),
     });
     expect(response.ok).toBe(true);
     return ((await response.json()) as { turnId: string }).turnId;
@@ -183,7 +184,7 @@ describe("a Lead turn that hits a rate limit", () => {
     const first = await chat("在吗");
     // 第一条的那一次自动重试开始了，正在换模型。
     await vi.waitFor(() => expect(lead.switches).toEqual(["p/b"]));
-    const second = await chat("顺便看一下 #77");
+    const second = await chat("顺便看一下 #77", "steer");
     await vi.waitFor(() => expect(turnState(second).state).toBe("steered"));
     lead.release();
 
@@ -201,7 +202,7 @@ describe("a Lead turn that hits a rate limit", () => {
 
     const first = await chat("在吗");
     await vi.waitFor(() => expect(lead.switches).toEqual(["p/b"]));
-    const second = await chat("顺便看一下 #77");
+    const second = await chat("顺便看一下 #77", "steer");
     await vi.waitFor(() => expect(turnState(second).state).toBe("steered"));
     lead.release();
 

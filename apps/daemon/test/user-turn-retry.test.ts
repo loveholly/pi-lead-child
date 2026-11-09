@@ -82,8 +82,9 @@ async function start(stub: ReturnType<typeof lead>, net: ReturnType<typeof netwo
   const events: any[] = [];
   socket.on("message", (raw) => events.push(JSON.parse(String(raw))));
   await vi.waitFor(() => expect(events.some((event) => event.type === "hello.v2")).toBe(true));
-  const send = async (message: string) => {
-    socket.send(JSON.stringify({ type: "chat.send", id: "cmd-1", protocolVersion: 2, message }));
+  // mode：插话（steer）或排队（followUp）。不带时 daemon 按「Lead 忙时你发的消息」的设置放，缺省排队。
+  const send = async (message: string, mode?: "steer" | "followUp") => {
+    socket.send(JSON.stringify({ type: "chat.send", id: "cmd-1", protocolVersion: 2, message, ...(mode ? { mode } : {}) }));
     await vi.waitFor(() => expect(events.some((event) => event.type === "command.result")).toBe(true));
     return events.find((event) => event.type === "command.result").data.turnId as string;
   };
@@ -270,7 +271,7 @@ describe("a message that arrives around a failing system turn", () => {
     blockerTicket("执行重试已耗尽");
     await vi.waitFor(() => expect(stub.held()).toBe(true));
 
-    const turnId = await send("插话的一条");
+    const turnId = await send("插话的一条", "steer");
     await pause(100);
     stub.releaseHeld();
     await vi.waitFor(() => expect(turn(turnId).state).toBe("queued"));
@@ -289,7 +290,7 @@ describe("a message that arrives around a failing system turn", () => {
     blockerTicket("执行重试已耗尽");
     await vi.waitFor(() => expect(stub.held()).toBe(true));
 
-    const turnId = await send("晚到的插话");
+    const turnId = await send("晚到的插话", "steer");
     await vi.waitFor(() => expect(stub.steersWaiting()).toBe(1));
     stub.releaseHeld();
     await vi.waitFor(() => expect(turn(turnId).state).toBe("queued"));

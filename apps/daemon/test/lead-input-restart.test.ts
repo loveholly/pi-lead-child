@@ -96,7 +96,7 @@ describe("scenario 8: a daemon restart in the middle of a round", () => {
     const { send } = await start(first);
     tellEvent("迁移脚本卡住了");
     await vi.waitFor(() => expect(firstCallWith(first.calls, "迁移脚本卡住了")).toBe(0));
-    const a = await send("问题 A");
+    const a = await send("问题 A", "steer");
     const b = await send("问题 B", "followUp");
     // 两条都排在 pi 的队列里，还没送到模型。
     expect(first.queued()).toMatchObject({ steering: [expect.stringContaining("问题 A")], followUp: [expect.stringContaining("问题 B")] });

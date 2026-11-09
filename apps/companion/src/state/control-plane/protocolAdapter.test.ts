@@ -96,6 +96,7 @@ describe('gateway payload adaptation', () => {
       [{ resource: 'decision-model' }, ['decision-model'], 'daemon decision model settings'],
       [{ resource: 'runtime-settings' }, ['runtime-settings'], 'daemon runtime settings'],
       [{ resource: 'channel-settings' }, ['channel-settings'], 'daemon channel settings (connect, disconnect, error)'],
+      [{ resource: 'busy-placement' }, ['busy-placement'], 'engine busy_placement.set'],
       [{ resource: 'projects', projectId: 3 }, ['core'], 'gateway/paired-server.ts project archive'],
       [{ resource: 'notifications', notificationId: 5 }, ['core'], 'gateway/paired-server.ts notification ack'],
       [{}, ['core'], 'older daemons'],

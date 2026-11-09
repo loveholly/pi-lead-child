@@ -28,6 +28,7 @@ import { AVAILABLE, unavailable } from "../ticket-actions/types.js";
 import { latestInstantOf, leadUserTurnOf } from "./authority.js";
 import { REPLY_STYLE_ACTIONS, REPLY_STYLE_TARGET } from "./reply-style.js";
 import { HOST_BYPASS_ACTIONS, HOST_BYPASS_TARGET } from "./host-bypass.js";
+import { BUSY_PLACEMENT_ACTIONS, BUSY_PLACEMENT_TARGET } from "./busy-placement.js";
 import { CHANNEL_CONNECTION_ACTIONS, CHANNEL_CONNECTION_TARGET } from "./channel-connections.js";
 import { joinProblems } from "./problems.messages.js";
 import { CHANNEL_HANDBOOK_ACTIONS, CHANNEL_HANDBOOK_TARGET } from "./handbook.js";
@@ -1217,6 +1218,7 @@ export const UI_ACTION_TARGETS: { readonly [T in UiActionTargetType]: UiActionTa
   skills: SKILLS_TARGET,
   skill: SKILL_TARGET,
   host_bypass: HOST_BYPASS_TARGET,
+  busy_placement: BUSY_PLACEMENT_TARGET,
 };
 
 export const UI_ACTIONS: { readonly [T in UiActionTargetType]: Readonly<Record<string, UiActionDefinition>> } = {
@@ -1264,4 +1266,6 @@ export const UI_ACTIONS: { readonly [T in UiActionTargetType]: Readonly<Record<s
   skill: SKILL_ACTIONS,
   // 「用户本人发话时免沙箱」开关（工单 #246）：打开只有用户本人能做，关你也能做。定义在 host-bypass.ts。
   host_bypass: HOST_BYPASS_ACTIONS,
+  // Lead 忙时你发的消息怎么放（2026-11-09）：排队或插话。改规则，Lead 也能改。定义在 busy-placement.ts。
+  busy_placement: BUSY_PLACEMENT_ACTIONS,
 };

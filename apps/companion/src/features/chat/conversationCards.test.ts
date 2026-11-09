@@ -246,13 +246,44 @@ describe('Lead conversation card timeline', () => {
     ]);
   });
 
-  it('orders a message by the time it shows, not the time its turn started', () => {
-    // 通知播报的一轮 19:07 开始、20:28 重试失败，气泡写 20:28；19:12 的系统通知要排在它上面。
-    const voicing = { ...message('assistant-voicing', 'assistant', 'turn-voicing', '2026-10-13T11:07:47.000Z'), updatedAt: '2026-10-13T12:28:00.000Z' };
+  it('keeps a reply where it started answering; a retried turn moves because it starts again', () => {
+    // 2026-11-09（P1）：一行出现以后不再挪动。19:07 开始、20:28 才失败的一轮留在 19:07；
+    // 重新开始的一轮（daemon 的 reopenTurn、客户端的 restartLeadTurn 把 createdAt 改成重新开始的时刻）排到后面。
+    const failedLate = { ...message('assistant-failed', 'assistant', 'turn-failed', '2026-10-13T11:07:47.000Z'), updatedAt: '2026-10-13T12:28:00.000Z' };
     const notice = message('assistant-notice', 'assistant', 'turn-notice', '2026-10-13T11:12:38.000Z');
-    expect(buildLeadTimeline([voicing, notice], []).map((item) => item.key)).toEqual([
-      'message:assistant-notice', 'message:assistant-voicing',
+    const retried = { ...message('assistant-retried', 'assistant', 'turn-retried', '2026-10-13T12:27:00.000Z'), updatedAt: '2026-10-13T12:28:00.000Z' };
+    expect(buildLeadTimeline([failedLate, notice, retried], []).map((item) => item.key)).toEqual([
+      'message:assistant-failed', 'message:assistant-notice', 'message:assistant-retried',
     ]);
+  });
+
+  // 2026-11-09（用户截图，11-05 18:11）：Lead 在答上一句时你又发了一句（排队），上一轮的回答答完时，它排到了你这句话下面、
+  // 而它是在看到你这句话之前写的；你这句话的回答（还在想）排在上一轮的回答上面。会话的先后要和 Lead 看到的先后一样。
+  it('places a message that waited for the running turn where Lead got it, below the reply written before it', () => {
+    const firstAsk = message('user-1', 'user', 'turn-1', '2026-11-05T10:10:23.000Z');
+    const firstReply = { ...message('assistant-1', 'assistant', 'turn-1', '2026-11-05T10:10:50.000Z'), updatedAt: '2026-11-05T10:12:28.439Z' };
+    const queuedAsk = message('user-2', 'user', 'turn-2', '2026-11-05T10:11:38.000Z');
+    // 送到 Lead 的那一刻（10:12:28.434）开始回答，还在想。
+    const answering = { ...message('assistant-2', 'assistant', 'turn-2', '2026-11-05T10:12:28.434Z'), state: 'streaming' as const };
+    expect(buildLeadTimeline([firstAsk, firstReply, queuedAsk, answering], []).map((item) => item.key)).toEqual([
+      'message:user-1', 'message:assistant-1', 'message:user-2', 'message:assistant-2',
+    ]);
+  });
+
+  it('keeps a message that has not reached Lead at the bottom, so it does not move when it is delivered', () => {
+    const ask = message('user-1', 'user', 'turn-1', '2026-11-04T09:53:43.000Z');
+    const reply = { ...message('assistant-1', 'assistant', 'turn-1', '2026-11-04T09:53:43.000Z'), state: 'streaming' as const };
+    const queuedAsk = message('user-2', 'user', 'turn-2', '2026-11-04T09:54:15.000Z');
+    const queuedSide = { ...message('assistant-2', 'assistant', 'turn-2', '2026-11-04T09:54:15.000Z'), state: 'queued' as const };
+    // 排队期间写下的一张卡（不属于哪一轮）。
+    const checkpoint = entity({
+      key: 'checkpoint:12', kind: 'checkpoint', turnId: null, ticketId: 42, checkpointId: 12,
+      createdAt: '2026-11-04T09:55:00.000Z', updatedAt: '2026-11-04T09:55:00.000Z',
+    }, 'durable', 12);
+    const keys = (pending: boolean) => buildLeadTimeline([ask, reply, queuedAsk, queuedSide], [checkpoint], [], {
+      now: new Date('2026-11-04T09:56:00.000Z'), isPendingTurn: (turnId) => pending && turnId === 'turn-2',
+    }).filter((item) => item.kind !== 'date').map((item) => item.key);
+    expect(keys(true)).toEqual(['message:user-1', 'message:assistant-1', 'card:checkpoint:12', 'message:user-2', 'message:assistant-2']);
   });
 
   it('renders one assistant message when live and snapshot projections share a turn', () => {

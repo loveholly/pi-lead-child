@@ -54,6 +54,7 @@ import type {
   LeadProfileRequest,
   HostBypassDto,
   HostBypassMinutes,
+  BusyPlacement,
   LeadAvatarDto,
   LeadAvatarSlackEmojiRequest,
   LeadAvatarSlot,
@@ -94,7 +95,7 @@ import type {
   UiActionView,
   TicketSummary,
 } from '@pi-lead-child/protocol';
-import { compareConversationTurns, LEAD_AVATAR_CAPABILITY, leadActivityCardFromItem, leadModelSpec, redactSecretText, TicketSummarySchema } from '@pi-lead-child/protocol';
+import { CHAT_PLACEMENT_PREFERENCE_CAPABILITY, compareConversationTurns, isBusyPlacement, LEAD_AVATAR_CAPABILITY, leadActivityCardFromItem, leadModelSpec, redactSecretText, TicketSummarySchema } from '@pi-lead-child/protocol';
 import { Value } from 'typebox/value';
 
 import {
@@ -210,6 +211,7 @@ export type CompanionTransport = Pick<
   | 'getRuntimeSettings' | 'updateRuntimeSettings'
   | 'getLeadProfile' | 'updateLeadProfile'
   | 'getHostBypass' | 'enableHostBypass' | 'disableHostBypass'
+  | 'getBusyPlacement'
   | 'getLeadAvatar' | 'getLeadAvatarImage' | 'uploadLeadAvatarSlot' | 'clearLeadAvatarSlot' | 'setLeadAvatarSlackEmoji' | 'previewSlackEmoji'
   | 'getDesignPreferences' | 'updateDesignPreferences'
   | 'getChannelSettings' | 'testChannelSecrets' | 'saveChannelSecrets' | 'clearChannelSecrets' | 'getChannelConnection'
@@ -1490,6 +1492,18 @@ export class CompanionStateRuntime {
     return hostBypass;
   }
 
+  // 「Lead 忙时你发的消息」怎么放（设置 → Lead → 身份与风格，2026-11-09）：操作层的 busy_placement.set，和 Lead 的 perform_action
+  // 同一个函数，actor 是你本人。做完马上换成操作回的值（回答里没有时重取）；网关之后的 snapshot.required
+  // （resource 是 busy-placement）也会触发重取。失败时抛出，原因是 daemon 写的那句话。
+  async setBusyPlacement(placement: BusyPlacement): Promise<void> {
+    const { client } = this.dependencies;
+    if (typeof client.performUiAction !== 'function') throw new Error(this.messages().noAction);
+    const outcome = await client.performUiAction('busy_placement', 'lead', 'set', { input: { placement } });
+    const saved = (outcome.result as { busyPlacement?: { placement?: unknown } } | null)?.busyPlacement?.placement;
+    if (isBusyPlacement(saved)) this.control.setState({ busyPlacement: { placement: saved } });
+    else await this.ensureResource(RESOURCE_KEYS.busyPlacement, true);
+  }
+
   // 设置页的「形象」：上传、去掉一种状态的图，改 Slack 署名的 emoji。改完马上换成 daemon 回的值，再取新图。
   async uploadLeadAvatarSlot(slot: LeadAvatarSlot, request: LeadAvatarUploadRequest): Promise<LeadAvatarDto> {
     return this.applyLeadAvatar(await this.memoryClient('uploadLeadAvatarSlot')(slot, request));
@@ -2457,6 +2471,10 @@ export class CompanionStateRuntime {
         const value = await this.memoryClient('getHostBypass')(signal);
         if (!canCommit()) return;
         this.control.setState({ hostBypass: value });
+      } else if (key === RESOURCE_KEYS.busyPlacement) {
+        const value = await this.memoryClient('getBusyPlacement')(signal);
+        if (!canCommit()) return;
+        this.control.setState({ busyPlacement: value });
       } else if (key === RESOURCE_KEYS.leadAvatar) {
         const value = await this.memoryClient('getLeadAvatar')(signal);
         if (!canCommit()) return;
@@ -2677,6 +2695,10 @@ export class CompanionStateRuntime {
     }
     if (key === RESOURCE_KEYS.hostBypass) {
       return this.scopes.has('tickets:view') && typeof this.dependencies.client.getHostBypass === 'function';
+    }
+    if (key === RESOURCE_KEYS.busyPlacement) {
+      return this.scopes.has('tickets:view') && this.capabilities.has(CHAT_PLACEMENT_PREFERENCE_CAPABILITY)
+        && typeof this.dependencies.client.getBusyPlacement === 'function';
     }
     if (key === RESOURCE_KEYS.leadAvatar) {
       return this.scopes.has('tickets:view') && this.capabilities.has(LEAD_AVATAR_CAPABILITY)
@@ -2928,6 +2950,7 @@ type MemoryClientMethod =
   | 'getRuntimeSettings' | 'updateRuntimeSettings'
   | 'getLeadProfile' | 'updateLeadProfile'
   | 'getHostBypass' | 'enableHostBypass' | 'disableHostBypass'
+  | 'getBusyPlacement'
   | 'getLeadAvatar' | 'getLeadAvatarImage' | 'uploadLeadAvatarSlot' | 'clearLeadAvatarSlot' | 'setLeadAvatarSlackEmoji' | 'previewSlackEmoji'
   | 'getDesignPreferences' | 'updateDesignPreferences';
 

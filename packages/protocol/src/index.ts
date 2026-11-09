@@ -1022,8 +1022,14 @@ export const ConversationTurnSchema = StrictObject({
   replyActions: Type.Optional(Type.Array(TicketReplyActionIdSchema)),
   // 用户的这条消息带的图片，按发送时的顺序（include=images 才有，带了图片的轮次才有；chat-images.ts）。
   images: Type.Optional(Type.Array(ChatImageRefSchema)),
+  // Lead 开始回答这一轮的时刻（include=answer_started 才有，有记录的轮次才有；2026-11-09）。
+  // 排队、插话的消息发出以后要等别的轮次答完才开始回答：会话按它放 Lead 的回答和用户的这句话，回答的用时也从它算。
+  answerStartedAt: Type.Optional(Type.String()),
 });
 export type ConversationTurn = Static<typeof ConversationTurnSchema>;
+
+// GET /v1/conversation/turns 的 include 取值：每一轮带上开始回答的时刻（answerStartedAt）。旧 daemon 不认识，回 400。
+export const CONVERSATION_ANSWER_STARTED_INCLUDE = "answer_started";
 
 // 会话里两轮的先后：和 daemon 的快照一样按 (createdAt, id) 排（store 的 listTurns）。客户端按它合并分页和单轮校正。
 export function compareConversationTurns(
@@ -1276,6 +1282,7 @@ export * from "./design-preferences.ts";
 export * from "./i18n.ts";
 export * from "./reply-style.ts";
 export * from "./host-bypass.ts";
+export * from "./busy-placement.ts";
 export * from "./host-commands.ts";
 export * from "./delivery.ts";
 export * from "./delivery-snapshots.ts";

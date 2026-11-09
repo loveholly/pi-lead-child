@@ -19,6 +19,7 @@ export * from "./cost-signals.js";
 export { renderLeadSystemPrompt } from "./prompt.js";
 export * from "./session.js";
 export * from "./situation.js";
+export * from "./step-interrupt.js";
 export * from "./smart-model.js";
 export * from "./tools.js";
 export { LEAD_CODEMODE_TOOLS, LEAD_CODEMODE_TOOL_GROUPS } from "./tool-exposure.js";

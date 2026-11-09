@@ -432,6 +432,11 @@ function projectTurn(previous: ConversationProjection, sessionId: string, item: 
     createdAt: item.createdAt,
     updatedAt: item.createdAt,
   };
+  // Lead 的回答从开始回答的时刻算起（2026-11-09，include=answer_started）：排队、插话的消息要等前一轮答完。
+  // 快照没带它（旧 daemon）时，留着实时事件记下的时刻（actions.ts 的 lead.start-turn），刷新不把回答挪回发出的时刻。
+  const previousAssistant = previous.messagesById[assistantMessageId];
+  const answerStartedAt = item.answerStartedAt
+    ?? (previousAssistant && previousAssistant.createdAt > item.createdAt ? previousAssistant.createdAt : item.createdAt);
   const assistantMessage: MessageEntity = {
     id: assistantMessageId,
     sessionId,
@@ -451,7 +456,7 @@ function projectTurn(previous: ConversationProjection, sessionId: string, item: 
     },
     clientCommandId: null,
     source: 'snapshot',
-    createdAt: item.createdAt,
+    createdAt: answerStartedAt,
     updatedAt: item.updatedAt,
   };
   const userTextPart: MessagePart = { kind: 'text', id: userTextPartId, text: item.userText };

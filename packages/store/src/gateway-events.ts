@@ -237,6 +237,28 @@ export function latestTurnStartedPayloads(db: Db, turnIds: readonly string[]): M
   return byTurn;
 }
 
+// 每一轮开始回答的时刻（2026-11-09）：最后一条 mode=started 的 lead.turn.started 的时间。
+// 排队、插话、等单独一轮的消息，发出和开始回答之间隔着别的轮次；会话按开始回答的时刻放 Lead 的回答，刷新前后一样。
+// 没有这条记录的轮次不在结果里（调用方用 created_at）。
+export function latestTurnAnswerStarts(db: Db, turnIds: readonly string[]): Map<string, string> {
+  const ids = [...new Set(turnIds)];
+  const byTurn = new Map<string, string>();
+  for (let start = 0; start < ids.length; start += TURN_ID_CHUNK) {
+    const chunk = ids.slice(start, start + TURN_ID_CHUNK);
+    const rows = db.prepare(
+      `SELECT g.turn_id, g.occurred_at FROM gateway_events g
+       JOIN (
+         SELECT turn_id, MAX(seq) AS seq FROM gateway_events
+         WHERE turn_id IN (${chunk.map(() => "?").join(",")}) AND event_type = 'lead.turn.started'
+           AND json_extract(payload, '$.mode') = 'started'
+         GROUP BY turn_id
+       ) latest ON latest.seq = g.seq`,
+    ).all(...chunk) as Array<{ turn_id: string; occurred_at: string }>;
+    for (const row of rows) byTurn.set(row.turn_id, row.occurred_at);
+  }
+  return byTurn;
+}
+
 // 每一轮里带 surface 的 Lead 工具事件（render_ui 生成的富交互卡片，protocol 的 ui-surfaces.ts），按 seq 排。
 // 也带 render_ui 失败的事件：失败的调用流式中途留下的版本不显示（foldTurnSurfaces）。
 // 只给读者看它有 scope 的事件，和 listTurnToolEvents 一样。

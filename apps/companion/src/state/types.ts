@@ -10,6 +10,7 @@ import type {
   SetupStatus,
   LeadAvatarDto,
   HostBypassDto,
+  BusyPlacementDto,
   LeadProfileDto,
   DesignPreferencesDto,
   RuntimeSettingsDto,
@@ -74,6 +75,7 @@ export type ResourceKey =
   | 'lead-profile'
   | 'lead-avatar'
   | 'host-bypass'
+  | 'busy-placement'
   | 'design-preferences'
   | 'channel-settings'
   | 'conversation:current'
@@ -116,6 +118,8 @@ export const RESOURCE_KEYS = {
   leadAvatar: 'lead-avatar' as const,
   // 「用户本人发话时免沙箱」开关（GET /v1/lead/host-bypass，工单 #246）。连上就取：开着时输入框上方要画标记。
   hostBypass: 'host-bypass' as const,
+  // Lead 忙时你发的消息怎么放（GET /v1/lead/busy-placement，2026-11-09）。设置 → Lead → 身份与风格在屏幕上时才取。
+  busyPlacement: 'busy-placement' as const,
   designPreferences: 'design-preferences' as const,
   channelSettings: 'channel-settings' as const,
   workItems: 'work-items' as const,
@@ -349,6 +353,8 @@ export interface ControlPlaneData {
   leadAvatarImages: Record<string, string>;
   /** 「用户本人发话时免沙箱」开关（GET /v1/lead/host-bypass）。连上以后就取；没取到、或者旧 daemon 没有时为 null（当作关着）。 */
   hostBypass: HostBypassDto | null;
+  /** Lead 忙时你发的消息怎么放（GET /v1/lead/busy-placement）：排队或插话。设置页在屏幕上时才取；没取到时为 null。 */
+  busyPlacement: BusyPlacementDto | null;
   /** 界面的外观偏好（GET /v1/design/preferences）。连上以后就取；没取到时用缺省值画。 */
   designPreferences: DesignPreferencesDto | null;
   /** 外部消息通道的凭据和状态（GET /v1/channels/settings）：每个来源一行，没有密钥的值。没取到时为 null。 */

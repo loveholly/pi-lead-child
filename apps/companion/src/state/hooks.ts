@@ -241,6 +241,15 @@ export function useHostBypass() {
   return { hostBypass, resource };
 }
 
+// Lead 忙时你发的消息怎么放（GET /v1/lead/busy-placement，2026-11-09）。设置 → Lead → 身份与风格在屏幕上时才取；
+// snapshot.required（resource 是 busy-placement）时重取。
+export function useBusyPlacement() {
+  useObservedResource(RESOURCE_KEYS.busyPlacement);
+  const busyPlacement = useControlPlaneStore((state) => state.busyPlacement);
+  const resource = useControlPlaneStore((state) => state.resourceState[RESOURCE_KEYS.busyPlacement]);
+  return { busyPlacement, resource };
+}
+
 // Lead 的名字、人格和互动风格（GET /v1/lead/profile）。连上就取（runtime 的 core 资源里有它）；
 // snapshot.required（resource 是 lead-profile）时重取。设置页「身份与风格」读它。
 export function useLeadProfile() {

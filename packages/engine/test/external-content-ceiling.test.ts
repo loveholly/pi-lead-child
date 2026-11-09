@@ -169,6 +169,8 @@ describe("the rule-change flag in the catalog", () => {
       "connections.add_remote", "connections.add_local", "connection.authorize", "connection.disconnect", "skills.install", "skill.uninstall",
       // 用户本人发话时免沙箱（工单 #246）：打开授予 Lead 权力（user_direct）。关掉不改规则。
       "host_bypass.enable",
+      // Lead 忙时你发的消息怎么放（2026-11-09）：设置页的选项。
+      "busy_placement.set",
     ]);
   });
 

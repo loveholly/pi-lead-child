@@ -6,7 +6,7 @@ import {
   Text,
 } from '@pi-lead-child/components';
 import {
-  blockerNoticeTicketId, CHAT_FOLLOW_UP_ACTIONS_CAPABILITY, CHAT_IMAGES_CAPABILITY, CHAT_PLACEMENT_CAPABILITY, type ChatImageInput, isDaemonNoticeOrigin, isLeadRestartInterruption, isSystemTurnOrigin,
+  blockerNoticeTicketId, CHAT_FOLLOW_UP_ACTIONS_CAPABILITY, CHAT_IMAGES_CAPABILITY, CHAT_PLACEMENT_CAPABILITY, CHAT_PLACEMENT_PREFERENCE_CAPABILITY, type ChatImageInput, isDaemonNoticeOrigin, isLeadRestartInterruption, isSystemTurnOrigin,
   ownerActionRefOfTurn, SYSTEM_TURN_ORIGINS, ticketNeedsUser,
   ticketNeedsUserLabel, ticketTurn, type ChatPlacement, type KernelTicketWorkItemV2,
   type ChannelCardDto,
@@ -177,6 +177,10 @@ export function LeadConversation({ compact = false, railOpen = true, onOpenRail,
       reminderTurnIds,
       setupChecklist,
       setupHints,
+      isPendingTurn: (turnId) => {
+        const turn = turnsById[turnId];
+        return turn !== undefined && isUndeliveredTurn(turn);
+      },
       isSilent: (message) => {
         if (message.role !== 'assistant' || message.state !== 'completed' || message.failure) return false;
         const turn = message.turnId ? turnsById[message.turnId] : undefined;
@@ -253,9 +257,12 @@ export function LeadConversation({ compact = false, railOpen = true, onOpenRail,
   const canSendImages = useControlPlaneStore((state) => state.capabilities.includes(CHAT_IMAGES_CAPABILITY));
   // 输入框右下角写 Lead 现在用的模型 id 和推理强度，点开换模型（LeadModelPicker）。
   const leadModel = useOverview()?.model;
+  // daemon 按「Lead 忙时你发的消息」的设置放没带 mode 的消息时（设置 → Lead → 身份与风格，主题 11.13、11.19，用户 2026-11-09），
+  // 输入框不再带 mode，交给 daemon；没有这个能力的旧 daemon 照旧一律排队。输入框上有「插话 / 排队」可选时，照你选的发。
+  const placesByPreference = useControlPlaneStore((state) => state.capabilities.includes(CHAT_PLACEMENT_PREFERENCE_CAPABILITY));
   // 不看连接：消息先进本机发件箱，断线时显示「连接恢复后发送」，连上以后按顺序发出（2026-10-16）。
   const send = (message: string, images: ChatImageInput[]) => {
-    const mode = canPlace && leadBusy ? (canSteerQueued ? 'followUp' : placement) : undefined;
+    const mode = canPlace && leadBusy ? (canSteerQueued ? (placesByPreference ? undefined : 'followUp') : placement) : undefined;
     void (images.length ? runtime.sendChat(message, undefined, mode, images) : runtime.sendChat(message, undefined, mode)).catch(() => {});
   };
   const loadOlderConversationCards = async () => {
@@ -636,7 +643,9 @@ function ConversationMessage({
   const fairyMark = !user && !systemNotice && !compact
     ? <MessageLeadAvatar name={leadName} latest={latest} replying={replying} />
     : null;
-  const time = formatConversationTime(message.updatedAt, undefined, locale);
+  // 气泡上的时间（2026-11-09）：你的话是发出的时刻，Lead 的回答是开始回答的时刻，和它在会话里的位置一致
+  // （conversationMessageTimes）；回答用了多久写在回合头上。以前写结束的时刻，排序改了以后时间会前后颠倒。
+  const time = formatConversationTime(message.createdAt, undefined, locale);
   // 发件箱里的消息：头上写时间，状态写在气泡下面（待发送、发送中、已送达）。
   // 送到以后，Lead 忙时它怎么放的写在这里（工单 04，spec D10）：排队中、已插入、下一轮回答。
   const placementCopy = user && !message.delivery ? placementCopyFor(turn, leadName, locale) : null;
@@ -1201,6 +1210,8 @@ export type LeadTimelineOptions = {
   // 首次启动引导的两种卡，按卡的位置插进对话。
   setupChecklist?: SetupChecklistCard | null;
   setupHints?: readonly SetupHintCard[];
+  // 这一轮的消息还没送到 Lead（排队中、已插入）：它的两行排在最后，送到时不挪位置（conversationMessageTimes）。
+  isPendingTurn?: (turnId: string) => boolean;
 };
 
 export function buildLeadTimeline(
@@ -1277,12 +1288,13 @@ export function buildLeadTimeline(
   }
   const messagesById = new Map(messages.map((message) => [message.id, message]));
   const turnsById = new Map(directTicketTurns.map((turn) => [turn.id, turn]));
-  result.sort((left, right) => compareTimelineItemTime(left, right, messagesById, turnsById, insertionOrder));
+  const messageTimes = conversationMessageTimes(messages, assistantMessageByTurn, options.isPendingTurn, (options.now ?? new Date()).getTime());
+  result.sort((left, right) => compareTimelineItemTime(left, right, messagesById, turnsById, insertionOrder, messageTimes));
   for (const card of cards) {
     if (renderedCards.has(card.id)) continue;
     const cardTime = Date.parse(card.createdAt);
     const insertionIndex = result.findIndex((item) => {
-      const messageTime = timelineItemTime(item, messagesById, turnsById);
+      const messageTime = timelineItemTime(item, messagesById, turnsById, undefined, messageTimes);
       return Number.isFinite(cardTime) && Number.isFinite(messageTime) && messageTime > cardTime;
     });
     const entry: LeadTimelineItem = { kind: 'card', key: `card:${card.id}`, cardId: card.id };
@@ -1294,7 +1306,7 @@ export function buildLeadTimeline(
     if (!Number.isFinite(at)) continue;
     const entry: LeadTimelineItem = { kind: 'lead-activity', key: `lead-activity:${activity.key}`, ids: [activity.key], at };
     const insertionIndex = result.findIndex((item) => {
-      const time = timelineItemTime(item, messagesById, turnsById, cardsById);
+      const time = timelineItemTime(item, messagesById, turnsById, cardsById, messageTimes);
       return Number.isFinite(time) && time > at;
     });
     if (insertionIndex < 0) result.push(entry);
@@ -1307,7 +1319,7 @@ export function buildLeadTimeline(
     if (!Number.isFinite(at)) continue;
     const entry: LeadTimelineItem = { kind: 'channel-card', key: `channel-card:${card.id}`, cardId: card.id, at };
     const insertionIndex = result.findIndex((item) => {
-      const time = timelineItemTime(item, messagesById, turnsById, cardsById);
+      const time = timelineItemTime(item, messagesById, turnsById, cardsById, messageTimes);
       return Number.isFinite(time) && time > at;
     });
     if (insertionIndex < 0) result.push(entry);
@@ -1315,7 +1327,7 @@ export function buildLeadTimeline(
   }
   const insertAtTime = (entry: LeadTimelineItem & { at: number }) => {
     const insertionIndex = result.findIndex((item) => {
-      const time = timelineItemTime(item, messagesById, turnsById, cardsById);
+      const time = timelineItemTime(item, messagesById, turnsById, cardsById, messageTimes);
       return Number.isFinite(time) && time > entry.at;
     });
     if (insertionIndex < 0) result.push(entry);
@@ -1334,7 +1346,7 @@ export function buildLeadTimeline(
     const at = Date.parse(hint.at);
     if (Number.isFinite(at)) insertAtTime({ kind: 'setup-hint', key: hint.key, hintKey: hint.key, at });
   }
-  const itemTime = (item: LeadTimelineItem) => timelineItemTime(item, messagesById, turnsById, cardsById);
+  const itemTime = (item: LeadTimelineItem) => timelineItemTime(item, messagesById, turnsById, cardsById, messageTimes);
   for (const card of options.channelCards ?? []) placeChannelNews(result, card, itemTime);
   const coalesced = coalesceLeadActivity(result);
   const grouped = options.failureGroupKey ? groupRepeatedFailures(coalesced, messagesById, options.failureGroupKey) : coalesced;
@@ -1343,7 +1355,7 @@ export function buildLeadTimeline(
   const merged = options.isOutageNotice
     ? mergeOutageIncidents(owned, messagesById, options.isOutageNotice, options.failureGroupKey ?? (() => null))
     : owned;
-  return options.now ? withDateDividers(merged, messagesById, turnsById, cardsById, options.now, options.locale ?? 'en') : merged;
+  return options.now ? withDateDividers(merged, messagesById, turnsById, cardsById, options.now, options.locale ?? 'en', messageTimes) : merged;
 }
 
 // 卡开出来以后对方又发的消息（2026-10-30 用户：「Ethan 来了新消息」，背后是那张卡；不在会话里写系统的词，例如卡的编号）。
@@ -1514,11 +1526,12 @@ function withDateDividers(
   cardsById: ReadonlyMap<string, ConversationCardEntity>,
   now: Date,
   locale: Locale,
+  messageTimes?: ReadonlyMap<string, number>,
 ): LeadTimelineItem[] {
   const withDividers: LeadTimelineItem[] = [];
   let previousDay: string | null = null;
   for (const item of items) {
-    const time = timelineItemTime(item, messagesById, turnsById, cardsById);
+    const time = timelineItemTime(item, messagesById, turnsById, cardsById, messageTimes);
     if (Number.isFinite(time)) {
       const date = new Date(time);
       const day = `${date.getFullYear()}-${date.getMonth() + 1}-${date.getDate()}`;
@@ -1605,23 +1618,57 @@ function compareTimelineItemTime(
   messagesById: ReadonlyMap<string, MessageEntity>,
   turnsById: ReadonlyMap<string, LeadTurnEntity>,
   insertionOrder: ReadonlyMap<string, number>,
+  messageTimes?: ReadonlyMap<string, number>,
 ): number {
-  const leftTime = timelineItemTime(left, messagesById, turnsById);
-  const rightTime = timelineItemTime(right, messagesById, turnsById);
+  const leftTime = timelineItemTime(left, messagesById, turnsById, undefined, messageTimes);
+  const rightTime = timelineItemTime(right, messagesById, turnsById, undefined, messageTimes);
   if (Number.isFinite(leftTime) && Number.isFinite(rightTime) && leftTime !== rightTime) return leftTime - rightTime;
   return (insertionOrder.get(left.key) ?? 0) - (insertionOrder.get(right.key) ?? 0);
 }
 
-// 一项在会话里的时间：排序用它，气泡上显示的也是它。
-// 消息用 updatedAt：一轮重试过的通知播报 19:07 开始、20:28 才又失败，气泡写 20:28，就得排在 20:28
-// （以前按 createdAt 排，它跑到了 19:12 的系统通知上面）。回执是用户发消息的那一刻，卡片是它写下的那一刻。
+// 一条消息在会话里的位置（2026-11-09，P1.1、P1.4：一行出现以后不再挪动）：
+// - Lead 的回答：开始回答的时刻（消息的 createdAt；排队、插话的一轮是送到 Lead 的那一刻，见 actions.ts 的 lead.start-turn）。
+//   以前用 updatedAt：正在回答的一轮按发出的时刻排，答完才跳到结束的时刻。插话那一轮因此排在前一轮的回答上面，答完又往下跳。
+//   重试的一轮重新开始时 createdAt 也改成那一刻（restartLeadTurn、daemon 的 reopenTurn），照旧排到后面。
+// - 你的话：发出的时刻；要等别的轮次答完才送到的（排队、插话），放在送到的那一刻，紧挨着它的回答。
+//   这样会话的先后就是 Lead 看到的先后：前一轮在你这句话送到之前写的回答在它上面，看过它以后写的在它下面。
+// - 还没送到的（排队中、已插入）：这一轮的两行都排在最后，像输入框上方的排队栏一样跟着底部，送到时不挪位置。
+function conversationMessageTimes(
+  messages: readonly MessageEntity[],
+  answerByTurn: ReadonlyMap<string, MessageEntity>,
+  isPendingTurn: ((turnId: string) => boolean) | undefined,
+  now: number,
+): Map<string, number> {
+  const times = new Map<string, number>();
+  for (const message of messages) {
+    const turnId = message.turnId;
+    if (turnId && isPendingTurn?.(turnId)) {
+      times.set(message.id, now);
+      continue;
+    }
+    const at = Date.parse(message.createdAt);
+    if (message.role !== 'user' || !turnId) {
+      times.set(message.id, at);
+      continue;
+    }
+    const answerAt = Date.parse(answerByTurn.get(turnId)?.createdAt ?? '');
+    times.set(message.id, Number.isFinite(answerAt) && answerAt > at ? answerAt : at);
+  }
+  return times;
+}
+
+// 一项在会话里的时间：排序用它。消息的位置见 conversationMessageTimes（没给时用 updatedAt）。
+// 回执是用户发消息的那一刻，卡片是它写下的那一刻。
 function timelineItemTime(
   item: LeadTimelineItem,
   messagesById: ReadonlyMap<string, MessageEntity>,
   turnsById: ReadonlyMap<string, LeadTurnEntity>,
   cardsById?: ReadonlyMap<string, ConversationCardEntity>,
+  messageTimes?: ReadonlyMap<string, number>,
 ): number {
-  if (item.kind === 'message') return Date.parse(messagesById.get(item.messageId)?.updatedAt ?? '');
+  if (item.kind === 'message') {
+    return messageTimes?.get(item.messageId) ?? Date.parse(messagesById.get(item.messageId)?.updatedAt ?? '');
+  }
   if (item.kind === 'ticket-direct') return Date.parse(turnsById.get(item.turnId)?.createdAt ?? '');
   if (item.kind === 'failure-group' || item.kind === 'owner-action-group') {
     return Date.parse(messagesById.get(item.messageIds.at(-1)!)?.updatedAt ?? '');
@@ -1724,6 +1771,13 @@ export function latestLeadMessage<M extends Pick<MessageEntity, 'role' | 'turnId
 // 会话里只有你的那句话，下面写「排队中」或「已取消」；也不算最新一条 Lead 消息。
 export function isWithoutLeadSide(turn: Pick<LeadTurnEntity, 'placement' | 'state'>): boolean {
   return turn.placement === 'cancelled' || (turn.placement === 'queued' && turn.state === 'queued');
+}
+
+// 这一轮你的话还没送到 Lead（2026-11-09）：排队中，或者已插入、还在路上（包括赶不上这一轮、下一轮回答的）。
+// 送到时 daemon 发 lead.turn.started（started），这一轮回到 streaming。会话把它排在最后（conversationMessageTimes）。
+export function isUndeliveredTurn(turn: Pick<LeadTurnEntity, 'placement' | 'state'>): boolean {
+  if (turn.state === 'queued') return turn.placement === 'queued';
+  return turn.state === 'steered' && (turn.placement === 'steered' || turn.placement === 'next_turn');
 }
 
 // 消息头前面的 Lead 形象（主题 F-5）。单独一个组件：消息的组件里有提前返回，hook 不能放在那里。

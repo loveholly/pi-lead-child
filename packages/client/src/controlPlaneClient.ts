@@ -86,6 +86,7 @@ import {
   LeadAvatarImageSchema,
   LeadAvatarResponseSchema,
   HostBypassResponseSchema,
+  BusyPlacementResponseSchema,
   SlackEmojiPreviewSchema,
   DesignPreferencesResponseSchema,
   RuntimeSettingsResponseSchema,
@@ -102,6 +103,7 @@ import {
   type LeadAvatarDto,
   type HostBypassDto,
   type EnableHostBypassRequest,
+  type BusyPlacementDto,
   type LeadAvatarImage,
   type LeadAvatarSlackEmojiRequest,
   type LeadAvatarSlot,
@@ -185,6 +187,7 @@ import {
   CHAT_CLIENT_MESSAGE_ID_CAPABILITY,
   CHAT_IMAGES_CAPABILITY,
   CHAT_IMAGES_INCLUDE,
+  CONVERSATION_ANSWER_STARTED_INCLUDE,
   CHAT_PLACEMENT_CAPABILITY,
   ChatImageSchema,
   TicketAttachmentContentSchema,
@@ -1268,7 +1271,11 @@ export class ControlPlaneClient {
     };
     const full = `tool_calls,surfaces,placement,${TICKET_REPLY_ACTIONS_INCLUDE}`;
     // 用户发的图片（include=images）总是先要：页面打开时快照在 hello.v2 之前就取了，那时还不知道 daemon 的能力。
-    const includes = [`${full},${CHAT_IMAGES_INCLUDE}`, full, 'tool_calls,surfaces,placement', 'tool_calls,surfaces'];
+    // 开始回答的时刻（include=answer_started，2026-11-09）也先要：旧 daemon 回 400，退回不带它的一档。
+    const includes = [
+      `${full},${CHAT_IMAGES_INCLUDE},${CONVERSATION_ANSWER_STARTED_INCLUDE}`,
+      `${full},${CHAT_IMAGES_INCLUDE}`, full, 'tool_calls,surfaces,placement', 'tool_calls,surfaces',
+    ];
     for (const include of includes) {
       try {
         return await load(include);
@@ -2013,6 +2020,12 @@ export class ControlPlaneClient {
       method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}', ...(signal ? { signal } : {}),
     });
     return payload.hostBypass;
+  }
+
+  // 「Lead 忙时你发的消息」怎么放（设置 → Lead → 身份与风格，契约在 protocol 的 busy-placement.ts，2026-11-09）。读要 tickets:view；
+  // 改走 performUiAction('busy_placement', 'lead', 'set', { input: { placement } })。
+  async getBusyPlacement(signal?: AbortSignal): Promise<BusyPlacementDto> {
+    return (await this.request<{ busyPlacement: BusyPlacementDto }>('/v1/lead/busy-placement', BusyPlacementResponseSchema, { signal })).busyPlacement;
   }
 
   // 界面的外观偏好（设置页「外观」）。

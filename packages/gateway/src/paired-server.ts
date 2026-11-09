@@ -27,11 +27,13 @@ import {
   CHAT_CLIENT_MESSAGE_ID_CAPABILITY,
   CHAT_PLACEMENT_CAPABILITY,
   CHAT_FOLLOW_UP_ACTIONS_CAPABILITY,
+  CHAT_PLACEMENT_PREFERENCE_CAPABILITY,
   FollowUpActionRequestSchema,
   CHAT_IMAGE_ID_PATTERN,
   TICKET_ATTACHMENT_ID_PATTERN,
   CHAT_IMAGES_CAPABILITY,
   CHAT_IMAGES_INCLUDE,
+  CONVERSATION_ANSWER_STARTED_INCLUDE,
   LEAD_AVATAR_CAPABILITY,
   CHAT_SEND_MAX_BYTES,
   ChatPlacementSchema,
@@ -132,7 +134,7 @@ import { handleRuleChangeRoute } from "./rule-change-routes.js";
 import { handleTimerRoute } from "./timer-routes.js";
 import type { LeadCapability, LeadGrant, LeadGrantChannel } from "@pi-lead-child/store";
 import {
-  findClientMessageTurn, getChatImage, getItem, listSurfaceActions, listWidgets, loadSetupStatus, recordClientMessageTurn, recordSurfaceAction, type ChatImageData,
+  findClientMessageTurn, getBusyPlacement, getChatImage, getItem, listSurfaceActions, listWidgets, loadSetupStatus, recordClientMessageTurn, recordSurfaceAction, type ChatImageData,
 } from "@pi-lead-child/store";
 import { TicketAttachmentError } from "@pi-lead-child/store";
 import { decodeChatImages } from "./chat-images.js";
@@ -236,7 +238,8 @@ export interface PairedBridge {
   leadAvatar?: LeadAvatarService;
   hello: () => Record<string, unknown>;
   chat: (message: string, origin: { label: string }) => "started" | "steered";
-  // mode：用户选的放置方式（工单 04）。缺省是插话。Lead 忙时排队的消息回 queued。
+  // mode：用户选的放置方式（工单 04）。没带时按「Lead 忙时你发的消息」的设置放（chatPlacementPreference 为 true 时，
+  // protocol 的 busy-placement.ts），否则是插话。Lead 忙时排队的消息回 queued。
   chatV2?: (command: {
     message: string;
     bindingId: number;
@@ -248,6 +251,9 @@ export interface PairedBridge {
     // 用户发的图片（protocol 的 chat-images.ts），网关已经校验并解码。只有 Lead 的会话收图片。
     images?: ChatImageData[];
   }) => { mode: ChatSendMode; turnId: string };
+  // chatV2 收到没带 mode 的消息时按「Lead 忙时你发的消息」的设置放（protocol 的 busy-placement.ts）。为 true 时网关在 hello.v2 里
+  // 宣布 CHAT_PLACEMENT_PREFERENCE_CAPABILITY，客户端据此不再带 mode。
+  chatPlacementPreference?: boolean;
   // 工单对话里的一条消息：daemon 一律交给这张工单的 agent（spec D13，2026-10-19）。
   ticketMessageV2?: (command: {
     message: string;
@@ -1534,6 +1540,14 @@ export async function startPairedServer(
         return;
       }
 
+      // Lead 忙时你发的消息怎么放（设置 → Lead → 身份与风格，protocol 的 busy-placement.ts，2026-11-09）。只读 kv。
+      // 改走通用的操作入口（POST /v1/actions/busy_placement/lead/set）。
+      if (req.method === "GET" && url.pathname === "/v1/lead/busy-placement") {
+        requireAuth(req, "tickets:view");
+        json(req, res, 200, { busyPlacement: getBusyPlacement(bridge.db) });
+        return;
+      }
+
       // 换 Lead 的模型：操作层的 lead_model / switch，和 Lead 的 switch_lead_model 是同一个操作。
       if (req.method === "POST" && url.pathname === "/v1/lead/model") {
         const auth = requireAuth(req, "chat");
@@ -2559,7 +2573,10 @@ export async function startPairedServer(
         // 不认识的取值拒掉，免得拼错了静默拿不到。
         const include = url.searchParams.getAll("include").flatMap((value) => value.split(",")).filter(Boolean);
         // ?include=images：用户的轮次带上发的图片（protocol 的 chat-images.ts）。
-        const known = new Set(["tool_calls", "surfaces", "placement", TICKET_REPLY_ACTIONS_INCLUDE, CHAT_IMAGES_INCLUDE]);
+        // ?include=answer_started：用户的轮次带上 Lead 开始回答的时刻（2026-11-09，会话按它排 Lead 的回答）。
+        const known = new Set([
+          "tool_calls", "surfaces", "placement", TICKET_REPLY_ACTIONS_INCLUDE, CHAT_IMAGES_INCLUDE, CONVERSATION_ANSWER_STARTED_INCLUDE,
+        ]);
         if (include.some((value) => !known.has(value))) {
           throw new HttpError(400, "invalid_request", "invalid include");
         }
@@ -2571,6 +2588,7 @@ export async function startPairedServer(
           ...(include.includes("placement") ? { placement: true } : {}),
           ...(include.includes(TICKET_REPLY_ACTIONS_INCLUDE) ? { replyActions: true } : {}),
           ...(include.includes(CHAT_IMAGES_INCLUDE) ? { images: true } : {}),
+          ...(include.includes(CONVERSATION_ANSWER_STARTED_INCLUDE) ? { answerStarted: true } : {}),
         };
         // 会话打开时只取最近几轮，往上翻时取更早的，Lead 说完一句只取那一轮（2026-11-04）。旧客户端两个都不带，回答不变。
         // ?before=<一轮的 id>：排在它前面的最多 limit 轮，另带 hasMore。这一轮不存在时 404。
@@ -3361,6 +3379,8 @@ export async function startPairedServer(
           CHAT_PLACEMENT_CAPABILITY,
           // 排着的追问能插进这一轮、能取消（daemon 交来了这个服务时）。
           ...(bridge.uiActionServices?.followUps ? [CHAT_FOLLOW_UP_ACTIONS_CAPABILITY] : []),
+          // 没带 mode 的消息按「Lead 忙时你发的消息」的设置放（daemon 说它这样做时）。
+          ...(bridge.chatV2 && bridge.chatPlacementPreference ? [CHAT_PLACEMENT_PREFERENCE_CAPABILITY] : []),
           // Lead 的会话收图片（只有 chatV2 的桥接收）。
           ...(bridge.chatV2 ? [CHAT_IMAGES_CAPABILITY] : []),
           // Lead 的形象（/v1/lead/avatar 的路由，protocol 的 lead-avatar.ts）。这个网关总有这些路由。

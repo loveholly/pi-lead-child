@@ -47,7 +47,7 @@ async function start(lead: ReturnType<typeof fakePiLead>) {
   await vi.waitFor(() => expect(events.some((event) => event.type === "hello.v2")).toBe(true));
   socket.send(JSON.stringify({ type: "presence.set", id: "presence", protocolVersion: 2, attended: true }));
   let sent = 0;
-  // mode：插话（steer，缺省）或排队（followUp）。
+  // mode：插话（steer）或排队（followUp）。不带时 daemon 按「Lead 忙时你发的消息」的设置放，缺省排队（busy-placement-daemon.test.ts）。
   const send = async (message: string, mode?: "steer" | "followUp") => {
     const id = `cmd-${++sent}`;
     socket.send(JSON.stringify({ type: "chat.send", id, protocolVersion: 2, message, ...(mode ? { mode } : {}) }));
@@ -168,7 +168,7 @@ describe("scenario 2: B steers into the round that answers A", () => {
     await vi.waitFor(() => expect(lead.calls).toHaveLength(1));
     tellEvent("迁移脚本卡住了");
     await pause(150);
-    const b = await send("问题 B");
+    const b = await send("问题 B", "steer");
     expect(b.mode).toBe("steered");
     holdA.resolve();
 
@@ -184,6 +184,36 @@ describe("scenario 2: B steers into the round that answers A", () => {
     expect(placement.payload).toMatchObject({ mode: "steered", placement: "answered_together", answeredWith: b.turnId });
   });
 
+  // 2026-11-09：插话送到以后界面还写「当前步骤之后看到」，工具画成停了，用时从发出时算。送到的那一刻这一轮就在回答了。
+  it("marks a delivered steer as answering the moment the session delivers it, before Lead says anything", async () => {
+    const holdA = deferred();
+    const holdB = deferred();
+    const lead = fakePiLead(async (call) => {
+      const input = call.inputs.join("\n");
+      if (input.includes("问题 A")) { await holdA.promise; return { tools: ["query_tickets"] }; }
+      if (input.includes("问题 B")) { await holdB.promise; return { say: "B 的回答。" }; }
+      return { say: "收到。" };
+    });
+    const { events, send } = await start(lead);
+
+    await send("问题 A");
+    await vi.waitFor(() => expect(lead.calls).toHaveLength(1));
+    const b = await send("问题 B", "steer");
+    expect(b.mode).toBe("steered");
+    await vi.waitFor(() => expect(turn(b.turnId).state).toBe("steered"));
+    holdA.resolve();
+
+    // B 送进了上下文，Lead 还在想（没说话）：这一轮已经是 streaming，界面收到了「开始回答」。
+    await vi.waitFor(() => expect(lead.calls).toHaveLength(2));
+    expect(turn(b.turnId)).toMatchObject({ state: "streaming", assistant_text: "" });
+    const bStarts = events.filter((event) => event.type === "lead.turn.started" && event.turnId === b.turnId);
+    expect(bStarts.at(-1).payload).toMatchObject({ mode: "started", placement: "delivered" });
+
+    holdB.resolve();
+    await vi.waitFor(() => expect(turn(b.turnId)).toMatchObject({ state: "completed", assistant_text: "B 的回答。" }));
+    expect(userMessageOutcome(b.turnId)).toMatchObject({ outcome: "done" });
+  });
+
   it("turns a steer that arrives during the final answer into the next round's input, and says so", async () => {
     const holdA = deferred();
     const lead = fakePiLead(async (call) => {
@@ -196,7 +226,7 @@ describe("scenario 2: B steers into the round that answers A", () => {
 
     const a = await send("问题 A");
     await vi.waitFor(() => expect(lead.calls).toHaveLength(1));
-    const b = await send("问题 B");
+    const b = await send("问题 B", "steer");
     expect(b.mode).toBe("steered");
     holdA.resolve();
 
@@ -214,6 +244,84 @@ describe("scenario 2: B steers into the round that answers A", () => {
   });
 });
 
+// 打断式插话（用户 2026-11-09：「可以支持打断式插话，但是需要注意让 lead agent 不能遗漏打断前的任务」）。
+// 截图那天：Lead 还在想上一步，插话等了 2 分半才送到。现在模型还在想时，这一步的模型请求停下，插话马上送进去；
+// 插话前面有一段说明：插进来之前 Lead 在做什么，没改掉原来的事就要接着做完。正在跑的工具、已经写出来的字不打断。
+describe("interrupting Lead's unfinished step for a steer", () => {
+  it("delivers the steer at once while the model is still thinking, with a note about the earlier task", async () => {
+    const lead = fakePiLead(async (call) => {
+      const input = call.inputs.join("\n");
+      // A 的这一步一直在想（不结束）：只有打断才能让 B 送到。
+      if (input.includes("问题 A")) return new Promise<never>(() => {});
+      if (input.includes("问题 B")) return { say: "先答 B，A 我接着做。" };
+      return { say: "收到。" };
+    }, { interruptible: true });
+    const { events, send } = await start(lead);
+
+    const a = await send("问题 A");
+    await vi.waitFor(() => expect(lead.calls).toHaveLength(1));
+    const b = await send("问题 B", "steer");
+    expect(b.mode).toBe("steered");
+
+    await vi.waitFor(() => expect(turn(b.turnId)).toMatchObject({ state: "completed", assistant_text: "先答 B，A 我接着做。" }));
+    expect(lead.interrupts()).toBe(1);
+    expect(lead.calls).toHaveLength(2);
+    // B 送进去时带着说明：插进来之前在做 A，没改掉 A 就接着做完。用户的话原样在后面。
+    const steered = lead.calls[1]!.inputs.join("\n");
+    expect(steered).toContain('<system_event kind="steer"');
+    expect(steered).toContain("回答用户前面那句话，还没做完");
+    expect(steered).toContain("接着把原来的事做完");
+    expect(steered.indexOf('kind="steer"')).toBeLessThan(steered.indexOf("<user_message"));
+    // 中止的那一步不是失败：A 和 B 一起答了，没有失败卡，也没有「Lead 回复被中断」。
+    expect(turn(a.turnId)).toMatchObject({ state: "steered", error: null });
+    expect(userMessageOutcome(a.turnId)).toMatchObject({ outcome: "done", answeredWith: b.turnId });
+    expect(events.some((event) => event.type === "notice.created")).toBe(false);
+    expect(events.some((event) => event.type === "lead.turn.failed")).toBe(false);
+  });
+
+  it("waits for a running tool instead of interrupting it", async () => {
+    const toolDone = deferred();
+    const lead = fakePiLead(async (call) => {
+      const input = call.inputs.join("\n");
+      if (input.includes("问题 A")) return { tools: [{ name: "bash", args: { command: "make" }, until: toolDone.promise }] };
+      if (input.includes("问题 B")) return { say: "B 的回答。" };
+      return { say: "收到。" };
+    }, { interruptible: true });
+    const { events, send } = await start(lead);
+
+    await send("问题 A");
+    await vi.waitFor(() => expect(events.some((event) => event.type === "lead.tool.started")).toBe(true));
+    const b = await send("问题 B", "steer");
+    await pause(100);
+    expect(lead.interrupts()).toBe(0);
+    expect(lead.calls).toHaveLength(1);
+    toolDone.resolve();
+    await vi.waitFor(() => expect(turn(b.turnId)).toMatchObject({ state: "completed", assistant_text: "B 的回答。" }));
+    expect(lead.interrupts()).toBe(0);
+    expect(callWith(lead.calls, "问题 B")).toBe(1);
+  });
+
+  it("does not interrupt once Lead has started writing its answer", async () => {
+    const holdA = deferred();
+    const lead = fakePiLead(async (call) => {
+      const input = call.inputs.join("\n");
+      if (input.includes("问题 A")) return { say: ["A 的回", holdA.promise, "答。"] };
+      if (input.includes("问题 B")) return { say: "B 的回答。" };
+      return { say: "收到。" };
+    }, { interruptible: true });
+    const { send } = await start(lead);
+
+    const a = await send("问题 A");
+    await vi.waitFor(() => expect(turn(a.turnId).assistant_text).toBe("A 的回"));
+    const b = await send("问题 B", "steer");
+    await pause(100);
+    expect(lead.interrupts()).toBe(0);
+    holdA.resolve();
+    await vi.waitFor(() => expect(turn(b.turnId)).toMatchObject({ state: "completed", assistant_text: "B 的回答。" }));
+    expect(turn(a.turnId)).toMatchObject({ state: "completed", assistant_text: "A 的回答。" });
+  });
+});
+
 // spec D7（工单 04 设计修正）：当前局面放在每一轮输入的开头，用 system_event 信封，和用户的话分开；不放进系统提示
 // （系统提示一变，整段对话的提示缓存就失效了，见 packages/lead/test/situation.test.ts）。没有变化的长内容不重复放。
 describe("a steer whose delivery the session does not report", () => {
@@ -228,7 +336,7 @@ describe("a steer whose delivery the session does not report", () => {
     const { send } = await start(lead);
     const a = await send("问题 A");
     await vi.waitFor(() => expect(lead.calls).toHaveLength(1));
-    const b = await send("问题 B");
+    const b = await send("问题 B", "steer");
     holdA.resolve();
     await vi.waitFor(() => expect(turn(a.turnId)).toMatchObject({ state: "completed", assistant_text: "都看了。" }));
     await vi.waitFor(() => expect(userMessageOutcome(b.turnId)).toMatchObject({ outcome: "done" }));

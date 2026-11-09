@@ -83,7 +83,7 @@ import { buildTimeline } from "./timeline.js";
 import { inboxSeenAt, latestBlockedReason, listLeadHandled } from "@pi-lead-child/store";
 import { getCheckpoint, listCheckpoints } from "@pi-lead-child/store";
 import { listConversationCardPage } from "@pi-lead-child/store";
-import { acknowledgeInterruptEvent, getTurn, latestTurnStartedPayloads, listTurns, listTurnSurfaceEvents, listTurnToolEvents, userMessageOutcomes, type ChannelTurnRow, type PublishGatewayEventInput } from "@pi-lead-child/store";
+import { acknowledgeInterruptEvent, getTurn, latestTurnAnswerStarts, latestTurnStartedPayloads, listTurns, listTurnSurfaceEvents, listTurnToolEvents, userMessageOutcomes, type ChannelTurnRow, type PublishGatewayEventInput } from "@pi-lead-child/store";
 import { buildLeadActivityView, createLeadActivityPublisher, leadInterruptOf } from "./lead-activity.js";
 import { listChildren, listDependencies } from "@pi-lead-child/store";
 import { listInbox } from "@pi-lead-child/store";
@@ -1572,6 +1572,8 @@ type ConversationTurnQuery = {
   replyActions?: boolean;
   // 用户的轮次带上发的图片（protocol 的 chat-images.ts）。
   images?: boolean;
+  // 用户的轮次带上开始回答的时刻（protocol 的 CONVERSATION_ANSWER_STARTED_INCLUDE，2026-11-09）。
+  answerStarted?: boolean;
 };
 
 // 快照里的一轮：按客户端要的 include 带上工具调用、卡片、放置方式、回复的动作和图片。
@@ -1601,6 +1603,10 @@ function conversationTurnsOf(db: Db, turns: ChannelTurnRow[], opts?: Conversatio
       ...(typeof outcome.answeredWith === "string" ? { answeredWith: outcome.answeredWith } : {}),
     };
   };
+  // 开始回答的时刻（2026-11-09）：只取用户的轮次，Lead 自己发起的一轮在开口时才落成，created_at 就是开始的时刻。
+  const answerStarts = opts?.answerStarted
+    ? latestTurnAnswerStarts(db, turns.filter((turn) => !isSystemTurnOrigin(turn.origin_kind)).map((turn) => turn.id))
+    : null;
   const toolEvents = opts?.toolCallScopes
     ? listTurnToolEvents(db, turns.map((turn) => turn.id), { scopes: opts.toolCallScopes })
     : null;
@@ -1623,5 +1629,6 @@ function conversationTurnsOf(db: Db, turns: ChannelTurnRow[], opts?: Conversatio
     ...placementOf(turn),
     ...(replyActions?.has(turn.id) ? { replyActions: replyActions.get(turn.id)! } : {}),
     ...(imageRefs?.has(turn.id) ? { images: imageRefs.get(turn.id)! } : {}),
+    ...(answerStarts?.has(turn.id) ? { answerStartedAt: answerStarts.get(turn.id)! } : {}),
   }));
 }

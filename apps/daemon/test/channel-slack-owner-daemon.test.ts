@@ -10,7 +10,7 @@ import { tempDir } from "@pi-lead-child/core/testing";
 import { isLiveUserTurn, runTicketAction } from "@pi-lead-child/engine";
 import { FakeSlack } from "@pi-lead-child/engine/testing";
 import { authorityTurnId } from "@pi-lead-child/lead";
-import { createItem, DEFAULT_SCOPES, getItem, openDb, revokeBinding, type Db } from "@pi-lead-child/store";
+import { createItem, DEFAULT_SCOPES, getItem, openDb, revokeBinding, writeBusyPlacement, type Db } from "@pi-lead-child/store";
 import { startDaemon } from "../src/server.js";
 import { deferred, fakePiLead } from "./fake-pi-session.js";
 
@@ -98,6 +98,8 @@ describe("the user's own Slack DM to themself in the daemon", () => {
   it("lets Lead set the budget in the user's own Slack DM that steered into a busy Lead", async () => {
     const slack = new FakeSlack();
     const itemId = createItem(db, { title: "预算不够的工单", brief: "b", createdBy: "lead", hold: true });
+    // 私信不带 mode，daemon 按「Lead 忙时你发的消息」的设置放（缺省排队）。这里测插话，所以先设成插话。
+    writeBusyPlacement(db, "steer");
     const busy = deferred();
     const firstHeard = deferred();
     const results: Array<{ turnId: string | null; state: string | null; outcome: unknown }> = [];
@@ -135,7 +137,8 @@ describe("the user's own Slack DM to themself in the daemon", () => {
 
     await vi.waitFor(() => expect(results).toHaveLength(1), { timeout: 10_000 });
     const steered = turnsFromSlack().find((turn) => turn.user_text === "可以，按你说的加")!;
-    expect(results[0]).toMatchObject({ turnId: steered.id, state: "steered" });
+    // 插话送到 Lead 时这一轮回到 streaming（2026-11-09，daemon 的 startDeliveredSteer）：Lead 在答它，操作照样算这一轮的。
+    expect(results[0]).toMatchObject({ turnId: steered.id, state: "streaming" });
     expect(results[0]!.outcome).toMatchObject({ authority: "on_behalf", by: { actor: "lead", onBehalfOf: { sourceTurnId: steered.id } } });
     expect(getItem(db, itemId)!.token_budget).toBe(30_000_000);
     await vi.waitFor(() => expect(turnsFromSlack().map((turn) => turn.state)).toEqual(["completed", "completed"]), { timeout: 10_000 });

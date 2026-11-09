@@ -57,7 +57,8 @@ async function boot(script: (call: FakeCall, deps: () => any) => FakeReply | Pro
     sessionFactory: lead.factory as never,
   });
   const owner = createLoopbackBinding(db, { name: "Mac 网页" });
-  const say = async (id: string, message: string, mode?: "followUp"): Promise<{ turnId: string; mode: string }> => {
+  // mode：不带时 daemon 按「Lead 忙时你发的消息」的设置放，缺省排队。那天的 App 不带 mode 就是插话，所以重放时写明插话。
+  const say = async (id: string, message: string, mode?: "steer" | "followUp"): Promise<{ turnId: string; mode: string }> => {
     const response = await fetch(`http://127.0.0.1:${daemon!.pairedPort}/v1/chat/send`, {
       method: "POST", headers: { authorization: `Bearer ${owner.accessToken}`, "content-type": "application/json" },
       body: JSON.stringify({ id, message, ...(mode ? { mode } : {}) }),
@@ -91,7 +92,7 @@ describe("the 2026-11-03 queue, replayed", () => {
 
     await say("a1", "给 acme/a、acme/b、acme/c、acme/d 各提一个 PR，把 lodash 升到 4.17.21");
     await vi.waitFor(() => expect(lead.calls.length).toBe(2), { timeout: 5_000 });
-    const sent = await say("a2", "acme/b、acme/c、acme/d 已经有 DevOps 提的 PR 了");
+    const sent = await say("a2", "acme/b、acme/c、acme/d 已经有 DevOps 提的 PR 了", "steer");
     expect(sent.mode).toBe("steered");
     correctionSent.resolve();
 

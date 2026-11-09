@@ -26,6 +26,7 @@ import { AddLocalMcpRequestSchema, AddRemoteMcpRequestSchema, InstallSkillReques
 import { ReminderRescheduleRequestSchema } from "./reminders.ts";
 import { ReplyStyleExtractRequestSchema, ReplyStyleUpdateRequestSchema } from "./reply-style.ts";
 import { DisableHostBypassRequestSchema, EnableHostBypassRequestSchema } from "./host-bypass.ts";
+import { SetBusyPlacementRequestSchema } from "./busy-placement.ts";
 import { RuleChangeDecisionSchema } from "./rule-change-confirmations.ts";
 import { SurfaceActionOriginSchema } from "./surface-actions.ts";
 import { TimerRequestDecisionSchema } from "./timer-origins.ts";
@@ -92,11 +93,13 @@ export const ActionPermissionSchema = Type.Union([
 //   skills  PLC 自己的 skill 目录（~/Library/Application Support/Bytezard Lead/skills，2026-11-02）：从 GitHub 装一个。编号只有 skills。
 //   skill  PLC 装的一个 skill：卸载。编号是 skill 的名字。
 //   host_bypass  「用户本人发话时免沙箱」开关（设置 → 免沙箱，工单 #246，host-bypass.ts）。编号只有 lead。
+//   busy_placement  Lead 忙时你发的消息怎么放：排队或插话（设置 → Lead → 身份与风格，2026-11-09，busy-placement.ts）。编号只有 lead。
 export const UI_ACTION_TARGET_TYPES = [
   "runtime", "device", "approval", "decision", "channel_card", "channel_conversation", "channel_policy", "channel_handbook", "lead_model",
   "reminder", "workspace", "milestone", "rule_change", "lead_queue", "timer", "timer_request", "follow_up", "reply_style",
   "model_settings", "memory_settings", "core_memory", "core_memory_change", "memory_fact", "setup_hint",
   "widget_board", "widget", "channel_connection", "connections", "connection", "skills", "skill", "host_bypass",
+  "busy_placement",
 ] as const;
 export type UiActionTargetType = typeof UI_ACTION_TARGET_TYPES[number];
 
@@ -376,6 +379,10 @@ export const UI_ACTION_INPUT_SCHEMAS = {
     enable: EnableHostBypassRequestSchema,
     // 关掉免沙箱。你和 Lead 都能关。
     disable: DisableHostBypassRequestSchema,
+  },
+  busy_placement: {
+    // 选 Lead 忙时你发的消息怎么放：followUp（排队，缺省）或 steer（插话）。改规则：读过外部内容的一轮里不能做。
+    set: SetBusyPlacementRequestSchema,
   },
 } as const satisfies Record<UiActionTargetType, Record<string, TSchema>>;
 

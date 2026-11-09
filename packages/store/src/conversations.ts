@@ -291,6 +291,17 @@ export function markTurnInserted(db: Db, id: string, now?: Date): boolean {
   ).run(isoNow(now), id).changes > 0;
 }
 
+// 插话送进了模型的上下文（会话的 message_start，role=user）：从这一刻起 Lead 在回答它，轮次回到 streaming（2026-11-09）。
+// 以前插话一直停在 steered，直到 Lead 第一次开口；界面那段时间一直写「当前步骤之后看到」，看起来像没收到。
+// 结局照旧在这一轮结束时定（sealChannelTurn 或 settleTurnAnsweredWith），这里不记处置。只改没有错误的 steered 轮次，
+// 和还没来得及标成 steered 的 queued 轮次（pi 收下插话、daemon 还没处理完回执时它就送到了）。
+export function markSteerDelivered(db: Db, id: string, now?: Date): boolean {
+  return db.prepare(
+    `UPDATE channel_turns SET state = 'streaming', updated_at = ?
+     WHERE id = ? AND state IN ('queued', 'steered') AND error IS NULL`,
+  ).run(isoNow(now), id).changes > 0;
+}
+
 // 用户的一条消息没有自己的回答：Lead 把它和别的消息一起答了（工单 04 第 7 项：插话在 Lead 开口之前到达；
 // 几条排队的消息一起放进同一轮）。结局是 done，不是失败；轮次停在 steered（和工单对话里被下一条接替的轮次同一个终态），
 // 界面上它和 answeredWith 那一条显示为同一次回答。answeredWith 为空：插话送到了，Lead 在同一轮里看到了它，没有另外回答。

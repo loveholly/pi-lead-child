@@ -1,5 +1,5 @@
 import {
-  CHANNEL_CARDS_SNAPSHOT_RESOURCE, CHANNEL_SETTINGS_SNAPSHOT_RESOURCE, SETUP_RESOURCE, WIDGETS_RESOURCE, CONNECTIONS_SNAPSHOT_RESOURCE, LEAD_ACTIVITY_RESOURCE, LEAD_AVATAR_RESOURCE, LEAD_PROFILE_RESOURCE, HOST_BYPASS_RESOURCE, MODEL_SETTINGS_RESOURCE, LeadActivityPushSchema,
+  CHANNEL_CARDS_SNAPSHOT_RESOURCE, CHANNEL_SETTINGS_SNAPSHOT_RESOURCE, SETUP_RESOURCE, WIDGETS_RESOURCE, CONNECTIONS_SNAPSHOT_RESOURCE, LEAD_ACTIVITY_RESOURCE, LEAD_AVATAR_RESOURCE, LEAD_PROFILE_RESOURCE, HOST_BYPASS_RESOURCE, BUSY_PLACEMENT_RESOURCE, MODEL_SETTINGS_RESOURCE, LeadActivityPushSchema,
   LEAD_QUEUE_RESOURCE, LeadQueueSchema, TICKET_REPLY_ACTIONS_RESOURCE, TurnPlacementSchema,
   type LeadActivityCard, type LeadInterrupt, type LeadQueue, type ReminderCard, type SetupChecklistCard, type SetupHintCard, type TurnPlacement, type UiSurface,
 } from '@pi-lead-child/protocol';
@@ -353,6 +353,7 @@ function snapshotInvalidation(resource: unknown): string {
   if (resource === LEAD_PROFILE_RESOURCE) return 'lead-profile';
   if (resource === LEAD_AVATAR_RESOURCE) return 'lead-avatar';
   if (resource === HOST_BYPASS_RESOURCE) return 'host-bypass';
+  if (resource === BUSY_PLACEMENT_RESOURCE) return 'busy-placement';
   if (resource === CHANNEL_SETTINGS_SNAPSHOT_RESOURCE) return 'channel-settings';
   return 'core';
 }

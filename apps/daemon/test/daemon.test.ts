@@ -1725,9 +1725,10 @@ describe("daemon 插话回答的归属", () => {
     socket.on("message", (raw) => messages.push(JSON.parse(String(raw))));
     await nextMessage(socket, messages, "hello.v2", (m) => m.type === "hello.v2");
     let counter = 0;
-    const chat = async (message: string) => {
+    // mode：插话（steer）或排队（followUp）。不带时 daemon 按「Lead 忙时你发的消息」的设置放，缺省排队。
+    const chat = async (message: string, mode?: "steer" | "followUp") => {
       const id = `cmd-${++counter}`;
-      socket.send(JSON.stringify({ type: "chat.send", id, protocolVersion: 2, message }));
+      socket.send(JSON.stringify({ type: "chat.send", id, protocolVersion: 2, message, ...(mode ? { mode } : {}) }));
       const result = await nextMessage(socket, messages, `command.result ${id}`,
         (m) => m.type === "command.result" && m.id === id);
       expect(result).toMatchObject({ success: true });
@@ -1916,7 +1917,7 @@ describe("daemon 插话回答的归属", () => {
       await vi.waitFor(() => expect(readTurn(first.turnId).assistant_text).toContain("HANG"));
       const beforeSteer = readTurn(first.turnId).assistant_text;
 
-      const steered = await client.chat("赶紧终止掉所有的任务和派发");
+      const steered = await client.chat("赶紧终止掉所有的任务和派发", "steer");
       expect(steered.mode).toBe("steered");
       expect(steered.turnId).not.toBe(first.turnId);
       await vi.waitFor(() => expect(stub.steers.some((s) => s.includes("赶紧终止"))).toBe(true));
@@ -1956,7 +1957,7 @@ describe("daemon 插话回答的归属", () => {
       await vi.waitFor(() => expect(readTurn(first.turnId).assistant_text).toContain("HANG"));
       const beforeSteer = readTurn(first.turnId).assistant_text;
 
-      const steered = await client.chat("顺便看一眼 #2");
+      const steered = await client.chat("顺便看一眼 #2", "steer");
       await vi.waitFor(() => expect(readTurn(steered.turnId).state).toBe("steered"));
 
       stub.releaseHang();
@@ -1980,9 +1981,9 @@ describe("daemon 插话回答的归属", () => {
       const first = await client.chat("please HANG");
       await vi.waitFor(() => expect(readTurn(first.turnId).assistant_text).toContain("HANG"));
 
-      const steerA = await client.chat("先停一下");
+      const steerA = await client.chat("先停一下", "steer");
       await vi.waitFor(() => expect(stub.steers.some((s) => s.includes("先停一下"))).toBe(true));
-      const steerB = await client.chat("你怎么一直没回复我了");
+      const steerB = await client.chat("你怎么一直没回复我了", "steer");
       await vi.waitFor(() => expect(stub.steers.some((s) => s.includes("没回复"))).toBe(true));
 
       stub.emitDelta("都停了，刚才在跑工具");
@@ -2023,7 +2024,7 @@ describe("daemon 插话回答的归属", () => {
       const beforeSteer = readTurn(first.turnId).assistant_text;
 
       // 插话之后一个 delta 都没来，回答整条从 message_end 补出来——它仍属插话那一轮。
-      const steered = await client.chat("那先取消掉");
+      const steered = await client.chat("那先取消掉", "steer");
       await vi.waitFor(() => expect(stub.steers.some((s) => s.includes("那先取消掉"))).toBe(true));
       stub.emitMessageEnd("已取消");
       expect(readTurn(steered.turnId).assistant_text).toBe("已取消");

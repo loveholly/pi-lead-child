@@ -28,6 +28,7 @@ import { REPLY_STYLE_SECTION, renderReplyStyle } from "./reply-style.js";
 import { credentialGuardExtension, knownSecretValues } from "./credential-guard.js";
 import { applyLeadCompactionReserve, leadAutoCompactionInstructions } from "./compaction-settings.js";
 import { costSignalsExtension } from "./cost-signals.js";
+import { installStepInterrupt } from "./step-interrupt.js";
 import { compactionChunksExtension, type CompactionProgress } from "./compaction-chunks.js";
 import {
   getDesignPreferences, getLeadProfile, getReplyStyle, leadProfileFields, recordDecisionModelCall, renderCoreMemory, renderStandingOrdersForLead,
@@ -214,7 +215,7 @@ export async function createLeadSession(opts: {
   toolGate?: () => ReadonlySet<string> | null;
 }): Promise<{
   session: LeadEngine; modelName: string; syncToolAccess: () => void; reloadExtensions: () => Promise<void>;
-  models: string[]; switchModel: (spec: string) => Promise<void>; reportsInputDelivery: boolean;
+  models: string[]; switchModel: (spec: string) => Promise<void>; reportsInputDelivery: boolean; interruptStep: () => boolean;
   // 这个会话的 SmartModel（带决策日志和 decision_model.called 事件）。建不出来时为 null。
   smartModel: LeadDeps["smartModel"];
   // 同一个便宜模型的自由文本补全（每次调用记一条 decision_model.called，带调用方的 purpose）。没有 LLM 后端时为 null。
@@ -498,6 +499,8 @@ export async function createLeadSession(opts: {
   });
   // 用户排队的消息（工单 04，spec D6）：Lead 答完这一轮后，连着排队的几条一起放进同一轮。
   session.setFollowUpMode("all");
+  // 打断式插话（step-interrupt.ts）：在会话建好、还没开始第一轮时包上，每次对话循环的请求都带这一步自己的中止信号。
+  const stepInterrupt = installStepInterrupt(session);
   // SoL-Pi 在 session_start 里注册它的工具和钩子。SDK 会话只在 bindExtensions 时发 session_start。
   await session.bindExtensions({
     onError: (error) => console.error(`[lead] extension ${error.extensionPath} ${error.event}: ${error.error}`),
@@ -544,6 +547,7 @@ export async function createLeadSession(opts: {
     },
     // pi 的会话在把插话和排队消息送进模型的上下文时发 message_start（agent-session.js 的 _handleAgentEvent）。
     reportsInputDelivery: true,
+    interruptStep: () => stepInterrupt.interrupt(),
     smartModel,
     complete,
     smartModelLlm,
