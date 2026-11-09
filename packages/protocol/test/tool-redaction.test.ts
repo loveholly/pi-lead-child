@@ -176,12 +176,15 @@ describe("redaction time", () => {
     ["Bearer words", pad("Bearer ")],
   ];
 
+  // 量本进程用掉的 CPU 时间（毫秒），不量墙钟。CI 上测试文件并发跑，别的进程占着 CPU 时，墙钟里多出等 CPU 的时间，
+  // 算法本身的开销不变：2026-11-09 并发跑时，平时 10–20 毫秒的输入三次都超过了 50 毫秒。阈值不变，退化到秒级照样抓得到。
   function fastest(run: () => void): number {
     let best = Number.POSITIVE_INFINITY;
     for (let attempt = 0; attempt < 3; attempt += 1) {
-      const start = performance.now();
+      const start = process.cpuUsage();
       run();
-      best = Math.min(best, performance.now() - start);
+      const used = process.cpuUsage(start);
+      best = Math.min(best, (used.user + used.system) / 1000);
     }
     return best;
   }
