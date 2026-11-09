@@ -9,10 +9,8 @@
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { tempDir } from "@pi-lead-child/core/testing";
-// 通道 hub 和上下文包从同一棵树的源码导入，不经过 node_modules 的链接：在别的 worktree 里跑基线时，
-// @pi-lead-child/engine 可能链到另一份代码，回放就不是这棵树的行为了。
-import { ChannelHub, ChannelRegistry, createSlackChannelAdapter, type ChannelMessageService } from "../../engine/src/index.js";
-import { cardIdOf, FakeAgentTaskDispatcher, FakeSlack, scriptedSmartModel } from "../../engine/testing/index.js";
+import { ChannelHub, ChannelRegistry, createSlackChannelAdapter, type ChannelMessageService } from "@pi-lead-child/engine";
+import { cardIdOf, FakeAgentTaskDispatcher, FakeSlack, scriptedSmartModel } from "@pi-lead-child/engine/testing";
 import { MESSAGE_EVENT_KIND } from "@pi-lead-child/protocol";
 import { getChannelCard, listEvents, openDb, type Db, type EventRecord } from "@pi-lead-child/store";
 import { leadContextPackBlocks, leadMessageEventBlock } from "../src/envelope.js";
