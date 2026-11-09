@@ -17,6 +17,7 @@
 #   packages/core/test/sandbox-policy.test.ts        sandboxTrustEnv 一组：钥匙串里的证书（security）
 #   apps/daemon/test/vault-key.test.ts               the daemon's Keychain key 一组：钥匙串
 #   scripts/desktop/test/agent-bundle.test.ts        两条：codesign
+#   scripts/desktop/test/smoke.test.ts               smokeRuntime 里查进程名的三条：ps -o comm= 给出可执行文件的路径
 #   desktop/test/runtime-bundle.test.ts              unpackRuntime re-uses what did not change 一组：cp -c（APFS 克隆）
 # Linux 上的沙箱要 bubblewrap、socat 和 ripgrep，产品不在 Linux 上跑，所以不装它们，直接跳过。
 #
@@ -198,14 +199,17 @@ jobs:
       # runtime 目录按可执行文件在不在判断 codex、claude 能不能用（packages/runtime 的 locateExecutable）。
       # 开发机上装着这两个 CLI，runner 上没有，点名 codex 的测试就退回 pi，报 "child runtime 'pi' is not configured"。
       # 这些测试注入自己的假 runtime 和模型目录，不运行 CLI。这里放两个占位：在 PATH 上能找到，真被运行时报错退出。
+      # 占位放在 /opt 下，不放在 RUNNER_TEMP（也就是 TMPDIR）和 HOME 下：Lead 的建工单工具说明里写着 CLI 的完整路径，
+      # 有的测试把 HOME 设成 TMPDIR，再检查发给模型的文字里没有 HOME 下的路径（lead-self-knowledge.test.ts scenario 10）。
       - name: Put placeholder codex and claude executables on PATH
         run: |
-          mkdir -p "$RUNNER_TEMP/placeholder-cli"
+          sudo mkdir -p /opt/placeholder-cli
+          sudo chown "$(id -u):$(id -g)" /opt/placeholder-cli
           for name in codex claude; do
-            printf '#!/bin/sh\necho "%s is a placeholder on CI; the tests must not run the real CLI" >&2\nexit 1\n' "$name" > "$RUNNER_TEMP/placeholder-cli/$name"
-            chmod +x "$RUNNER_TEMP/placeholder-cli/$name"
+            printf '#!/bin/sh\necho "%s is a placeholder on CI; the tests must not run the real CLI" >&2\nexit 1\n' "$name" > "/opt/placeholder-cli/$name"
+            chmod +x "/opt/placeholder-cli/$name"
           done
-          echo "$RUNNER_TEMP/placeholder-cli" >> "$GITHUB_PATH"
+          echo "/opt/placeholder-cli" >> "$GITHUB_PATH"
 
       - name: Test the root project (one shard, files in parallel)
         env:

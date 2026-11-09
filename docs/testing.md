@@ -51,6 +51,7 @@ PLC_TEST_SERIAL=1 npm test
 | `packages/core/test/sandbox-policy.test.ts` | `sandboxTrustEnv` 一组 | 钥匙串里的证书（`security`） |
 | `apps/daemon/test/vault-key.test.ts` | `the daemon's Keychain key` 一组 | 钥匙串 |
 | `scripts/desktop/test/agent-bundle.test.ts` | 两条签名的用例 | `codesign` |
+| `scripts/desktop/test/smoke.test.ts` | `smokeRuntime` 里查进程名的三条 | `ps -o comm=` 给出可执行文件的路径 |
 | `desktop/test/runtime-bundle.test.ts` | `unpackRuntime re-uses what did not change` 一组 | `cp -c`（APFS 克隆） |
 
 Linux 上的沙箱要 bubblewrap、socat 和 ripgrep。产品不在 Linux 上跑，所以 CI 不装它们，直接跳过前四个文件。

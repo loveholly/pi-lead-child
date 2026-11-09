@@ -96,7 +96,8 @@ describe("memory facts through the daemon", () => {
     const hindsight = new FakeHindsight();
     memory.setBackend(hindsight);
     const saved = await run("save_note", { title: "住址", content: "用户住在杭州", tags: [], kind: "fact" });
-    const noteId = Number(/#(\d+)/.exec(saved.content[0].text)![1]);
+    // save_note 回「笔记已保存（note_id=5）」（2026-11-03 起；以前是「note #5 saved」）。
+    const noteId = Number(/note_id=(\d+)/.exec(saved.content[0].text)![1]);
     await memory.idle();
     hindsight.process();
     await memory.sync();

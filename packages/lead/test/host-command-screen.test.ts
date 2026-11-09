@@ -1,15 +1,18 @@
 // 命令筛查器（docs/ticket-246-user-turn-bypass.md 第 4 节、第 8 节实施单 B）。表驱动：每条规则至少一正一反。
+// 筛查器在 engine 里，认凭证路径的 credentialPathReason 在 lead 里（lead 依赖 engine）。这里用真的两者，所以测试放在 lead，
+// 筛查器从 engine 的公开入口引用（package-boundaries.test.ts：相对路径不能越出本包）。
 // 用一个假的 home（临时目录）：里面有 .ssh、Documents、LaunchAgents 和 plc 的数据目录，外面有一个隔离 worktree。
 // 数据目录的路径里有空格（Application Support），命令里的脚本路径要加引号。
 import * as childProcess from "node:child_process";
 import { mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { createRequire } from "node:module";
+import { dirname, join } from "node:path";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import { tempDir } from "@pi-lead-child/core/testing";
-import { credentialPathReason } from "../../lead/src/credential-guard.js";
 import {
   copyScreenedScripts, screenHostCommand, screenReason, type ScreenFs, type ScreenInput, type ScreenRule, type ScreenVerdict,
-} from "../src/host-commands/screen.js";
+} from "@pi-lead-child/engine";
+import { credentialPathReason } from "../src/credential-guard.js";
 
 vi.mock("node:child_process", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:child_process")>();
@@ -295,7 +298,7 @@ describe("纯函数", () => {
   });
 
   it("不读数据库、不跑命令：模块不 import store、sqlite 和 child_process", () => {
-    const source = readFileSync(new URL("../src/host-commands/screen.ts", import.meta.url), "utf8");
+    const source = readFileSync(join(dirname(createRequire(import.meta.url).resolve("@pi-lead-child/engine")), "host-commands", "screen.ts"), "utf8");
     const imports = [...source.matchAll(/from "([^"]+)"/g)].map((match) => match[1]);
     expect(imports).toContain("@pi-lead-child/core");
     expect(imports.filter((name) => /store|sqlite|child_process|database/.test(name!))).toEqual([]);

@@ -8,7 +8,7 @@ import {
 
 import { createJsonCredentialStore, type KeyValueStorage } from '../src/credentialStore.ts';
 import { ControlPlaneClient } from '../src/controlPlaneClient.ts';
-import { LegacyModelSettingsResponseSchema } from './legacyModelSettingsSchema.ts';
+import { LegacyModelSettingsResponseSchema } from '../testing/legacyModelSettingsSchema.ts';
 
 class MemoryKeyValueStorage implements KeyValueStorage {
   values = new Map<string, string>();
