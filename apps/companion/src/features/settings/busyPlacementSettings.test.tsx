@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 // 设置 → Lead → 身份与风格 →「Lead 忙时你发的消息」（主题 11.19，用户 2026-11-09）：排队（缺省）和插话二选一，
-// 每个选项下面一句说明，说明里的名字是 Lead 的名字。点了马上保存（操作层的 busy_placement.set）；没保存成功时写原因，选中项退回。
+// 是一组单选（用户 2026-11-09：「把 tab 换成 radio 吧」），每个选项里一句说明，说明里的名字是 Lead 的名字。点了马上保存（操作层的 busy_placement.set）；没保存成功时写原因，选中项退回。
 // 旧 daemon 不支持时不给选。契约在 packages/protocol/src/busy-placement.ts；客户端方法是假的。
 import { CHAT_PLACEMENT_PREFERENCE_CAPABILITY, type BusyPlacementDto } from '@pi-lead-child/protocol';
 import { act, fireEvent, screen } from '@testing-library/react';
@@ -44,21 +44,24 @@ function busyPlacementRuntime(initial: BusyPlacementDto, options: { capabilities
   return { runtime, client: fake };
 }
 
-const selected = (value: string) => screen.getByTestId(`busy-placement-${value}`).getAttribute('aria-selected');
+const selected = (value: string) => screen.getByTestId(`busy-placement-${value}`).getAttribute('aria-checked');
 
 describe('the busy placement card', () => {
-  it('offers Queue and Steer, selects Queue by default, and explains each option with the Lead name', () => {
+  it('offers Queue and Steer as radio buttons, selects Queue by default, and explains each option with the Lead name', () => {
     const { runtime } = busyPlacementRuntime({ placement: 'followUp' });
     renderWithRuntime(<BusyPlacementSection />, runtime);
     expect(screen.getByTestId('busy-placement-section')).toBeTruthy();
-    expect(screen.getByTestId('busy-placement-followUp').textContent).toBe('Queue');
-    expect(screen.getByTestId('busy-placement-steer').textContent).toBe('Steer');
+    const group = screen.getByTestId('busy-placement');
+    expect(group.getAttribute('role')).toBe('radiogroup');
+    expect(group.getAttribute('aria-label')).toBe('Messages you send while Paimon is busy');
+    expect(screen.getByTestId('busy-placement-followUp').getAttribute('role')).toBe('radio');
+    expect(screen.getByTestId('busy-placement-steer').getAttribute('role')).toBe('radio');
+    expect(screen.getByTestId('busy-placement-followUp').textContent)
+      .toBe('QueuePaimon gets the message after it finishes this turn. To send it in now, click Steer on it in the queue bar above the message box.');
+    expect(screen.getByTestId('busy-placement-steer').textContent)
+      .toBe('SteerThe message goes into the turn that Paimon is working on now.');
     expect(selected('followUp')).toBe('true');
     expect(selected('steer')).toBe('false');
-    expect(screen.getByTestId('busy-placement-note-followUp').textContent)
-      .toBe('Paimon gets the message after it finishes this turn. To send it in now, click Steer on it in the queue bar above the message box.');
-    expect(screen.getByTestId('busy-placement-note-steer').textContent)
-      .toBe('The message goes into the turn that Paimon is working on now.');
   });
 
   it('saves Steer right away through the operation, and back to Queue', async () => {
