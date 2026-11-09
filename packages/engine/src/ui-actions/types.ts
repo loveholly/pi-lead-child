@@ -8,7 +8,7 @@ import type {
   FollowUpActionResult, LeadModelCatalog, LeadQueue, LeadModelChoice, LeadModelSwitchResult, MemoryHindsightDto, MemoryTestResponse,
   HandbookRehearsal, HandbookRehearsalRequest, ModelSettingsDto, SetSummaryModelRequest, SummaryModelSlot,
   RuntimeSettingsDto, RuntimeSettingsRequest, SaveFastModelRequest, SaveModelProviderRequest, Scope, SetBrainChainRequest,
-  SetFastChainRequest, TimerOrigin, UiActionTargetType, UserActionRequest,
+  SchedulerSnapshot, SetFastChainRequest, TimerOrigin, UiActionTargetType, UserActionRequest,
 } from "@pi-lead-child/protocol";
 import type { Db, OwnerActionInput } from "@pi-lead-child/store";
 import type {
@@ -66,6 +66,8 @@ export interface UiActionServices {
   leadQueue?: LeadQueueService;
   // Lead 忙时用户排着的追问（daemon 的 server.ts，用户 2026-10-28）。Lead 的会话建好以后才有。
   followUps?: FollowUpQueueService;
+  // Lead 调度器现在的样子（daemon 的调度器，lead-scheduler spec D12）：只读，GET /v1/lead/scheduler 用。Lead 的会话建好以后才有。
+  leadScheduler?: { snapshot(): SchedulerSnapshot };
   // 设置 → 模型（daemon 的 model-settings.ts，2026-10-29）。Lead 的会话建好以后才有（换大脑的模型要用会话）。
   modelSettings?: ModelSettingsService;
   // 设置 → 记忆的 Hindsight 部分（daemon 的 memory-controller.ts，2026-10-29）。daemon 托管记忆服务时才有。

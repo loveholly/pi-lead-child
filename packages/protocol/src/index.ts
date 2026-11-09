@@ -1313,6 +1313,7 @@ export * from "./lead-outage.ts";
 export * from "./events.ts";
 export * from "./standing-orders.ts";
 export * from "./system-usage.ts";
+export * from "./lead-scheduler.ts";
 export * from "./standing-order-tiers.ts";
 export * from "./standing-orders-wire.ts";
 export * from "./ticket-chat.ts";

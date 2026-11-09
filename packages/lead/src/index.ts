@@ -29,3 +29,5 @@ export * from "./ui-action-tools.js";
 export { ticketRunAnnotation } from "./read-tools.js";
 export * from "./overflow.js";
 export * from "./red-line.js";
+// Lead 调度器（lead-scheduler spec）：车道、状态机、控制层和运行层。
+export * from "./scheduler/index.js";

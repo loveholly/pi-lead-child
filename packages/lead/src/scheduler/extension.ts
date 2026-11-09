@@ -1,4 +1,6 @@
-// Lead 调度器的 pi extension（lead-scheduler spec D7、D12、D13）。P0 只做一件事：记下 Lead 每一步在哪个阶段花了多久。
+// Lead 调度器的 pi extension（lead-scheduler spec D7、D12、D13）。P0：记下 Lead 每一步在哪个阶段花了多久。
+// P1：每一步带上单元编号；把这一步现在在哪个阶段报给调度器（GET /v1/lead/scheduler）；调度器的记录写进会话文件；
+// 红线以后的工具限制（以前是单独的 plc-red-line 扩展）也在这里。
 //
 // 2026-11-09 Lead 卡了 9 分 42 秒，会话文件里一条记录都没有，只能从旁证反推它停在发请求之前。所以每一步都记阶段：
 //   A  请求前准备：turn_start → before_provider_request。正常 p50 0.12 秒、p99 1.3 秒；超过 10 秒说明宿主被占住了。
@@ -15,6 +17,8 @@
 // 阶段 A 的计时器在主线程上：线程池被占满时主线程是空闲的，计时器照常触发。主线程本身被卡住时由 daemon 的
 // worker 心跳发现（core 的 host-probes.ts）。
 import type { ExtensionFactory } from "@earendil-works/pi-coding-agent";
+import { redLineGateExtension } from "../red-line.js";
+import type { LeadSchedulerRuntime, LeadStageInfo } from "./runtime.js";
 
 export const STAGE_A_WARN_MS = 10_000;
 
@@ -27,12 +31,18 @@ export interface LeadSchedulerExtensionOptions {
   turnId?: () => string | null;
   stageAWarnMs?: number;
   now?: () => number;
+  // daemon 的调度器（runtime.ts）：单元编号、阶段、会话文件里的调度记录、阶段 A 超时的事件。不给时只记阶段。
+  scheduler?: Pick<LeadSchedulerRuntime, "unit" | "noteStage" | "bindSessionRecorder" | "unbindSessionRecorder" | "noteStageSlow">;
+  // 红线以后这一轮能用的工具（red-line.ts）；没有限制时为 null。
+  toolGate?: () => ReadonlySet<string> | null;
 }
 
 export interface LeadStepTiming {
   run: number;
   step: number;
   turnId: string | null;
+  // 调度器的单元编号（关联编号，D12）。没有调度器时为 null。
+  unitId?: string | null;
   // 各阶段的毫秒数。这一步没走到那个阶段时为 null。
   a: number | null;
   b1: number | null;
@@ -72,6 +82,7 @@ export function stepLine(timing: LeadStepTiming): string {
     : "-";
   return [
     "[sched] step",
+    ...(timing.unitId !== undefined ? [`unit=${timing.unitId ?? "-"}`] : []),
     `run=${timing.run}`, `step=${timing.step}`, `turn=${timing.turnId ?? "-"}`,
     `A=${field(timing.a)}`, `B1=${field(timing.b1)}`, `B2=${field(timing.b2)}`, `C=${field(timing.c)}`,
     `stream=${field(timing.stream)}`, `tools=${tools}`, `total=${timing.totalMs}`,
@@ -103,12 +114,25 @@ export function leadSchedulerExtension(options: LeadSchedulerExtensionOptions = 
     const record = (data: Record<string, unknown>) => {
       try { pi.appendEntry("scheduler", data); } catch { /* 会话已经关了 */ }
     };
+    const scheduler = options.scheduler;
+    const unitId = () => (scheduler ? scheduler.unit?.id ?? null : undefined);
+    const stage = (step: StepState | null, name: LeadStageInfo["stage"], tool?: string) => {
+      if (!scheduler) return;
+      try {
+        scheduler.noteStage(step ? { run, step: step.step, stage: name, since: now(), ...(tool ? { tool } : {}) } : null);
+      } catch { /* 调度器不可用不影响这一步 */ }
+    };
+    // 调度器的记录（单元的开始和结束、决定、中止）写进会话文件，和对话记录放在一起（D12）。
+    scheduler?.bindSessionRecorder(record);
+    // 红线以后这一轮只能用交接的工具（以前是单独的 plc-red-line 扩展）。
+    if (options.toolGate) redLineGateExtension(options.toolGate, log)(pi);
 
     const finishStep = (state: StepState) => {
       clearStageATimer();
       const end = now();
+      const unit = unitId();
       const timing: LeadStepTiming = {
-        run, step: state.step, turnId: turnId(),
+        run, step: state.step, turnId: turnId(), ...(unit !== undefined ? { unitId: unit } : {}),
         a: state.requestAt === null ? null : state.requestAt - state.startedAt,
         b1: state.requestAt === null || state.responseAt === null ? null : state.responseAt - state.requestAt,
         b2: state.responseAt === null || state.firstOutputAt === null ? null : state.firstOutputAt - state.responseAt,
@@ -121,6 +145,7 @@ export function leadSchedulerExtension(options: LeadSchedulerExtensionOptions = 
       };
       log(stepLine(timing));
       record({ kind: "step", ...timing, at: new Date(end).toISOString() });
+      stage(null, "idle");
     };
 
     pi.on("agent_start", () => {
@@ -137,14 +162,19 @@ export function leadSchedulerExtension(options: LeadSchedulerExtensionOptions = 
         tools: new Map(), toolTimes: [], aWarned: false,
       };
       current = state;
+      stage(state, "A");
       clearStageATimer();
       stageATimer = setTimeout(() => {
         stageATimer = null;
         if (current !== state || state.requestAt !== null) return;
         state.aWarned = true;
         const waited = now() - state.startedAt;
-        log(`[sched] stage.slow stage=A run=${run} step=${state.step} turn=${turnId() ?? "-"} waitedMs=${waited} thresholdMs=${warnMs} ${hostLoad()}`);
-        record({ kind: "stage_slow", stage: "A", run, step: state.step, waitedMs: waited, host: hostLoad(), at: new Date().toISOString() });
+        const unit = unitId();
+        const host = hostLoad();
+        log(`[sched] stage.slow stage=A${unit !== undefined ? ` unit=${unit ?? "-"}` : ""} run=${run} step=${state.step} turn=${turnId() ?? "-"} waitedMs=${waited} thresholdMs=${warnMs} ${host}`);
+        record({ kind: "stage_slow", stage: "A", run, step: state.step, waitedMs: waited, host, at: new Date().toISOString() });
+        // events 表里也记一条（卡死的统计，D12）。
+        if (unit) scheduler?.noteStageSlow({ unitId: unit, turnId: turnId(), stage: "A", step: state.step, waitedMs: waited, thresholdMs: warnMs, host });
       }, warnMs);
       stageATimer.unref?.();
     });
@@ -153,6 +183,7 @@ export function leadSchedulerExtension(options: LeadSchedulerExtensionOptions = 
       const state = current;
       if (!state || state.requestAt !== null) return undefined;
       state.requestAt = now();
+      stage(state, "B1");
       clearStageATimer();
       const a = state.requestAt - state.startedAt;
       if (state.aWarned || a >= warnMs) {
@@ -166,14 +197,17 @@ export function leadSchedulerExtension(options: LeadSchedulerExtensionOptions = 
       if (!state || state.responseAt !== null) return;
       state.responseAt = now();
       state.status = typeof event.status === "number" ? event.status : null;
+      stage(state, "B2");
     });
 
     pi.on("message_update", (event) => {
       const state = current;
       if (!state || (event.message as { role?: string }).role !== "assistant") return;
       const at = now();
-      if (state.firstOutputAt === null) state.firstOutputAt = at;
-      else if (state.lastOutputAt !== null) state.maxGapMs = Math.max(state.maxGapMs, at - state.lastOutputAt);
+      if (state.firstOutputAt === null) {
+        state.firstOutputAt = at;
+        stage(state, "C");
+      } else if (state.lastOutputAt !== null) state.maxGapMs = Math.max(state.maxGapMs, at - state.lastOutputAt);
       state.lastOutputAt = at;
     });
 
@@ -188,6 +222,7 @@ export function leadSchedulerExtension(options: LeadSchedulerExtensionOptions = 
     pi.on("tool_execution_start", (event) => {
       if (event.parentToolCallId) return;
       current?.tools.set(event.toolCallId, { name: event.toolName, startedAt: now() });
+      stage(current, "tool", event.toolName);
     });
 
     pi.on("tool_execution_end", (event) => {
@@ -213,6 +248,7 @@ export function leadSchedulerExtension(options: LeadSchedulerExtensionOptions = 
 
     pi.on("session_shutdown", () => {
       clearStageATimer();
+      scheduler?.unbindSessionRecorder(record);
     });
   };
 }

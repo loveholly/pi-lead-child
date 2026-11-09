@@ -49,8 +49,8 @@ import { createLeadSmartModel } from "./smart-model.js";
 import { createCredibilityExtension } from "./credibility/extension.js";
 import { LEAD_CODEMODE_TOOL, LEAD_HAND_TOOLS, leadHandsExtension } from "./hands.js";
 import { handbookGuardExtension } from "./handbook-guard.js";
-import { redLineGateExtension } from "./red-line.js";
 import { leadSchedulerExtension } from "./scheduler/extension.js";
+import type { LeadSchedulerRuntime } from "./scheduler/runtime.js";
 import { TurnEvidence } from "./credibility/evidence.js";
 import type { CreateSmartModelOptions, SmartTextComplete } from "@pi-lead-child/engine";
 
@@ -218,6 +218,8 @@ export async function createLeadSession(opts: {
   schedulerLog?: (line: string) => void;
   // 一行说明宿主的负载（core 的 describeHostLoad）：阶段 A 超时的日志附上它，说出卡顿的原因。
   hostLoad?: () => string;
+  // daemon 的调度器（scheduler/runtime.ts，lead-scheduler spec D13）：扩展和 daemon 共用同一个实例。
+  scheduler?: LeadSchedulerRuntime;
 }): Promise<{
   session: LeadEngine; modelName: string; syncToolAccess: () => void; reloadExtensions: () => Promise<void>;
   models: string[]; switchModel: (spec: string) => Promise<void>; reportsInputDelivery: boolean; interruptStep: () => boolean;
@@ -372,14 +374,17 @@ export async function createLeadSession(opts: {
     agentDir: isolatedAgentDir,
     systemPromptOverride: () => systemPrompt,
     extensionFactories: [
-      // 调度器（scheduler/extension.ts，lead-scheduler spec D13）：每一步的阶段耗时（P0）。排在最前面：
-      // 它记下的一步的开始，早于别的扩展在 turn_start 里做的事。
+      // 调度器（scheduler/extension.ts，lead-scheduler spec D13）：每一步的阶段耗时（P0），单元编号、阶段和会话文件里的
+      // 调度记录，红线以后的工具限制（P1）。排在最前面：它记下的一步的开始，早于别的扩展在 turn_start 里做的事。
       {
         name: "plc-lead-scheduler", hidden: true,
         factory: leadSchedulerExtension({
           ...(opts.schedulerLog ? { log: opts.schedulerLog } : {}),
           ...(opts.hostLoad ? { hostLoad: opts.hostLoad } : {}),
           ...(opts.currentTurnId ? { turnId: opts.currentTurnId } : {}),
+          ...(opts.scheduler ? { scheduler: opts.scheduler } : {}),
+          // 红灯（red-line.ts）：daemon 停下超时的一轮、叫 Lead 交接以后，这一轮只能用交接的工具。
+          ...(opts.toolGate ? { toolGate: opts.toolGate } : {}),
         }),
       },
       { name: "plc-environment", factory: environmentExtension, hidden: true },
@@ -413,11 +418,6 @@ export async function createLeadSession(opts: {
           log: (line) => console.error(line),
         }),
       },
-      // 红灯（red-line.ts）：daemon 停下超时的一轮、叫 Lead 交接以后，这一轮只能用交接的工具。
-      ...(opts.toolGate ? [{
-        name: "plc-red-line", hidden: true,
-        factory: redLineGateExtension(opts.toolGate, (line) => console.error(line)),
-      }] : []),
       // 交接说明管建编码工单（自动代你处理方案 B，issue 04，handbook-guard.ts）：外部消息叫醒的一轮里看这一句有没有改代码的能力。
       {
         name: "plc-handbook-guard", hidden: true,

@@ -9,7 +9,7 @@ import { createHash } from "node:crypto";
 import {
   clearInterval as clearNodeInterval, clearTimeout as clearNodeTimeout, setInterval as setNodeInterval, setTimeout as setNodeTimeout,
 } from "node:timers";
-import { getChannelCard, getChannelLookup, openDb, recordLeadCompactionFailed, recordLeadModelSwitched, type Db } from "@pi-lead-child/store";
+import { getChannelCard, getChannelLookup, openDb, recordLeadCompactionFailed, recordLeadModelSwitched, recordSchedulerEvent, type Db } from "@pi-lead-child/store";
 import {
   createLeadSession, DEFAULT_LOOKUP_ROOTS, findPullRequestRef, isExternalTextTool, LEAD_QUIET_TOOLS, leadSystemEvent, leadUserMessage,
   listLookupCandidates, withExternalContent, type LeadSystemEventKind, type LeadTurnOrigin,
@@ -17,10 +17,15 @@ import {
 import {
   assertConfiguredLeadModel, leadModelCatalog, loadLeadModelConfig, setLeadModelChainInConfig, setLeadModelInConfig, type LeadCatalogModel,
 } from "@pi-lead-child/lead";
-import { overflowLimits, overflowReached, overflowReminder, queueNotice, queueNoticeMs, waitingText, type WaitingConversation } from "@pi-lead-child/lead";
+import { overflowLimits, overflowReminder, queueNotice, queueNoticeMs, waitingText } from "@pi-lead-child/lead";
 import {
   durationText, firstLine, interruptibleWrite, overflowSecondReminder, RED_LINE_HANDOFF_TOOLS, redLineLimits, redLineMessage,
   userQueueNoticeMs,
+} from "@pi-lead-child/lead";
+import {
+  abortedByRedLine, abortedForRestart, admitSystemUnit, canInterruptForSteer, countedWaiting, handoffGate, LeadSchedulerRuntime,
+  redLinePhase as schedRedLinePhase, schedulerLine, stoppedByUser, unitLane,
+  type BudgetFacts, type SchedulerEffect, type SchedulerLimits, type UnitOutcome, type WaitingEntry,
 } from "@pi-lead-child/lead";
 import { isSummaryTokenCapError, leadCompactionInstructions, LEAD_COMPACTION_BUDGETS, type CompactionProgress } from "@pi-lead-child/lead";
 import { contextUsageLine, leadContextUsage, type LeadContextUsage } from "@pi-lead-child/lead";
@@ -99,7 +104,7 @@ import {
 import { createWatchLightTask, leadSandboxPolicyAsync, leadScratchDir } from "@pi-lead-child/lead";
 import { watchAgentChoice } from "@pi-lead-child/store";
 import {
-  describeHostLoad, envConfigPath, loadPlcConfig, localIso, projectRoot, schedLine, setHostJobLog, startHostProbes, warmSandboxTrustBundle,
+  describeHostLoad, envConfigPath, loadPlcConfig, localIso, projectRoot, setHostJobLog, startHostProbes, warmSandboxTrustBundle,
   type HostProbes,
 } from "@pi-lead-child/core";
 import { createConfigWatch } from "./config-watch.js";
@@ -760,25 +765,34 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
   // 网关启动以后有没有客户端连上过（presence 的「未知」用，userPresenceText）。
   let gatewayClientSeen = () => false;
   const clientCount = () => gatewayChatListeners();
-  let busy = false;
+  // Lead 调度器（lead 的 scheduler/，lead-scheduler spec P1）：以前这里有十几个变量在做调度（busy、draining、
+  // systemTurnStarting、turnStartedAt、budgetStartedAt、runToolCalls、overflowReminded、secondReminded、queueNoticed、
+  // redLine、toolsInFlight、userStopRequested、restartAbort），规则分散在下面的几个函数里。现在状态和规则都在调度器里：
+  // daemon 把发生的事告诉它（sched.dispatch），执行它给出的事（executeSchedulerEffect）。中止经过控制层：
+  // 先记原因，再 session.abort()，不无限期地等。每个决定写一条 [sched] 日志，单元的开始和结束写进 events 表
+  // （scheduler.*）和 Lead 的会话文件。
+  const sched = new LeadSchedulerRuntime({
+    log,
+    record: (kind, payload) => {
+      recordSchedulerEvent(db, kind, payload as Parameters<typeof recordSchedulerEvent>[2]);
+    },
+    execute: (effect) => executeSchedulerEffect(effect),
+    stopExecution: () => session.abort?.(),
+  });
   // 排着的外部消息的推送（工单 10，publishLeadQueue）：上一次推的样子、合并变化的定时器、daemon 在停（不再推）。
   // 放在这里：启动的半路上就可能开一轮，那时下面定义的函数已经能调，变量也要已经有了。
   let leadQueueSent = "";
   let leadQueueTimer: NodeJS.Timeout | null = null;
   let leadQueueStopped = false;
-  // 停机前排空 Lead（2026-10-16 提醒 #83，见 drainLead）：draining 时不再开新的 Lead 回合，
+  // 停机前排空 Lead（2026-10-16 提醒 #83，见 drainLead）：排空时（sched.draining）不再开新的 Lead 回合，
   // 用户的新消息存成排队的轮次，等下一个 daemon（或者排空作废后的本 daemon）回答。
-  let draining = false;
-  // 排空到时，daemon 中断了正在跑的这一轮：这一轮按「被重启打断」收尾，不按模型失败。
-  let restartAbort = false;
-  // 用户发了 /stop（answerStopCommand）：daemon 中断了正在跑的这一轮，这一轮按「用户停下」收尾，不按失败。
-  let userStopRequested = false;
+  // 排空到时 daemon 中断了正在跑的这一轮（abortedForRestart）：这一轮按「被重启打断」收尾，不按模型失败。
+  // 用户发了 /stop（stoppedByUser）：daemon 中断了正在跑的这一轮，这一轮按「用户停下」收尾，不按失败。
   // 上一轮被 /stop 停下了：下一轮开头告诉 Lead 一次，免得它自己接着做那一轮没做完的事。
   let stopNotice: string | null = null;
   // 正在跑的这一轮结束（finally 写完记录）时 resolve。排空据此等它。
   let currentTurn: Promise<void> | null = null;
-  // 这一轮从什么时候开始跑，Lead 最后一次有动静（会话发来任何事件）是什么时候：判断 Lead 是不是卡死了。
-  let turnStartedAt: number | null = null;
+  // Lead 最后一次有动静（会话发来任何事件）是什么时候：和这一轮开始跑的时间（sched.unit.beganAt）一起判断 Lead 是不是卡死了。
   let lastLeadActivityAt = Date.now();
   // 卡死：这一轮在一整个检查间隔里没有任何动静（见 checkLeadLiveness）。是从什么时候起没有动静的。
   let leadSilentSince: number | null = null;
@@ -792,30 +806,13 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
   // 正在跑的这一轮的来历（lead 的 turn-origin.ts，用户 2026-10-27）：读进了外部来源的原文没有；是不是只为用户本人设的
   // 跟进开的一轮（那一轮算用户的一轮）。每一轮开始时重算，插进来的事件、读外部原文的工具随时把它改严。
   let runOrigin: LeadTurnOrigin = { external: false, timer: null };
-  // 超预算转派（lead-tools-and-routing spec D7，lead 的 overflow.ts）：这一轮顶层的工具调用次数，和这一轮有没有提醒过。
-  let runToolCalls = 0;
-  let overflowReminded = false;
   // 正在跑的这一轮是不是用户本人的消息开的（不是系统事件、外部消息、到点的跟进叫醒的）：user-placement.ts 据此决定
   // 用户新发的消息插不插进来。
   let ownUserRun = false;
-  // 两盏灯（lead 的 overflow.ts 和 red-line.ts，用户 2026-11-03）：按时间算的预算从什么时候开始（排着的消息在这一次运行里
-  // 开始答时重新算）；过了红线、没有人在等时有没有再提醒过；红线走到哪一步：
-  //   stopping：等正在跑的写操作做完，然后中断；aborting：已经中断，这一次 prompt 返回后送红线消息；
-  //   handoff：Lead 在交接，只能用交接的工具；closing：交接超时，又中断了一次；done：交接完了。
-  let budgetStartedAt: number | null = null;
-  let secondReminded = false;
-  let redLine: {
-    phase: "stopping" | "aborting" | "handoff" | "closing" | "done";
-    waiting: WaitingConversation[];
-    writeDeadline: number;
-    waitingFor: string | null;
-  } | null = null;
+  // 两盏灯（lead 的 overflow.ts 和 red-line.ts，用户 2026-11-03）的状态和红线的阶段在调度器里（core.ts）。
+  // 这里只留交接窗口的定时器：它是执行层的东西，到点时告诉调度器（handoff.timeout）。
   let handoffTimer: NodeJS.Timeout | null = null;
   const RED_LINE_TOOLS: ReadonlySet<string> = new Set(RED_LINE_HANDOFF_TOOLS);
-  // 正在跑的工具调用（顶层的和 codemode 里嵌套的）：调用 id → 名字和参数。红线停下这一轮以前，正在跑的写操作先做完。
-  const toolsInFlight = new Map<string, { name: string; args: unknown }>();
-  // 这一轮有没有插过「有人在排队」的说明（noticeQueue，lead-self-routing spec C）。
-  let queueNoticed = false;
   let publishControlEvent: (args: Parameters<typeof publishGatewayEvent>[1]) => ReturnType<typeof publishGatewayEvent> =
     (args) => publishGatewayEvent(db, args);
   // 执行器的开关（设置页「执行器」，runtime-settings.ts）：在编排器和 Lead 会话起来之前，把 config.json 里的停用名单写进环境变量。
@@ -896,8 +893,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
   const steeredEvents = new Map<string, number[]>();
   // 下一轮先答的用户消息：上一轮成功结束时还在 pi 队列里没送到的（见 queuedInputs）。一次一条，按先后。
   const carryOverTurns: Array<{ prompt: string; entry: ActiveChannelTurn }> = [];
-  // 系统回合正在探网络（还没开始）：别的唤醒不再同时开一轮。
-  let systemTurnStarting = false;
+  // 系统回合正在探网络（还没开始）时 sched.starting 为真：别的唤醒不再同时开一轮。
   // lead 自己发起的回合（blocker、即时通知、心跳、整理笔记）还没落成一轮时的来源。
   // 它在 lead 第一次开口或调工具时才落成一轮（materializeSystemTurn）：lead 一言不发就收尾时，
   // 会话流里不留空气泡。
@@ -1119,7 +1115,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
 
   // 到点的那一轮（一次一轮）。Lead 正忙、正在排空或者网络还没恢复时等下一次。
   function retryWaitingUserTurn(now = Date.now()): void {
-    if (busy || draining || !network.online) return;
+    if (sched.busy || sched.draining || !network.online) return;
     for (const [id, retry] of userTurnRetries) {
       if (retry.at !== null && now < retry.at) continue;
       userTurnRetries.delete(id);
@@ -1313,12 +1309,12 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     return { mode: "started", turnId: turn.id };
   }
 
-  // 中断正在跑的这一轮。Lead 空着（或者会话不能中断）时返回 false。
+  // 中断正在跑的这一轮：经过调度器的控制层，原因 user_stop 先记下，再 session.abort()。
+  // Lead 空着（或者会话不能中断）时返回 false。
   function stopLeadTurn(): boolean {
-    if (!busy || !currentTurn || !session.abort) return false;
-    userStopRequested = true;
+    if (!sched.busy || !currentTurn || !session.abort) return false;
     log("/stop: aborting the running Lead turn");
-    Promise.resolve(session.abort()).catch((error: any) => log(`/stop: abort failed: ${error?.message ?? String(error)}`));
+    sched.dispatch({ type: "stop.request", canAbort: true });
     return true;
   }
 
@@ -1967,11 +1963,12 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       startQueuedTurn(db, entry.turn.id);
       publishTurnStarted(entry, "started", { placement: "delivered" });
       noteUserTurn(entry.turn.id);
-      restartLeadBudget();
+      // 排着的消息在这一次运行里开始答（pi 的 followUp）：那是用户新的一件事，两盏灯重新算。
+      sched.dispatch({ type: "budget.restart", why: "follow_up" });
     } else {
       startDeliveredSteer(entry);
       // 交接完以后插进来的话是新的一件事：两盏灯重新算。
-      if (redLinePhase() === "done") restartLeadBudget();
+      if (schedRedLinePhase(sched.state) === "done") sched.dispatch({ type: "budget.restart", why: "steer_after_handoff" });
     }
     handOverTo(entry);
   }
@@ -2039,7 +2036,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
         const row = db.prepare("SELECT state, error FROM channel_turns WHERE id = ?").get(anchor.id) as
           { state: string; error: string | null } | undefined;
         if (row && (row.state === "failed" || (row.state === "queued" && row.error !== null))) {
-          if (!busy) {
+          if (!sched.busy) {
             dropQueued();
             session.clearQueue?.();
           } else if (row.state === "failed") {
@@ -2090,9 +2087,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
   // 正在跑的工具、压缩不打断；/stop、红线、停机的时候不做。插话已经送到了（不在 queuedInputs 里）时也不做。
   // 中止的那半步以 stopReason=aborted 结束：message_end 那里认出是这里要求的（stepInterruptedForSteer），不算失败。
   function interruptForSteer(sink: ActiveChannelTurn): void {
-    if (!interruptLeadStep || !busy || draining || userStopRequested) return;
-    const phase = redLinePhase();
-    if (phase === "aborting" || phase === "closing") return;
+    if (!interruptLeadStep || !canInterruptForSteer(sched.state)) return;
     if (!queuedInputs.some((input) => input.entry === sink && input.kind === "steer")) return;
     if (!interruptLeadStep()) return;
     stepInterruptedForSteer = true;
@@ -2102,7 +2097,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
   // user-placement.ts 要的、正在跑的这一轮的事实。
   function placementFacts() {
     return {
-      busy, external: runOrigin.external, ownUserTurn: ownUserRun,
+      busy: sched.busy, external: runOrigin.external, ownUserTurn: ownUserRun,
       externalMessage: (runOrigin.externalBy ?? []).some((source) => source.via === "message"),
     };
   }
@@ -2254,7 +2249,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
   // 插进这一轮：和用户发送时选「插话」走同一条路（steerLead），placement 变成 steered，Lead 接下来说的话长在它下面。
   async function steerFollowUp(turnId: string): Promise<FollowUpActionResult> {
     const target = piQueuedFollowUp(turnId);
-    if (!busy) throw new UiActionError("unavailable", queueMessages().turnDone(leadDisplayName(db)));
+    if (!sched.busy) throw new UiActionError("unavailable", queueMessages().turnDone(leadDisplayName(db)));
     if (!session.clearQueue) throw new UiActionError("unavailable", queueMessages().cannotChangeQueue);
     const { found, done } = requeueWithout(target);
     if (!found) {
@@ -2838,7 +2833,9 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     // lead 往往先动工具再说话，那时出水口还没改接过来。
     currentTurnId: () => pendingSteerSink?.turn.id ?? activeChannelTurn?.turn.id ?? null,
     turnOrigin: () => runOrigin,
-    toolGate: () => (redLine?.phase === "handoff" ? RED_LINE_TOOLS : null),
+    toolGate: () => handoffGate(sched.state, RED_LINE_TOOLS),
+    // 调度器（lead-scheduler spec D13）：extension 和 daemon 共用这一个实例。
+    scheduler: sched,
     // 每一步的阶段耗时写进 daemon 的日志（lead-scheduler spec D12）；阶段 A 超时附上宿主的负载。
     schedulerLog: log,
     hostLoad: describeHostLoad,
@@ -3060,7 +3057,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       pendingModelSwitch = { reason: "用户在输入框里换了模型", restoreAt: null, manual: true };
       log(`lead model chosen by the user: ${previousSpec} -> ${spec}`);
       // Lead 正在回答：这一轮结束以后，下一轮开始前换（runTurnNow 的 syncLeadModel）。
-      if (busy || draining || systemTurnStarting) return { previous, selected: choice, applied: "after_turn" };
+      if (sched.busy || sched.draining || sched.starting) return { previous, selected: choice, applied: "after_turn" };
       await syncLeadModel();
       if (leadModelName !== spec) {
         // 换不过去（例如注册不了这个模型）：原因在日志里。config 退回原来的顺序。
@@ -3101,7 +3098,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
         modelFailover!.clearBlocked(primary);
         pendingModelSwitch = { reason: "用户在设置页换了主用", restoreAt: null, manual: true, via: "在设置页" };
         log(`lead model chain set by the user: ${previousModels.join(", ")} -> ${specs.join(", ")}`);
-        if (busy || draining || systemTurnStarting) return "after_turn";
+        if (sched.busy || sched.draining || sched.starting) return "after_turn";
         await syncLeadModel();
         if (leadModelName !== primary) {
           setLeadModelChainInConfig(previousModels, opts.dataDir);
@@ -3119,7 +3116,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
           log(`lead providers refresh failed: ${error?.message ?? String(error)}`);
           return;
         }
-        if (busy || draining || systemTurnStarting) {
+        if (sched.busy || sched.draining || sched.starting) {
           rebindLeadModel = true;
           return;
         }
@@ -3150,7 +3147,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     applyPendingExtensionReload();
   }
   function applyPendingExtensionReload(): void {
-    if (busy || extensionReload || !pendingExtensionReload || !reloadExtensions) return;
+    if (sched.busy || extensionReload || !pendingExtensionReload || !reloadExtensions) return;
     const reason = pendingExtensionReload;
     pendingExtensionReload = null;
     extensionReload = reloadExtensions().then(
@@ -3289,12 +3286,15 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       routeAssistantText(delta);
     }
     if (event.type === "message_update") streamRenderUi(event.assistantMessageEvent);
-    if (event.type === "tool_execution_start") toolsInFlight.set(String(event.toolCallId), { name: String(event.toolName), args: event.args });
-    if (event.type === "tool_execution_end") toolsInFlight.delete(String(event.toolCallId));
+    if (event.type === "tool_execution_end") sched.dispatch({ type: "tool.end", id: String(event.toolCallId) });
     if (event.type === "tool_execution_start") {
       // 输出算外部内容的工具（turn-origin.ts 的清单，没声明的也算）：这一轮算读过外部内容，记下是哪个工具。
       if (isExternalTextTool(event.toolName)) runOrigin = withExternalContent(runOrigin, { via: "tool", tool: event.toolName });
-      if (!event.parentToolCallId) remindOnOverflow();
+      // 告诉调度器：正在跑的工具（红线停下以前，正在跑的写操作先做完），顶层的调用次数（黄灯；codemode 脚本里的嵌套调用不算）。
+      sched.dispatch({
+        type: "tool.start", id: String(event.toolCallId), name: String(event.toolName),
+        write: isInterruptibleWrite(String(event.toolName), event.args), top: !event.parentToolCallId, facts: budgetFacts(),
+      });
       const args = JSON.stringify(event.args ?? {});
       broadcast({ type: "tool", name: event.toolName, args: args.length > 120 ? args.slice(0, 120) + "…" : args });
     }
@@ -3327,6 +3327,8 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     // 改日程的 Lead 工具自己发刷新事件（经过操作层的由操作层发），这里不再按工具名另发一份（ui-action-parity P04）。
     if (event.type === "message_end") {
       if (event.message?.role === "assistant") {
+        // 一次模型回复是一步（lead-scheduler spec D3）：单元结束时的日志和记录带上步数。
+        sched.dispatch({ type: "step.end" });
         // 中断时 Lead 常在跑工具：pi 等工具做完，再开始下一次模型调用，准备请求那一步（取凭证）看到已经中断就抛
         // "This operation was aborted"，pi-ai 的 lazyStream 把准备阶段的失败一律记成 stopReason "error"，请求根本没发到上游
         // （2026-11-03：每次红线都记成模型失败，Lead 被判停摆，积压的事推给了用户）。daemon 自己要求的中断两种都认。
@@ -3337,17 +3339,17 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
         if (interruptedForSteer) {
           // 不是失败：pi 接着把插话送进去再调一次模型（同一次运行），这一轮照常往下走。
           log("lead step stopped for a steer: Lead reads the steer and continues");
-        } else if (stoppedByAbort && userStopRequested) {
+        } else if (stoppedByAbort && stoppedByUser(sched.state)) {
           // 用户用 /stop 停下的：不是错误，runTurnNow 按停下收尾。
           log("lead reply stopped by /stop");
-        } else if (stoppedByAbort && (redLinePhase() === "aborting" || redLinePhase() === "closing")) {
+        } else if (stoppedByAbort && abortedByRedLine(sched.state)) {
           // 红线停下的（lead 的 red-line.ts）：不是失败，这一轮接着交接或者就此结束。
           log("lead red line: the running reply was stopped");
         } else if (event.message.stopReason === "error" || event.message.stopReason === "aborted") {
           const rawError = String(
             event.message.errorMessage
               || (event.message.stopReason === "aborted"
-                ? restartAbort ? LEAD_RESTART_INTERRUPTED_ERROR : "Lead 回复被中断，请重试。"
+                ? abortedForRestart(sched.state) ? LEAD_RESTART_INTERRUPTED_ERROR : "Lead 回复被中断，请重试。"
                 : EMPTY_ASSISTANT_REPLY_ERROR),
           );
           activeTurnError = presentLeadTurnError(rawError);
@@ -3372,8 +3374,8 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
           const calledTools = Array.isArray(event.message.content)
             && event.message.content.some((part: any) => part?.type === "toolCall");
           // 红线以后 Lead 交接完了（这一段最后的回答）：工具限制解除，排着的消息照常答。
-          if (!calledTools && redLinePhase() === "handoff") {
-            redLine!.phase = "done";
+          if (!calledTools && schedRedLinePhase(sched.state) === "handoff") {
+            sched.dispatch({ type: "handoff.done" });
             log("lead red line: hand-off done");
           }
           if (!calledTools && inputDeliveryEvents) {
@@ -3427,7 +3429,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
         if (reason === "overflow" || reason === "threshold") compactionDue = compactionDue === "overflow" ? "overflow" : reason;
         // 溢出恢复的压缩失败了：这一轮的回答已经被截成空的，pi 不再重试。这一轮是失败的一轮（2026-10-28）：
         // 游标不动，交给它的事件下一轮再交；按上下文溢出算（模型切换）。
-        if (reason === "overflow" && busy) activeTurnError = presentLeadTurnError(leadContextFullError(outcome.detail));
+        if (reason === "overflow" && sched.busy) activeTurnError = presentLeadTurnError(leadContextFullError(outcome.detail));
         leadHealth.compactionFailed(outcome.detail);
         recordLeadSelfEvent("compaction failed", () => recordLeadCompactionFailed(db, {
           reason, detail: outcome.detail, timedOut,
@@ -3476,7 +3478,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
   // 用户的问题还没回答时（排队中，或者在等那一次自动重试）先不做：先回答用户。这一轮不算做过，
   // 那一轮答完以后（每一轮结束都会再来这里）再检查（2026-10-17，spec D9）。
   function maybePrecipitate(): void {
-    if (precipitated || busy || hasUnansweredUserTurn()) return;
+    if (precipitated || sched.busy || hasUnansweredUserTurn()) return;
     const ratio = contextUsageRatio(session);
     if (ratio !== null && ratio >= PRECIPITATE_RATIO) {
       precipitated = true;
@@ -3502,8 +3504,9 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
   function checkLeadLiveness(): void {
     const now = Date.now();
     // 上一次检查以前就开始的这一轮，从上一次检查到现在一点动静都没有：卡死了。
-    if (busy && turnStartedAt !== null && turnStartedAt <= lastLivenessCheckAt && lastLeadActivityAt <= lastLivenessCheckAt) {
-      leadSilentSince ??= Math.max(turnStartedAt, lastLeadActivityAt);
+    const beganAt = sched.unit?.beganAt ?? null;
+    if (sched.busy && beganAt !== null && beganAt <= lastLivenessCheckAt && lastLeadActivityAt <= lastLivenessCheckAt) {
+      leadSilentSince ??= Math.max(beganAt, lastLeadActivityAt);
     }
     lastLivenessCheckAt = now;
     scheduleLivenessCheck();
@@ -3525,7 +3528,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
         since: Date.parse(status.since),
       };
     }
-    if (busy && leadSilentSince !== null) {
+    if (sched.busy && leadSilentSince !== null) {
       return {
         reason: `${leadDisplayName(db)} 的这一轮已经 ${Math.max(1, Math.round((now - leadSilentSince) / 60_000))} 分钟没有任何动静`,
         kind: "silent",
@@ -3852,35 +3855,50 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
   async function runTurn(message: string, options: RunTurnOptions = {}): Promise<TurnOutcome> {
     if (options.system) {
       const skipped: TurnOutcome = { ok: false, voiced: false, systemTurnId: null };
-      if (busy || systemTurnStarting || draining) return { ...skipped, deferred: true };
-      systemTurnStarting = true;
+      // 能不能开、什么时候探网络，由调度器定（lead 的 scheduler/placement.ts 的 admitSystemUnit）。
+      if (admitSystemUnit(schedulerAdmission()) === "deferred") return { ...skipped, deferred: true };
+      sched.dispatch({ type: "starting", on: true });
       publishLeadQueue();
       let reachable = false;
       try {
         reachable = await network.check();
       } finally {
-        systemTurnStarting = false;
+        sched.dispatch({ type: "starting", on: false });
         publishLeadQueue();
       }
+      const admission = admitSystemUnit(schedulerAdmission(), reachable);
       // 断网时不调模型，不灌积压的事，会话里什么都不留（DarkWake 的几秒里也一样）。
-      if (!reachable) return { ...skipped, offline: true };
-      if (busy || draining) return { ...skipped, deferred: true };
+      if (admission === "offline") {
+        log(schedulerLine("hold", { origin: options.system, reason: "offline" }));
+        return { ...skipped, offline: true };
+      }
+      if (admission === "deferred") return { ...skipped, deferred: true };
       // 探网络的时候要交的事已经没了（例如跟进被取消了，提醒被用户确认了）：不开这一轮。
       if (options.deliverEvents && !eventsForRun(options).length) return { ...skipped, deferred: true };
     }
     return runTurnNow(message, options);
   }
 
+  // 调度器的状态里和开不开一轮有关的三件事。
+  function schedulerAdmission() {
+    return { busy: sched.busy, starting: sched.starting, draining: sched.draining };
+  }
+
   async function runTurnNow(message: string, options: RunTurnOptions): Promise<TurnOutcome> {
     const { channelTurn } = options;
     // 正在排空（停机前）：不开新的一轮。用户的这一轮等重启后的 daemon 来答。
-    if (draining) {
+    if (sched.draining) {
       if (channelTurn) holdTurnForRestart(channelTurn);
       return { ok: false, voiced: false, systemTurnId: null, deferred: true };
     }
     let settleTurn!: () => void;
     currentTurn = new Promise<void>((resolve) => { settleTurn = resolve; });
-    busy = true;
+    // 开一个工作单元（lead-scheduler spec D3）：车道按来源定（D2）。从这一刻起 Lead 算忙。
+    const unitSource = options.system ? "system" as const : options.aish ? "aish" as const : "user" as const;
+    sched.openUnit({
+      source: unitSource, lane: unitLane({ source: unitSource, system: options.system ?? null }),
+      origin: options.system ?? null, turnId: channelTurn?.turn.id ?? null,
+    });
     publishLeadQueue();
     // 新回合开始，上一回合遗留的插话锚（受理了但 lead 一直没再开口）作废——
     // 否则它会去接下一回合的水，把答非所问的文本挂到一条早已过去的消息下面。
@@ -3897,20 +3915,14 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     if (extensionReload) await extensionReload;
     // 上一轮定下要换模型，或者限流的恢复时间到了：先换好模型，再给模型发这一轮。
     await syncLeadModel();
-    turnStartedAt = Date.now();
-    if (clientCount() > 0) lastAttendedAt = turnStartedAt;
+    // 单元开始跑：两盏灯从这里算。
+    sched.dispatch({ type: "unit.begin" });
+    if (clientCount() > 0) lastAttendedAt = Date.now();
     runningSystemOrigin = options.system ?? null;
     runOrigin = options.aish
       ? withExternalContent({ external: false, timer: null }, { via: "message", source: "aish" })
       : { external: false, timer: null };
-    runToolCalls = 0;
-    overflowReminded = false;
-    queueNoticed = false;
     ownUserRun = Boolean(channelTurn) && !options.system && !options.aish;
-    budgetStartedAt = turnStartedAt;
-    secondReminded = false;
-    redLine = null;
-    toolsInFlight.clear();
     let succeeded = false;
     let offline = false;
     // 这一轮被停机前的排空中断了（restartAbort）。
@@ -3946,6 +3958,10 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
         ...withExternalEvents(runOrigin, deliveredEvents),
         timer: channelTurn ? null : userTimerOf(deliveredEvents),
       };
+      // 交给这一轮的事里有外部的人的消息：有人在等，车道是 L1（lead-scheduler spec D2）。用户的单元不降级。
+      if ((runOrigin.externalBy ?? []).some((source) => source.via === "message") && (sched.unit?.lane ?? 0) > 1) {
+        sched.dispatch({ type: "unit.lane", lane: 1, why: "external_message" });
+      }
       for (const event of delivered?.events ?? []) {
         const action = pendingUserActionOfEvent(event);
         if (action) turnUserActions.add(action);
@@ -3979,18 +3995,18 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       const images = channelTurn ? leadTurnImages(channelTurn.turn.id) : [];
       try {
         // /stop 在这一轮调模型以前就到了（例如在等换模型、等压缩）：不再调模型。
-        if (!userStopRequested) {
+        if (!stoppedByUser(sched.state)) {
           if (images.length) await session.prompt(full, { images });
           else await session.prompt(full);
         }
         // 红线停下了这一轮（lead 的 red-line.ts）：在同一轮里马上叫 Lead 交接。用户已经用 /stop 停下时不交接。
-        if (!userStopRequested) await continueAfterRedLine();
+        if (!stoppedByUser(sched.state)) await continueAfterRedLine();
       } catch (error) {
         // 用户用 /stop 停下时，pi 也可能以错误结束这次调用：一样按停下收尾。
         // 红线中断时也一样：接着在同一轮里交接（2026-11-03 09:33 那一次中断以后整轮报错，没有交接）。
-        if (userStopRequested) {
+        if (stoppedByUser(sched.state)) {
           // 按停下收尾。
-        } else if (redLinePhase() === "aborting" && !restartAbort) {
+        } else if (schedRedLinePhase(sched.state) === "aborting" && !abortedForRestart(sched.state)) {
           log(`lead red line: the stopped call ended with an error (${(error as any)?.message ?? String(error)}); handing off`);
           await continueAfterRedLine();
         } else {
@@ -3998,14 +4014,14 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
         }
       }
       // 排空中断了这一轮：pi 不一定发出 aborted 的 message_end（例如中断时工具正在执行），按被打断收尾。
-      if (restartAbort) throw new Error(LEAD_RESTART_INTERRUPTED_ERROR);
-      if (activeTurnError && !userStopRequested) throw new Error(activeTurnError);
+      if (abortedForRestart(sched.state)) throw new Error(LEAD_RESTART_INTERRUPTED_ERROR);
+      if (activeTurnError && !stoppedByUser(sched.state)) throw new Error(activeTurnError);
       // 这次运行结束时还在 pi 队列里的输入：交出去时 pi 已经过了最后一次取队列。用户的消息转为下一轮的输入，
       // 插进来的系统事件不算交给了 Lead（工单 04）。
       takeLeftoverInputs();
       // 系统回合说了要告诉用户的话（或者改了外部状态）才落成一轮；什么都没有就不留痕迹。
       settleSystemTurnBuffer();
-      if (userStopRequested) {
+      if (stoppedByUser(sched.state)) {
         // 用户用 /stop 停下了这一轮：回答停在哪里，就在那里加一句「已用 /stop 停下」，这一轮按完成收尾。
         // 交给这一轮的事件算处理过了（游标前进）：用户叫停了，不再自动做一遍。下一轮开头告诉 Lead 一次。
         const stopped = activeChannelTurn ?? channelTurn;
@@ -4038,7 +4054,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       }
       if (!emptyUserTurn) {
         // 用户停下的一轮说明不了模型好不好。
-        if (!userStopRequested) modelFailover?.turnSucceeded();
+        if (!stoppedByUser(sched.state)) modelFailover?.turnSucceeded();
         succeeded = true;
       }
     } catch (err: any) {
@@ -4051,7 +4067,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       // 错误看起来是断网时先探一次：探测通过，就是模型服务或它的代理的问题（连接被拒、被重置），
       // 按"模型服务连不上"走正常的降级、退避和兜底（发布评审 f796c1c 的 B1）。
       // 被停机前的排空中断：不是模型的问题，也不是断网。
-      interrupted = restartAbort;
+      interrupted = abortedForRestart(sched.state);
       let error = interrupted ? LEAD_RESTART_INTERRUPTED_ERROR : String(err?.message ?? "");
       let networkFailure = false;
       // 传输层的失败（超时、连接断开、fetch failed）也先探网络（2026-10-19 审查）：断网时不算模型的问题，不换模型。
@@ -4147,23 +4163,22 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
           leadWakeRetry = { at: Date.now() + Math.min(leadWakeRetryBaseMs * 2 ** (failures - 1), 5 * 60_000), failures };
         }
       }
-      busy = false;
+      // 单元结束（lead-scheduler spec D12）：关联编号用这一轮最后接文字的那一轮，结果按停下、被重启打断、断网、成败分。
+      if (runTurnId) sched.dispatch({ type: "unit.turn", turnId: runTurnId });
+      const unitOutcome: UnitOutcome = stoppedByUser(sched.state) ? "stopped" : interrupted ? "interrupted"
+        : offline ? "offline" : succeeded ? "answered" : "failed";
+      sched.closeUnit(unitOutcome);
       publishLeadQueue();
       // 这一轮结束：插进来的系统事件不再找得到。会话不报告输入送到的时刻时，交出去的用户消息也一样
       // （成功时它们在这一轮里被看到了，失败时上面已经找回了还在队列里的）。会话报告时，还在 pi 队列里的
       // （会话没有 clearQueue 时）留着：pi 在下一次运行开头送它们，那时再改接。
       steeredEvents.clear();
       if (!inputDeliveryEvents) queuedInputs.length = 0;
-      turnStartedAt = null;
       leadSilentSince = null;
       runningSystemOrigin = null;
       ownUserRun = false;
-      budgetStartedAt = null;
-      secondReminded = false;
-      redLine = null;
       if (handoffTimer) clearNodeTimeout(handoffTimer);
       handoffTimer = null;
-      toolsInFlight.clear();
       // 首次启动引导（spec R2）：用户自己的一轮（不是系统、外部消息、到点的跟进叫醒的）成功结束时，看要不要发一张建议卡。
       const userTurn = Boolean(channelTurn) && !options.system && !runOrigin.external && runOrigin.timer === null;
       void setupTracker?.afterTurn({ userTurn, succeeded })
@@ -4177,8 +4192,6 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       streamingMessageText = "";
       activeTurnError = null;
       aishStream = null;
-      restartAbort = false;
-      userStopRequested = false;
       currentTurn = null;
       settleTurn();
       if (stream) await stream.end().catch(() => {});
@@ -4309,12 +4322,12 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
         via: "Slack", channel: "aish", sender: ev.sender.user_id, thread: `${ev.channel_id}/${ev.thread_ts ?? "-"}`,
       }, ev.text);
       // 正在停机：Slack 的消息没法存成重启后再答的轮次（回帖要原来的线程）。如实告诉发消息的人。
-      if (draining) {
+      if (sched.draining) {
         void aishAdapter!.sendMessage(ev.channel_id, ev.thread_ts, `（daemon 正在重启，这条消息没有交给 ${leadDisplayName(db)}。请过一会儿再发一次。）`)
           .catch(() => {});
         return;
       }
-      if (busy) {
+      if (sched.busy) {
         void steerLead(text, { originKind: "aish", userText: ev.text }).then(
           () => aishAdapter!.sendMessage(ev.channel_id, ev.thread_ts, "（lead 正在处理其他请求，你的消息已插话送达，稍后回复）").catch(() => {}),
           (err: any) => log(`aish steer error: ${err.message}`),
@@ -4580,6 +4593,17 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
   };
   // Lead 忙时用户排着的追问（用户 2026-10-28）：状态栏的「Steer」「×」和 Lead 都经过操作层的 follow_up。
   uiActionServices.followUps = { snapshot: followUpSnapshot, steer: steerFollowUp, cancel: cancelFollowUp };
+  // Lead 调度器现在的样子（lead-scheduler spec D12）：GET /v1/lead/scheduler 读它。只读，不是操作。
+  uiActionServices.leadScheduler = {
+    snapshot: () => sched.snapshot({
+      waiting: sched.busy ? waitingEntries(Date.now()) : leadInput.queue().map((entry): WaitingEntry => ({
+        who: entry.senders.join("、") || entry.conversation, conversation: entry.conversation, count: entry.count,
+        waitedMs: Math.max(0, Date.now() - Date.parse(entry.firstAt)), lane: 1,
+      })),
+      host: describeHostLoad(),
+      budgetMs: redLineLimits().ms,
+    }),
+  };
   // 子 agent 工单的结果交回通道的 ⑦（信心模型决定代用户回复，还是交回 Lead）。登记以前结束的先留着，登记时交。
   if (channelHub) {
     const hub = channelHub;
@@ -4768,8 +4792,8 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     // 设置状态（首次启动引导）：节流到 5 秒重算一次；变了的卡由下一次 lead-activity 的比较推出去。
     pollStep("setup-status", () => { void setupTracker?.refreshThrottled(new Date(pollNow)); });
     pollStep("lead-activity", () => syncLeadActivity?.("poll"));
-    pollStep("queue-notice", () => noticeQueue(pollNow));
-    pollStep("lead-budget", () => checkLeadBudget(pollNow));
+    pollStep("queue-notice", () => noticeQueue());
+    pollStep("lead-budget", () => checkLeadBudget());
     // 用户通知（spec §4）：lead 表达，系统保证。这里只把 immediate 通知交给 lead 去播报，
     // 播报成功才标 delivered_via='lead'。lead 没播（挂了、卡住、判断失误）就一直停在
     // pending，由 scheduler 第 4 步在 PLC_NOTIFY_FALLBACK_MS 之后兜底直推并标 'fallback'。
@@ -4826,7 +4850,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       const reuseTurnId = dueNotes.length ? voicingTurns.get(dueNotes[0]!.id) : undefined;
       const userNotes = dueNotes.filter((notification) => voicingTurns.get(notification.id) === reuseTurnId);
       // lead 正忙时不往当前回合里塞 followUp：那只是排进队列，等它空下来再开一轮。
-      if (userNotes.length && !busy && !draining && !incapacity && network.online) {
+      if (userNotes.length && !sched.busy && !sched.draining && !incapacity && network.online) {
         for (const notification of userNotes) deliveringNotifications.add(notification.id);
         const listed = userNotes.map((n) => `- [#${n.id}] ${n.title}${n.body ? `：${n.body}` : ""}`);
         const noteText = attended
@@ -4879,7 +4903,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
   // 只发给声明了 include=lead_queue 的连接）。合并 100 毫秒内的变化再比，和上一次推的一样就不推：推送会落库。
   // 探网络、准备开系统回合的那一会儿也算忙：这一轮结束到下一轮开始之间，状态栏不闪。
   function leadQueueSnapshot(): LeadQueue {
-    return { busy: busy || systemTurnStarting, entries: leadInput.queue() };
+    return { busy: sched.busy || sched.starting, entries: leadInput.queue() };
   }
   function publishLeadQueue(): void {
     if (leadQueueTimer || leadQueueStopped) return;
@@ -4907,12 +4931,12 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
   // Lead 正忙时只做一件事：interrupt 级的事插进这一轮（外部来源除外，lead-input.ts 的 busyPlacement）；
   // 其余的排队，等这一轮（和用户排队的消息）答完。
   function dispatchLeadWork(): void {
-    if (draining) return;
-    if (busy) {
+    if (sched.draining) return;
+    if (sched.busy) {
       steerInterrupts();
       return;
     }
-    if (systemTurnStarting) return;
+    if (sched.starting) return;
     const carried = carryOverTurns.shift();
     if (carried) {
       log(`answering queued user message ${carried.entry.turn.id} in a turn of its own`);
@@ -4922,7 +4946,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       return;
     }
     retryWaitingUserTurn();
-    if (busy || !network.online) return;
+    if (sched.busy || !network.online) return;
     if (leadInput.pendingMessages().length && !(leadWakeRetry && leadWakeRetry.at > Date.now())) {
       wakeForEvents();
       return;
@@ -4998,56 +5022,73 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     return Number.isSafeInteger(inboxId) ? inboxId : null;
   }
 
-  // 超预算转派（lead-tools-and-routing spec D7）：就地做的一轮，顶层的工具调用次数或时长超过阈值时，插一条提醒（黄灯），
-  // 请 Lead 把剩下的交给轻子 agent，或者先回用户一句还要多久。每一轮只提醒一次；排空时不插。codemode 脚本里的嵌套调用不算次数。
-  function remindOnOverflow(): void {
-    runToolCalls += 1;
-    checkLeadBudget(Date.now());
+  // ── 调度器的输入和出口（lead-scheduler spec P1）────────────────────────────────────────
+  // 两盏灯（lead 的 overflow.ts、red-line.ts，用户 2026-11-03）、红线、排队说明的规则都在调度器里（lead 的 scheduler/core.ts）。
+  // 这里只做两件事：把调度器要的事实现算出来（schedulerLimits、budgetFacts、waitingEntries），执行它给出的事。
+  // 工具开始时和每次轮询时看一次：轮询不等工具，Lead 在写一段长回答、或者一个工具跑很久时也准时。
+
+  // 阈值每次现读环境变量（测试和运维可以随时调）。
+  function schedulerLimits(): SchedulerLimits {
+    const overflow = overflowLimits();
+    const red = redLineLimits();
+    return {
+      yellowToolCalls: overflow.toolCalls, yellowMs: overflow.ms,
+      budgetMs: red.ms, writeGraceMs: red.writeGraceMs, handoffMs: red.handoffMs,
+      queueNoticeMs: queueNoticeMs(), userQueueNoticeMs: userQueueNoticeMs(),
+    };
   }
 
-  // 两盏灯（lead 的 overflow.ts、red-line.ts，用户 2026-11-03）。工具开始时和每次轮询时看一次：轮询不等工具，
-  // Lead 在写一段长回答、或者一个工具跑很久时也准时。
-  //   · 黄灯（缺省 2 分钟或 10 次工具调用）：提醒一次；
-  //   · 红灯（缺省 2 分半）：有人在等（用户或外部的人，系统事件不算）时停下这一轮，叫 Lead 交接；没有人在等时再提醒一次，
-  //     之后有人开始等时照样停下。
-  function checkLeadBudget(now: number): void {
-    if (draining || !busy || budgetStartedAt === null || redLine) return;
-    // 正在压缩上下文：不停下（中断会把压缩一起打断，上下文就清不出空间）。压缩做完以后的这一次检查照常。
-    if (compactionTimer !== null || recoveringCompaction) return;
-    const state = { toolCalls: runToolCalls, startedAt: budgetStartedAt };
-    const limits = redLineLimits();
-    if (!overflowReminded) {
-      const reason = overflowReached(state, now, overflowLimits());
-      if (reason) {
-        overflowReminded = true;
-        log(`lead overflow: ${reason} (${runToolCalls} tool calls), reminding Lead to hand the rest to a sub-agent`);
+  function budgetFacts(): BudgetFacts {
+    return {
+      limits: schedulerLimits(),
+      // 正在压缩上下文：不停下（中断会把压缩一起打断，上下文就清不出空间）。
+      compacting: compactionTimer !== null || recoveringCompaction,
+      canAbort: Boolean(session.abort),
+      waiting: (options) => waitingEntries(Date.now(), options),
+    };
+  }
+
+  function checkLeadBudget(): void {
+    sched.dispatch({ type: "budget.check", facts: budgetFacts() });
+  }
+
+  function noticeQueue(): void {
+    sched.dispatch({ type: "queue.check", facts: budgetFacts() });
+  }
+
+  // 调度器给出的、只有 daemon 做得了的事。日志、记录和中止由调度器的运行层自己做。
+  function executeSchedulerEffect(effect: SchedulerEffect): void {
+    switch (effect.type) {
+      case "remind.yellow": {
         const usage = currentContextUsage();
-        const extra = {
-          context: usage ? contextUsageLine(usage) : null, waiting: waitingText(waitingConversations(now)),
-          redLine: durationText(limits.ms),
-        };
-        steerNotice(overflowReminder(state, now, reason, extra), "overflow reminder");
+        const state = { toolCalls: effect.toolCalls, startedAt: effect.startedAt };
+        steerNotice(overflowReminder(state, Date.now(), effect.reason, {
+          context: usage ? contextUsageLine(usage) : null, waiting: waitingText(effect.waiting), redLine: durationText(effect.budgetMs),
+        }), "overflow reminder");
+        return;
       }
+      case "remind.second": {
+        const usage = currentContextUsage();
+        steerNotice(overflowSecondReminder(effect.elapsedMs, { context: usage ? contextUsageLine(usage) : null }), "second overflow reminder");
+        return;
+      }
+      case "notice.queue":
+        session.steer(queueNotice(effect.waiting)).catch((error: any) => {
+          log(`queue notice failed: ${error?.message ?? String(error)}`);
+        });
+        return;
+      case "redline.steer":
+        steerNotice(redLineMessage(effect.elapsedMs, redLineWaiting(effect.waiting)), "red line message");
+        return;
+      case "redline.recheck":
+        setNodeTimeout(() => sched.dispatch({ type: "write.recheck", canAbort: Boolean(session.abort) }), effect.afterMs).unref();
+        return;
+      // 送交接消息在 continueAfterRedLine 里：它要等这一次 prompt 结束。
+      case "redline.handoff":
+        return;
+      default:
+        return;
     }
-    const elapsed = now - budgetStartedAt;
-    if (elapsed < limits.ms) return;
-    const waiting = waitingConversations(now);
-    if (!waiting.length) {
-      if (secondReminded) return;
-      secondReminded = true;
-      log(`lead red line: ${Math.round(elapsed / 1_000)}s and nobody is waiting; reminding Lead again`);
-      log(schedLine("decide", { decision: "red_line_remind", elapsedMs: elapsed, budgetMs: limits.ms, waiting: "none" }));
-      const usage = currentContextUsage();
-      steerNotice(overflowSecondReminder(elapsed, { context: usage ? contextUsageLine(usage) : null }), "second overflow reminder");
-      return;
-    }
-    redLine = { phase: "stopping", waiting, writeDeadline: now + limits.writeGraceMs, waitingFor: null };
-    log(`lead red line: ${Math.round(elapsed / 1_000)}s with ${waiting.length} conversation(s) waiting; stopping the turn for a hand-off`);
-    log(schedLine("decide", {
-      decision: "red_line_stop", elapsedMs: elapsed, budgetMs: limits.ms,
-      waiting: waiting.map((entry) => `${entry.user ? "user" : "external"}:${entry.count}:${Math.round(entry.waitedMs / 1_000)}s`).join(","),
-    }));
-    stopForRedLine();
   }
 
   function steerNotice(text: string, what: string): void {
@@ -5056,96 +5097,56 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     });
   }
 
-  // 红线停下这一轮：正在跑的写操作先做完（最多等 PLC_LEAD_WRITE_GRACE_MS），然后中断。中断以后这一次 prompt 返回，
-  // continueAfterRedLine 在同一轮里送红线消息。
-  function stopForRedLine(): void {
-    const line = redLine;
-    if (!line || line.phase !== "stopping") return;
-    const write = writeInFlight();
-    if (write && Date.now() < line.writeDeadline) {
-      if (line.waitingFor !== write) {
-        line.waitingFor = write;
-        log(`lead red line: waiting for ${write} to finish before stopping the turn`);
-      }
-      setNodeTimeout(stopForRedLine, 250).unref();
-      return;
-    }
-    if (write) log(`lead red line: ${write} still runs after the grace period; stopping the turn anyway`);
-    if (!session.abort) {
-      // 会话不能中断（老的会话端口）：把红线消息插进这一轮，照样只能交接。
-      line.phase = "handoff";
-      steerNotice(redLineMessage(Date.now() - (budgetStartedAt ?? Date.now()), redLineWaiting()), "red line message");
-      return;
-    }
-    line.phase = "aborting";
-    Promise.resolve(session.abort()).catch((error: any) => log(`lead red line: abort failed: ${error?.message ?? String(error)}`));
-  }
-
-  // 停下这一轮会把它做到一半的写操作（lead 的 red-line.ts 的 interruptibleWrite）：它的名字，没有时为 null。
-  function writeInFlight(): string | null {
-    for (const call of toolsInFlight.values()) {
-      if (interruptibleWrite(call.name, call.args, (key, tool) => connections.isReadOnlyTool(key, tool))) return call.name;
-    }
-    return null;
+  // 正在跑的工具：停下这一轮会不会把它做到一半（lead 的 red-line.ts 的 interruptibleWrite）。
+  function isInterruptibleWrite(name: string, args: unknown): boolean {
+    return interruptibleWrite(name, args, (key, tool) => connections.isReadOnlyTool(key, tool));
   }
 
   // 红线消息里写的在等的人：送的时候重新算（这期间可能又来了人）；都已经送到时用停下时的那一份。
-  function redLineWaiting(): WaitingConversation[] {
-    const waiting = waitingConversations(Date.now());
-    return waiting.length ? waiting : redLine?.waiting ?? [];
-  }
-
-  function redLinePhase(): NonNullable<typeof redLine>["phase"] | null {
-    return redLine?.phase ?? null;
+  function redLineWaiting(atStop: WaitingEntry[]): WaitingEntry[] {
+    const unit = sched.unit;
+    const now = waitingEntries(Date.now());
+    const counted = unit ? countedWaiting(unit, now) : now;
+    return counted.length ? counted : atStop;
   }
 
   // 红线中断以后，这一次 prompt 返回了：在同一轮里马上给 Lead 红线消息。pi 先送这条，再送排着的插话；排队的消息
   // 等 Lead 交接完（这一段最后的回答）才送，那时工具限制已经解除。交接超过 PLC_LEAD_HANDOFF_MS 时再中断一次，这一轮结束。
+  // 交接是这个单元的第二段运行：用一个新的 controller（AbortSignal 只能触发一次）。
   async function continueAfterRedLine(): Promise<void> {
-    if (redLinePhase() !== "aborting" || restartAbort) return;
+    const handoff = sched.dispatch({ type: "prompt.returned", limits: schedulerLimits() })
+      .find((effect) => effect.type === "redline.handoff");
+    if (!handoff) return;
     activeTurnError = null;
-    redLine!.phase = "handoff";
-    const elapsed = Date.now() - (budgetStartedAt ?? Date.now());
-    const { handoffMs } = redLineLimits();
-    log(`lead red line: turn stopped after ${Math.round(elapsed / 1_000)}s; asking Lead to hand off`);
+    sched.nextSegment();
     handoffTimer = setNodeTimeout(() => {
       handoffTimer = null;
-      if (redLinePhase() !== "handoff") return;
-      redLine!.phase = "closing";
-      log(`lead red line: the hand-off took over ${Math.round(handoffMs / 1_000)}s; ending the turn`);
-      Promise.resolve(session.abort?.()).catch((error: any) => log(`lead red line: abort failed: ${error?.message ?? String(error)}`));
-    }, handoffMs);
+      if (schedRedLinePhase(sched.state) !== "handoff") return;
+      log(`lead red line: the hand-off took over ${Math.round(handoff.timeoutMs / 1_000)}s; ending the turn`);
+      sched.dispatch({ type: "handoff.timeout" });
+    }, handoff.timeoutMs);
     handoffTimer.unref();
     try {
-      await session.prompt(redLineMessage(elapsed, redLineWaiting()));
+      await session.prompt(redLineMessage(handoff.elapsedMs, redLineWaiting(handoff.waiting)));
     } finally {
       if (handoffTimer) clearNodeTimeout(handoffTimer);
       handoffTimer = null;
     }
-    if (redLinePhase() === "closing") activeTurnError = null;
-    if (redLine) redLine.phase = "done";
+    if (schedRedLinePhase(sched.state) === "closing") activeTurnError = null;
+    sched.dispatch({ type: "handoff.done" });
   }
 
-  // 排着的消息在这一次运行里开始答（pi 的 followUp）：那是用户新的一件事，两盏灯重新算。
-  function restartLeadBudget(): void {
-    if (redLine && redLine.phase !== "done") return;
-    budgetStartedAt = Date.now();
-    runToolCalls = 0;
-    overflowReminded = false;
-    secondReminded = false;
-    redLine = null;
-  }
-
-  // 在等 Lead 的人，按对话：谁、在哪、几条、等了多久。外部的人来自 lead-input.ts 的 queue（和状态栏同一份）。
+  // 在等 Lead 的人，按对话：谁、在哪、几条、等了多久，带上车道（lead-scheduler spec D1：用户本人 L0，外部的人 L1）。
+  // 外部的人来自 lead-input.ts 的 queue（和状态栏同一份）。
   // 用户本人（2026-11-03 以前不算，Lead 不知道用户在等）：在这一轮里排着的、插进来还没送到的、送到了 Lead 还没回的，
   // 带每条的第一句；等这一轮结束后单独开一轮的（D16）只算条数，原文不放进这一轮。
   // 这一轮正在回答的用户也在等（lead-scheduler spec P0，2026-11-09）：以前不算，红线判断「没有人在等」，只提醒不停；
   // 用户等了 10 分钟，一条同事的闲聊 DM 到了以后红线才停下这一轮。排队说明（noticeQueue）不算它：
   // 说明讲的是排在这一轮后面的消息，Lead 本来就在回答这一条。
-  function waitingConversations(now: number, options: { answering?: boolean } = {}): WaitingConversation[] {
-    const people = leadInput.queue().map((entry): WaitingConversation => ({
+  function waitingEntries(now: number, options: { answering?: boolean } = {}): WaitingEntry[] {
+    const people = leadInput.queue().map((entry): WaitingEntry => ({
       who: entry.senders.join("、") || entry.conversation, conversation: entry.conversation, count: entry.count,
-      waitedMs: Math.max(0, now - Date.parse(entry.firstAt)),
+      waitedMs: Math.max(0, now - Date.parse(entry.firstAt)), lane: 1,
     }));
     const seen = new Set<string>();
     const fresh = (entries: ActiveChannelTurn[]) => entries.filter((entry) => {
@@ -5162,34 +5163,18 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     if (!all.length) return people;
     const since = Math.min(...all.map((entry) => Date.parse(entry.turn.created_at)).filter(Number.isFinite));
     // 这一轮本来就在回答的那一条，Lead 看过原文：只算条数，不再列它的第一句。送到了还没回的插话照旧列第一句。
-    const quoted = inRun.filter((entry) => !answering.includes(entry) || unanswered.includes(entry));
+    const quoted = inRun.filter((entry) => !answering.includes(entry) || unanswered.includes(entry))
+      .map((entry) => firstLine(entry.turn.user_text)).filter(Boolean);
     return [{
-      who: "用户", conversation: "和你的对话", count: all.length, waitedMs: Math.max(0, now - since), user: true,
-      ...(quoted.length ? { firstLines: quoted.map((entry) => firstLine(entry.turn.user_text)) } : {}),
+      who: "用户", conversation: "和你的对话", count: all.length, waitedMs: Math.max(0, now - since), user: true, lane: 0,
+      ...(quoted.length ? { firstLines: quoted } : {}),
     }, ...people];
-  }
-
-  // 代价信号（lead-self-routing spec C 第 3 条）：Lead 在一轮里时，一条外部消息排队超过 PLC_LEAD_QUEUE_NOTICE_MS（缺省 5 分钟），
-  // 插一条说明，告诉它谁在等、等了多久。同一轮只插一次；是信息，不停下这一轮。2026-10-28：Lead 在主会话里发评审时，
-  // 两条 Slack 消息排着队，它不知道。
-  function noticeQueue(now: number): void {
-    if (queueNoticed || draining || !busy || turnStartedAt === null || redLine) return;
-    const threshold = queueNoticeMs();
-    const userThreshold = userQueueNoticeMs();
-    const waiting = waitingConversations(now, { answering: false })
-      .filter((entry) => entry.waitedMs >= (entry.user ? userThreshold : threshold));
-    if (!waiting.length) return;
-    queueNoticed = true;
-    log(`lead queue: ${waiting.length} conversation(s) waited over ${Math.round(threshold / 1_000)}s, telling Lead in the running turn`);
-    session.steer(queueNotice(waiting)).catch((error: any) => {
-      log(`queue notice failed: ${error?.message ?? String(error)}`);
-    });
   }
 
   // Lead 正在跑一轮时到达的 interrupt 级事件：插进这一轮（pi 的 steer，在当前这批工具调用结束后加进去）。
   // 这次运行结束时它还在 pi 的队列里，就不算交给了 Lead（takeLeftoverInputs），之后单独一轮再交。
   function steerInterrupts(): void {
-    if (draining || !leadInput.runKind()) return;
+    if (sched.draining || !leadInput.runKind()) return;
     const events = leadInput.pendingInterrupts({ origin: runningSystemOrigin });
     if (!events.length) return;
     const taken = leadInput.takeMessages({ events, steered: true });
@@ -5354,7 +5339,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     + "纯知悉的简要记录即可。同一个根因合并进来的几件事说一次就够了。"
     + `处理完如果没有需要用户知道的事，只回复 ${QUIET_REPLY}（不写别的字），会话里不会留下这一轮；有要告诉用户的事才正常说。）`;
   function maybeWakeForDigest(options: { patrol?: boolean } = {}): void {
-    if (busy || systemTurnStarting || draining || !network.online) return;
+    if (sched.busy || sched.starting || sched.draining || !network.online) return;
     // 带着事的那一轮刚失败过、还在退避：也等到点，不另外再调模型（发布评审 f796c1c 的 B1）。
     if (leadWakeRetry && leadWakeRetry.at > Date.now()) return;
     if (digestRetry && digestRetry.at > Date.now()) return;
@@ -5388,7 +5373,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
   }
   const heartbeat = setNodeInterval(() => {
     // 已经知道断网：不叫醒 Lead，网络恢复时 NetworkMonitor 会叫。
-    if (!network.online || busy) return;
+    if (!network.online || sched.busy) return;
     maybeWakeForDigest({ patrol: true });
   }, heartbeatMs) as unknown as NodeJS.Timeout;
   heartbeat.unref();
@@ -5409,7 +5394,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
   function statusData(): DaemonLocalStatus {
     const runningItemIds = [...runningChildren().keys()];
     return {
-      model: leadModelName, busy, pid: process.pid, clients: clientCount(),
+      model: leadModelName, busy: sched.busy, pid: process.pid, clients: clientCount(),
       sessionId: session.sessionId,
       runningChildren: runningItemIds,
       runningItemIds,
@@ -5507,7 +5492,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
         originKind,
         itemId: command.itemId,
         userText: command.message,
-        state: busy || draining ? "queued" : "streaming",
+        state: sched.busy || sched.draining ? "queued" : "streaming",
       });
       if (images.length) imageIds = insertChatImages(db, created.id, images).map((image) => image.id);
       return created;
@@ -5519,7 +5504,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     // 这一轮要是因为断网或临时故障没答上，自动再试一次时用同一段原文（waitToRetry）。
     userTurnPrompts.set(turn.id, prompt);
 
-    if (draining) {
+    if (sched.draining) {
       // 正在停机：这条消息存成排队的轮次，重启后的 daemon 回答它（不插进马上要被中断的这一轮）。
       const entry: ActiveChannelTurn = { turn, assistantText: "", commandId: command.commandId };
       publishTurnStarted(entry, "queued");
@@ -5540,18 +5525,18 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       holdForOwnTurn(prompt, { turn, assistantText: "", commandId: command.commandId });
       return { mode: "queued", turnId: turn.id };
     }
-    if (busy && mode === "followUp") {
+    if (sched.busy && mode === "followUp") {
       // 排队（工单 04，spec D6）：Lead 答完这一轮以后再放进去，连着排队的几条一起答。
       queueMicrotask(() => {
-        if (busy) queueLeadFollowUp(prompt, turn, command.commandId);
+        if (sched.busy) queueLeadFollowUp(prompt, turn, command.commandId);
         else startOwnTurn();
       });
       return { mode: "queued", turnId: turn.id };
     }
-    if (busy) {
+    if (sched.busy) {
       // 插话：插话的轮次不只是一条记录，它接管出水口，lead 接下来说的话长在它下面。
       queueMicrotask(() => {
-        if (!busy) {
+        if (!sched.busy) {
           startOwnTurn();
           return;
         }
@@ -5649,7 +5634,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
           confirmation: (id) => connections.confirmation(id),
           resolveConfirmation: (id, approve, by) => connections.resolveConfirmation(id, approve, by),
         },
-        hello: () => ({ model: leadModelName, sessionId: session.sessionId, busy }),
+        hello: () => ({ model: leadModelName, sessionId: session.sessionId, busy: sched.busy }),
         // paired 侧的 response/steered 由 paired-server 自行发送，这里只做路由
         chat: (message, origin) =>
           handleChatCore(leadUserMessage({ via: origin.label, channel: "paired:v1" }, message), {
@@ -5799,7 +5784,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
 
   // paired chat 的纯路由核心：true=新回合，false=已插话
   function handleChatCore(message: string, steerOrigin: { originKind: string; userText: string }): boolean {
-    if (draining) {
+    if (sched.draining) {
       // 旧版 v1 入口没有轮次：这里现建一条，存成排队的轮次，重启后的 daemon 回答它。来源记成 paired:v1：
       // v1 的 label 是 paired:<kind>:<设备名>，设备名里带 ":ticket" 时会被启动查询当成工单消息排除掉（发布评审 909e217）。
       const turn = createTurn(db, { originKind: "paired:v1", userText: steerOrigin.userText, state: "queued" });
@@ -5814,7 +5799,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       holdForOwnTurn(message, { turn, assistantText: "" });
       return false;
     }
-    if (busy) { void steerLead(message, steerOrigin).catch((e: any) => log(`steer error: ${e.message}`)); return false; }
+    if (sched.busy) { void steerLead(message, steerOrigin).catch((e: any) => log(`steer error: ${e.message}`)); return false; }
     void runTurn(message);
     return true;
   }
@@ -5846,12 +5831,12 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
   // 还没交给 Lead 的用户消息（排着等下一轮的、还在 pi 队列里的）：等重启后的 daemon 来答，不随这个进程丢掉（工单 04）。
   function holdQueuedUserInputs(): void {
     for (const carried of carryOverTurns.splice(0)) holdTurnForRestart(carried.entry);
-    if (busy) return;
+    if (sched.busy) return;
     for (const input of queuedInputs.splice(0)) holdTurnForRestart(input.entry);
   }
 
   function drainLead(timeoutMs: number): Promise<DaemonDrainResult> {
-    draining = true;
+    sched.dispatch({ type: "drain.start" });
     holdQueuedUserInputs();
     if (!closing) {
       if (drainExpiry) clearTimeout(drainExpiry);
@@ -5859,29 +5844,26 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
         drainExpiry = null;
         if (closing) return;
         log("drain expired without a shutdown: Lead takes turns again");
-        draining = false;
-        restartAbort = false;
+        sched.dispatch({ type: "drain.expire" });
         retryWaitingUserTurn();
       }, drainExpiryMs);
       drainExpiry.unref();
     }
     drainInFlight ??= (async (): Promise<DaemonDrainResult> => {
       const running = currentTurn;
-      if (!busy || !running) return { drained: true, interrupted: false };
+      if (!sched.busy || !running) return { drained: true, interrupted: false };
       // 前一次排空已经中断了这一轮，它却还没收尾（例如一个工具不理中断信号）：不再等第二遍，直接去 dispose。
       // 再等一遍会让停机超过 supervisor 和 launchd 的 20 秒，最后被 SIGKILL（发布评审 909e217）。
-      if (restartAbort) return { drained: false, interrupted: true };
+      if (abortedForRestart(sched.state)) return { drained: false, interrupted: true };
       log(`drain: waiting up to ${timeoutMs}ms for the running Lead turn`);
       if (await settledWithin(running, timeoutMs)) return { drained: true, interrupted: false };
       log("drain: the Lead turn is still running; interrupting it for the restart");
-      restartAbort = true;
-      // 会话不能单独中断时（没有 abort），这一轮在 dispose 时结束：不在这里空等。
+      // 经过调度器的控制层：原因 drain 先记下，再 session.abort()。会话不能单独中断时（没有 abort），这一轮在 dispose 时结束：
+      // 不在这里空等。
+      sched.dispatch({ type: "drain.abort" });
       if (session.abort) {
-        try {
-          await settledWithin(Promise.resolve(session.abort()), leadAbortGraceMs);
-        } catch (error: any) {
-          log(`drain: abort failed: ${error?.message ?? String(error)}`);
-        }
+        const aborting = sched.aborting;
+        if (aborting) await settledWithin(aborting, leadAbortGraceMs);
         await settledWithin(running, leadAbortGraceMs);
       }
       return { drained: false, interrupted: true };

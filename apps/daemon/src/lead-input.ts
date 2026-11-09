@@ -31,7 +31,7 @@ import {
   LEAD_INSTALL_CHANGED_KIND, LEAD_WAIT_EXPIRED_KIND, LEAD_WAIT_LIMITS, LEAD_WAIT_SATISFIED_KIND, MEMORY_FACT_CHANGED_KIND, MESSAGE_EVENT_KIND, USER_REQUEST_EXPIRED_KIND,
   OWNER_ACTION_DISOWNED_KIND, OWNER_ACTION_PERFORMED_KIND, PUSHED_SECURITY_ALERT_KINDS, REMINDER_PUSHED_KIND,
   REMINDER_UNACKNOWLEDGED_KIND, reminderNeedsCheck, SYSTEM_TURN_ORIGINS, ticketNeedsUser, ticketNeedsUserLabel,
-  TICKET_REPLY_ACTIONS_KIND, LEAD_QUEUE_EXCERPT_MAX,
+  TICKET_REPLY_ACTIONS_KIND, LEAD_QUEUE_EXCERPT_MAX, isSchedulerEventKind,
   type LeadQueueEntry, type SystemTurnOrigin, type TicketSummary,
 } from "@pi-lead-child/protocol";
 import { localIso } from "@pi-lead-child/core";
@@ -64,6 +64,8 @@ export function leadEventRoute(event: Pick<EventRecord, "kind" | "level"> & { pa
   // 用户自己的消息走会话（channel_turns），Lead 自己回合的结果当前局面另有一行（最近一次失败）。
   if (event.kind === "user.message" || event.kind.startsWith("lead.turn_")) return "skip";
   if (COMPONENT_TELEMETRY_KINDS.has(event.kind)) return "skip";
+  // 调度器的记录（lead-scheduler spec D12）只留档，做统计和排查用，不进 Lead 的上下文。
+  if (isSchedulerEventKind(event.kind)) return "skip";
   // 工单回复下面的动作按钮（2026-10-19，ticket-reply-actions.ts）：只给界面用。工单对话答完一轮另有 ticket_agent.turn_completed。
   if (event.kind === TICKET_REPLY_ACTIONS_KIND) return "skip";
   // 主人操作（工单 15）：系统自己推送给用户、自己贴会话卡，「不是我」由用户处理，Lead 不用为它开一轮。

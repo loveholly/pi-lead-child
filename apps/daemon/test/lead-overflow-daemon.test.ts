@@ -132,7 +132,8 @@ describe("Lead's in-place work that grows", () => {
 });
 
 // lead-scheduler spec D12：每一步的阶段耗时写进 daemon 的日志（[sched] step）和 Lead 的会话文件（scheduler 记录）。
-// 2026-11-09 Lead 卡了将近 10 分钟，会话文件里一条记录都没有。
+// 2026-11-09 Lead 卡了将近 10 分钟，会话文件里一条记录都没有。P1：每一步带上调度器的单元编号；单元的开始和结束也写进
+// 会话文件和 events 表（scheduler.*），三处用同一个单元编号串起来。
 describe("the stage timing of a real Lead session", () => {
   it("is written to the daemon log and the session file for every step", async () => {
     const stub = await modelStub();
@@ -142,13 +143,23 @@ describe("the stage timing of a real Lead session", () => {
 
     const steps = logs.filter((line) => line.startsWith("[sched] step "));
     expect(steps.length).toBeGreaterThanOrEqual(2);
-    expect(steps[0]).toMatch(new RegExp(`^\\[sched\\] step run=\\d+ step=1 turn=${turnId} A=\\d+ B1=\\d+ B2=\\d+ C=\\d+ stream=\\d+ tools=ls:\\d+ total=\\d+$`));
+    expect(steps[0]).toMatch(new RegExp(`^\\[sched\\] step unit=unit_\\w+ run=\\d+ step=1 turn=${turnId} A=\\d+ B1=\\d+ B2=\\d+ C=\\d+ stream=\\d+ tools=ls:\\d+ total=\\d+$`));
+    const unitId = /unit=(unit_\w+)/u.exec(steps[0]!)![1]!;
     const sessionFiles = readdirSync(join(dir, "lead-sessions"), { recursive: true }).map(String).filter((name) => name.endsWith(".jsonl"));
     const entries = sessionFiles.flatMap((name) => readFileSync(join(dir, "lead-sessions", name), "utf8").split("\n").filter(Boolean))
-      .map((line) => JSON.parse(line) as { type: string; customType?: string; data?: { kind?: string } })
+      .map((line) => JSON.parse(line) as { type: string; customType?: string; data?: { kind?: string; unitId?: string } })
       .filter((entry) => entry.customType === "scheduler");
-    expect(entries.length).toBe(steps.length);
-    expect(entries.every((entry) => entry.data?.kind === "step")).toBe(true);
+    const stepEntries = entries.filter((entry) => entry.data?.kind === "step");
+    expect(stepEntries.length).toBe(steps.length);
+    expect(stepEntries.every((entry) => entry.data?.unitId === unitId)).toBe(true);
+    expect(entries.filter((entry) => entry.data?.unitId === unitId).map((entry) => entry.data?.kind))
+      .toEqual(expect.arrayContaining(["unit_started", "step", "unit_ended"]));
+    expect(logs).toEqual(expect.arrayContaining([
+      expect.stringMatching(new RegExp(`^\\[sched\\] unit\\.start unit=${unitId} lane=L0 turn=${turnId} source=user`)),
+      expect.stringMatching(new RegExp(`^\\[sched\\] unit\\.end unit=${unitId} lane=L0 turn=${turnId} outcome=answered ms=\\d+ steps=\\d+`)),
+    ]));
+    const recorded = db.prepare("SELECT kind FROM events WHERE entity_key = ? ORDER BY seq").all(`scheduler:${unitId}`) as Array<{ kind: string }>;
+    expect(recorded.map((row) => row.kind)).toEqual(expect.arrayContaining(["scheduler.unit_started", "scheduler.unit_ended"]));
   }, 90_000);
 });
 
