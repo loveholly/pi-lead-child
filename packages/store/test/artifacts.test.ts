@@ -25,8 +25,10 @@ import {
   openArtifactContent,
   openArtifactContentAsync,
   preflightArtifactRegistrations,
+  preflightArtifactRegistrationsAsync,
   repairArtifactStorage,
   stageArtifact,
+  stageArtifactAsync,
   type ArtifactContent,
   type StagedArtifact,
 } from "../src/artifacts.js";
@@ -162,6 +164,40 @@ describe("immutable artifact storage", () => {
     chmodSync(blob!, 0o600);
     writeFileSync(blob!, Buffer.from(bytes).fill(0x41, 0, 10));
     await expect(openArtifactContentAsync(db, dataDir, itemId, artifact!.id)).rejects.toThrow(/SHA does not match/);
+  });
+
+  // lead-scheduler P0b：daemon 异步地登记产物，提交事务里只核对文件身份。异步版要和同步版得出一样的结果，
+  // 提交前核对过以后文件又被改了，提交时照样要发现。
+  it("stages asynchronously with the same result as the synchronous path", async () => {
+    const bytes = Buffer.from("async staging bytes\n".repeat(80_000), "utf8");
+    writeFileSync(join(workdir, "async.txt"), bytes);
+    writeFileSync(join(workdir, "sync.txt"), bytes);
+    preflightArtifactRegistrations(db, [artifactInput("report/sync", "sync.txt")]);
+    await preflightArtifactRegistrationsAsync(db, [artifactInput("report/async", "async.txt")]);
+    const viaSync = stageArtifact(db, artifactInput("report/sync", "sync.txt"));
+    const viaAsync = await stageArtifactAsync(db, artifactInput("report/async", "async.txt"));
+    await viaAsync.prepareCommit();
+
+    expect(viaAsync).toMatchObject({
+      sha256: viaSync.sha256, byteLength: viaSync.byteLength, storageKey: viaSync.storageKey, availability: "available",
+    });
+    expect(viaAsync.sha256).toBe(createHash("sha256").update(bytes).digest("hex"));
+    const artifacts = commitStagedArtifacts(db, checkpoint(), [viaSync, viaAsync]);
+    expect(artifacts.map((artifact) => artifact.sha256)).toEqual([viaSync.sha256, viaSync.sha256]);
+    expect(await readContent(openArtifactContent(db, dataDir, itemId, artifacts[1]!.id))).toEqual(bytes);
+  });
+
+  it("re-reads a blob at commit when it changed after prepareCommit, and refuses the changed content", async () => {
+    const bytes = Buffer.from("verified once\n".repeat(40_000), "utf8");
+    writeFileSync(join(workdir, "tampered.txt"), bytes);
+    const staged = await stageArtifactAsync(db, artifactInput("report/tampered", "tampered.txt"));
+    await staged.prepareCommit();
+
+    const [blob] = filesUnder(join(dataDir, "artifacts", "blobs"));
+    chmodSync(blob!, 0o600);
+    writeFileSync(blob!, Buffer.from(bytes).fill(0x41, 0, 10));
+    expect(() => commitStagedArtifacts(db, checkpoint(), [staged])).toThrow(/SHA does not match/);
+    expect(listArtifacts(db, itemId)).toEqual([]);
   });
 
   it("supports metadata-only legacy-style registrations without inventing downloadable content", () => {

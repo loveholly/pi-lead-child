@@ -268,14 +268,26 @@ export function secretEnvValues(env: Record<string, string | undefined>): string
   return [...values].sort((a, b) => b.length - a.length);
 }
 
+/**
+ * 按顺序要换掉的字符串：每个够长的密钥值，以及它 JSON 转义过的形式（和原值不同时）。
+ * redactKnownValues 按这个顺序逐个替换；清扫会话文件的 worker 线程拿同一份清单做同样的替换（engine 的 secret-scrub.ts）。
+ */
+export function knownValueNeedles(values: readonly string[]): string[] {
+  const needles: string[] = [];
+  for (const value of values) {
+    if (value.length < MIN_SECRET_VALUE) continue;
+    needles.push(value);
+    const escaped = JSON.stringify(value).slice(1, -1);
+    if (escaped !== value) needles.push(escaped);
+  }
+  return needles;
+}
+
 /** 把文字里出现的已知密钥的值换成 [REDACTED]。JSON 转义过的形式也换。 */
 export function redactKnownValues(text: string, values: readonly string[]): string {
   let out = text;
-  for (const value of values) {
-    if (value.length < MIN_SECRET_VALUE) continue;
-    if (out.includes(value)) out = out.split(value).join(REDACTED);
-    const escaped = JSON.stringify(value).slice(1, -1);
-    if (escaped !== value && out.includes(escaped)) out = out.split(escaped).join(REDACTED);
+  for (const needle of knownValueNeedles(values)) {
+    if (out.includes(needle)) out = out.split(needle).join(REDACTED);
   }
   return out;
 }

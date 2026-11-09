@@ -6,7 +6,10 @@
 //
 // 规则：daemon 进程会加载的后端包里，
 //   · 不用进程内递归的 fs.rm / fs.cp（以及 rmSync、cpSync、递归的 rmdir）：删整个目录树用 core 的 removeTree（子进程）；
-//   · 不用同步的 child_process 调用：用 execFile / spawn 的异步版本。
+//   · 不用同步的 child_process 调用：用 execFile / spawn 的异步版本；
+//   · 不用 readSync 一块一块地读文件内容（P0b）：读一个大文件要整段占住主线程。只读文件开头几个字节的例外列在下面；
+//   · 不调同步的产物接口（P0b）：stageArtifact、preflightArtifactRegistrations、openArtifactContent、repairArtifactStorage
+//     把整个文件（最大 25 MB）同步地读、哈希、复制。daemon 用它们的 Async 版（store 的 artifacts.ts）。
 // 现有的例外逐个列在下面，写明理由和次数。次数变了（多了或少了）测试都会失败：多了说明加了新的同步调用，
 // 少了说明例外可以删掉。
 // 检查的是代码，不是注释：先用 esbuild 去掉注释和类型（写法和 runtime-architecture.test.ts 一样）。
@@ -22,12 +25,15 @@ const ROOT = fileURLToPath(new URL("../../..", import.meta.url));
 // protocol 是线上契约，没有 I/O。
 const DAEMON_PACKAGES = ["core", "runtime", "store", "engine", "gateway", "lead", "connections", "daemon"];
 
-type Kind = "sync-child-process" | "recursive-fs";
+type Kind = "sync-child-process" | "recursive-fs" | "sync-file-read" | "sync-artifact-io";
 
 const PATTERNS: Array<[Kind, RegExp]> = [
   ["sync-child-process", /\b(?:execFileSync|execSync|spawnSync)\s*\(/g],
   // 一条语句里调 rm / rmSync / cp / cpSync / rmdir / rmdirSync，参数里带 recursive: true。
   ["recursive-fs", /\b(?:rm|rmSync|cp|cpSync|rmdir|rmdirSync)\s*\([^;]*?recursive:\s*(?:true|!0)/g],
+  ["sync-file-read", /\breadSync\s*\(/g],
+  // 调用，不算定义（function stageArtifact(...)）和属性访问（x.stageArtifact(...)）。
+  ["sync-artifact-io", /(?<![\w.]|function )\b(?:stageArtifact|preflightArtifactRegistrations|openArtifactContent|repairArtifactStorage)\s*\(/g],
 ];
 
 // 允许的例外：文件 → 每种调用的次数和理由。
@@ -74,6 +80,24 @@ const EXCEPTIONS: Record<string, Partial<Record<Kind, { count: number; reason: s
   },
   "packages/engine/src/installs/skills.ts": {
     "recursive-fs": { count: 2, reason: "安装 skill 的暂存目录和卸载的 skill 目录：一个 skill 只有几个文件" },
+  },
+  "packages/store/src/artifacts.ts": {
+    "sync-file-read": { count: 1, reason: "产物读写的同步驱动（runIoSync）：测试、脚本、启动时的修复和出错时的清理用它；daemon 处理请求时走异步驱动" },
+  },
+  "packages/runtime/src/interpreter.ts": {
+    "sync-file-read": { count: 1, reason: "只读可执行文件的第一行（shebang），几百字节" },
+  },
+  "packages/runtime/src/pi.ts": {
+    "sync-file-read": { count: 1, reason: "只读会话文件开头的 64 KB（会话头）" },
+  },
+  "packages/connections/src/repo-paths.ts": {
+    "sync-file-read": { count: 1, reason: "本地仓库连接的 read_file：最多 1 MB" },
+  },
+  "apps/daemon/src/secret-history-scrub.ts": {
+    "sync-file-read": { count: 1, reason: "只读 SQLite 文件头（16 字节）；用户手动跑的运维命令" },
+  },
+  "apps/daemon/src/server.ts": {
+    "sync-artifact-io": { count: 1, reason: "启动时的产物修复（repairArtifactStorage）：在 daemon 开始服务、Lead 开始工作之前跑；本机实测 250 MB 的产物约 190 毫秒" },
   },
 };
 
@@ -126,12 +150,16 @@ describe("the daemon process does no heavy work in process (lead-scheduler spec 
   it("still detects a forbidden call, so the scan is not vacuous", () => {
     const code = [
       'import { rm } from "node:fs/promises";',
+      'import { readSync } from "node:fs";',
       'import { execFileSync } from "node:child_process";',
+      'import { stageArtifact } from "@pi-lead-child/store";',
       "export async function drop(path: string) { await rm(path, {",
-      "  recursive: true, force: true }); execFileSync(\"git\", [\"status\"]); }",
+      "  recursive: true, force: true }); execFileSync(\"git\", [\"status\"]); readSync(3, Buffer.alloc(1)); }",
+      "export function stage(db: any, input: any) { return stageArtifact(db, input); }",
+      "export function stageArtifactLike(db: any) { return db.stageArtifact(db); }",
     ].join("\n");
     const stripped = transformSync(code, { loader: "ts", format: "esm" }).code;
     expect(PATTERNS.map(([kind, pattern]) => [kind, [...stripped.matchAll(pattern)].length]))
-      .toEqual([["sync-child-process", 1], ["recursive-fs", 1]]);
+      .toEqual([["sync-child-process", 1], ["recursive-fs", 1], ["sync-file-read", 1], ["sync-artifact-io", 1]]);
   });
 });

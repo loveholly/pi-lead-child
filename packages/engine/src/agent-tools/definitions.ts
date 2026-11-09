@@ -20,6 +20,7 @@ import {
 } from "../coordinator/checkpoint-policy.js";
 import {
   loadCheckpointPolicyConfig,
+  trackHostJob,
   type CheckpointPolicyConfig,
 } from "@pi-lead-child/core";
 import { getDecisionRequest } from "@pi-lead-child/store";
@@ -31,8 +32,8 @@ import {
 import { raiseBlockerFromCheckpoint } from "@pi-lead-child/store";
 import { getCheckpoint } from "@pi-lead-child/store";
 import {
-  preflightArtifactRegistrations,
-  stageArtifact,
+  preflightArtifactRegistrationsAsync,
+  stageArtifactAsync,
   type StageArtifactInput,
   type StagedArtifact,
 } from "@pi-lead-child/store";
@@ -725,7 +726,9 @@ function cleanupStagedArtifacts(stagedArtifacts: StagedArtifact[]): void {
   for (const artifact of [...stagedArtifacts].reverse()) artifact.cleanup();
 }
 
-function prepareCheckpointArtifacts(
+// 读、复制、核对文件内容都是异步的，daemon 经工具桥替子 agent 登记产物时不占住主线程（lead-scheduler P0b）。
+// 提交前先把每个受管文件异步地核对一遍（prepareCommit），提交事务里就只核对文件身份，不再读内容，写锁拿得短。
+async function prepareCheckpointArtifacts(
   db: Db,
   input: {
     dataDir?: string;
@@ -733,7 +736,7 @@ function prepareCheckpointArtifacts(
     runId: number;
     checkpoint: MappedCheckpoint;
   },
-): PreparedCheckpoint {
+): Promise<PreparedCheckpoint> {
   const { artifactRegistrations, ...checkpoint } = input.checkpoint;
   const { outcomeRaw, ...checkpointWithoutRawOutcome } = checkpoint;
   const outcome = outcomeRaw === undefined
@@ -754,16 +757,19 @@ function prepareCheckpointArtifacts(
     runId: input.runId,
     ...artifact,
   }));
-  preflightArtifactRegistrations(db, registrations);
   const stagedArtifacts: StagedArtifact[] = [];
-  try {
-    for (const registration of registrations) {
-      stagedArtifacts.push(stageArtifact(db, registration));
+  await trackHostJob("artifact-io", `checkpoint item #${input.itemId} (${registrations.length} files)`, async () => {
+    await preflightArtifactRegistrationsAsync(db, registrations);
+    try {
+      for (const registration of registrations) {
+        stagedArtifacts.push(await stageArtifactAsync(db, registration));
+      }
+      for (const staged of stagedArtifacts) await staged.prepareCommit();
+    } catch (error) {
+      cleanupStagedArtifacts(stagedArtifacts);
+      throw error;
     }
-  } catch (error) {
-    cleanupStagedArtifacts(stagedArtifacts);
-    throw error;
-  }
+  });
   return {
     ...checkpointWithoutRawOutcome,
     outcome,
@@ -961,7 +967,7 @@ export function createAgentToolHandlers(context: {
             : mapCheckpoint(args.checkpoint);
           if (mappedCheckpoint) assertActiveAgentRun(db, { itemId, runId });
           const checkpoint = mappedCheckpoint
-            ? prepareCheckpointArtifacts(db, {
+            ? await prepareCheckpointArtifacts(db, {
                 dataDir: context.dataDir,
                 itemId,
                 runId,
@@ -1223,13 +1229,15 @@ export function createAgentToolHandlers(context: {
           }
           const at = now();
           assertActiveAgentRun(db, { itemId, runId });
-          const checkpoint = prepareCheckpointArtifacts(db, {
+          const checkpoint = await prepareCheckpointArtifacts(db, {
             dataDir: context.dataDir,
             itemId,
             runId,
             checkpoint: mappedCheckpoint,
           });
           try {
+            // 登记产物的读写是异步的，这期间 Run 可能已经结束：提交前再查一次（以前整段是同步的）。
+            if (checkpoint.stagedArtifacts.length > 0) assertActiveAgentRun(db, { itemId, runId });
             const input: AgentCheckpointPolicyInput = {
               itemId,
               runId,

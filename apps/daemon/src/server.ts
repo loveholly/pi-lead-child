@@ -2666,14 +2666,13 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
   const channelAssistantName = () => (typeof plcConfig.channels?.assistantName === "string" ? plcConfig.channels.assistantName.trim() : "")
     || leadDisplayName(db);
   const lookupRoots = plcConfig.channels?.lookup?.localRoots?.filter((root) => typeof root === "string" && root.trim().length > 0);
-  let candidateCache: { at: number; value: readonly ChannelLookupCandidate[] } | null = null;
-  const lookupCandidates = lookupCandidatesOverride ?? ((): readonly ChannelLookupCandidate[] => {
-    if (candidateCache && Date.now() - candidateCache.at < 5 * 60_000) return candidateCache.value;
-    const value = listLookupCandidates({ db, roots: testDaemon ? [] : lookupRoots ?? DEFAULT_LOOKUP_ROOTS() })
-      .map(({ repo, root, github }) => ({ repo, root, github }));
-    candidateCache = { at: Date.now(), value };
-    return value;
-  });
+  // 扫目录不在主线程上做（lead-scheduler P0b）：listLookupCandidates 只读缓存（5 分钟），过期了在后台重扫，
+  // 这次先给旧的结果；扫完记一行 [sched] lookup.scan。
+  const lookupCandidates = lookupCandidatesOverride ?? ((): readonly ChannelLookupCandidate[] =>
+    listLookupCandidates({ db, roots: testDaemon ? [] : lookupRoots ?? DEFAULT_LOOKUP_ROOTS(), log })
+      .map(({ repo, root, github }) => ({ repo, root, github })));
+  // 启动时先在后台扫一遍，第一次问请求 A 时就有本地仓库。
+  if (!lookupCandidatesOverride) lookupCandidates();
   resolveGrantLocalRepo = (name) => {
     const wanted = name.trim().toLowerCase();
     const found = lookupCandidates().find((candidate) => candidate.repo.toLowerCase() === wanted || basename(candidate.root).toLowerCase() === wanted);
