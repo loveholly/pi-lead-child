@@ -134,7 +134,7 @@ describe("idle lane on a real pi session", () => {
     for (const tag of ["one", "two", "three"]) await h.session.prompt(big(1_200, tag), { expandPromptTemplates: false });
     expect(compactions(h)).toHaveLength(0);
     // Lead 空闲，上下文过了空闲车道的线（0.8）：开始。
-    h.host.ratio = 0.85;
+    h.host.ratio = 0.82;
     h.runtime.check();
     await until(() => h.pending.length === 1);
     // 子进程拿到的是 pi 算好的 preparation，能写进 JSON（fileOps 是数组）。
@@ -188,6 +188,28 @@ describe("idle lane on a real pi session", () => {
     expect(h.logs.at(-1)).toMatch(/idle\.applied job=compact .*unit=unit_user lane=L0/);
   }, 30_000);
 
+  it("on overflow, waits for the summary the child is writing instead of writing another one in place", async () => {
+    harness = await boot();
+    const h = harness;
+    h.runtime.unitOpened("unit_user", 0);
+    h.host.unit = "unit_user";
+    for (const tag of ["one", "two", "three", "four", "five"]) await h.session.prompt(big(1_200, tag), { expandPromptTemplates: false });
+    expect(h.pending).toHaveLength(1);
+    // pi 溢出时调扩展（这里直接调，preparation 和会话里的一样）；子进程 50 毫秒后写完。
+    const branchEntries = h.session.sessionManager.getBranch();
+    const event = {
+      type: "session_before_compact", reason: "overflow", willRetry: true, customInstructions: undefined,
+      preparation: { ...h.requests[0]!.preparation, fileOps: { read: new Set(), written: new Set(), edited: new Set() } },
+      branchEntries, signal: new AbortController().signal,
+    } as never;
+    setTimeout(() => h.pending[0]!.resolve("WAITED SUMMARY"), 50);
+    const result = await h.runtime.beforeCompact(event, { model: undefined, modelRegistry: undefined } as never);
+    expect(result).toMatchObject({ compaction: { summary: "WAITED SUMMARY", firstKeptEntryId: h.requests[0]!.preparation.firstKeptEntryId } });
+    expect(h.logs.some((line) => /^\[sched\] idle\.overflow_wait job=compact id=idle_compact_\w+ waitedMs=\d+ ready=true unit=unit_user$/.test(line))).toBe(true);
+    expect(h.logs.some((line) => /idle\.inline job=compact .*reason=overflow action=supply/.test(line))).toBe(true);
+    expect(h.inlineSummaries).toBe(0);
+  }, 30_000);
+
   it("compacts in place after the deadline when the summary is not ready (the fallback), and stops the child", async () => {
     harness = await boot({ deferMaxMs: 0 });
     const h = harness;
@@ -208,7 +230,7 @@ describe("idle lane on a real pi session", () => {
     for (const tag of ["one", "two", "three"]) await h.session.prompt(big(1_200, tag), { expandPromptTemplates: false });
     h.runtime.unitOpened("unit_user", 0);
     h.host.unit = "unit_user";
-    h.host.ratio = 0.85;
+    h.host.ratio = 0.82;
     // 单元开着：空闲车道不开始；单元结束后开始，写摘要期间用户又开了一个单元。
     h.runtime.unitClosed();
     h.host.unit = null;

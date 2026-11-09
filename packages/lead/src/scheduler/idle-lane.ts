@@ -15,8 +15,12 @@
 //   · 回收区的删除、清理扫描：做完这一小块再让。正在跑的那一个子进程照常跑完（后台优先级），下一个等 Lead 空闲。
 //
 // 压缩不能在 Lead 正在回应时抢走它，但上下文快满时也不能因为一直不空闲就永远不压缩：
+//   · 上下文过了 promoteRatio（缺省 85%）、Lead 又一直忙：在两个单元之间（会话空着的那几毫秒）就开始写摘要（提级，
+//     不等空闲满 graceMs）。摘要在子进程里写，不占 Lead；pi 到了压缩线时多半已经写好，直接用它。
 //   · pi 在单元中间到了压缩线（threshold）：推迟（让 pi 这一次不压缩），同时马上在子进程里写摘要（提级，不等空闲）；
 //     摘要写好以后，pi 下一次检查时直接用它（几毫秒），不再就地写 43–103 秒。
+//     推迟有代价：压缩线只留了 reserveTokens（2 万）的余量，下一步的大工具结果可能让上下文溢出（开发模式下 2/2 次）。
+//     所以溢出时如果子进程已经在写，先等它（运行层，最多 overflowWaitMs），比重写一份快。
 //   · 兜底时限：从第一次推迟算起超过 deferMaxMs 还没压缩成，就让 pi 照常就地压缩，写一条 idle.compact.forced。
 //   · 上下文溢出（overflow）不推迟：不压缩这一轮就答不了。有写好的摘要时用它。
 //
@@ -33,6 +37,8 @@ export interface IdleLaneLimits {
   precipitateRatio: number;
   // 上下文过了这个比例，空闲时压缩（PLC_LEAD_IDLE_COMPACT_RATIO）。比 pi 的压缩线低，留出一段给忙的时候。
   compactRatio: number;
+  // 上下文过了这个比例，Lead 忙着也在两个单元之间开始写摘要（PLC_LEAD_IDLE_PROMOTE_RATIO）。
+  promoteRatio: number;
   // pi 的就地压缩最多推迟多久（PLC_LEAD_COMPACT_DEFER_MAX_MS），从这个周期第一次推迟算。
   deferMaxMs: number;
   // 摘要失败以后多久再试；每多失败一次翻倍，最多 retryMaxMs。
@@ -44,6 +50,7 @@ export const DEFAULT_IDLE_LANE_LIMITS: IdleLaneLimits = {
   graceMs: 15_000,
   precipitateRatio: 0.7,
   compactRatio: 0.8,
+  promoteRatio: 0.85,
   deferMaxMs: 5 * 60_000,
   retryMs: 2 * 60_000,
   retryMaxMs: 30 * 60_000,
@@ -60,6 +67,7 @@ export function idleLaneLimitsFromEnv(env: Record<string, string | undefined> = 
     ...limits,
     graceMs: read("PLC_LEAD_IDLE_GRACE_MS", limits.graceMs, (value) => value >= 0),
     compactRatio: read("PLC_LEAD_IDLE_COMPACT_RATIO", limits.compactRatio, (value) => value > 0 && value < 1),
+    promoteRatio: read("PLC_LEAD_IDLE_PROMOTE_RATIO", limits.promoteRatio, (value) => value > 0 && value < 1),
     deferMaxMs: read("PLC_LEAD_COMPACT_DEFER_MAX_MS", limits.deferMaxMs, (value) => value >= 0),
     retryMs: read("PLC_LEAD_IDLE_RETRY_MS", limits.retryMs, (value) => value > 0),
   };
@@ -141,8 +149,8 @@ export type IdleLaneEvent =
   | { type: "busy"; unitId: string; lane: Lane }
   // 单元结束了（Lead 空闲了）。
   | { type: "idle" }
-  // 看一次该不该开始什么：上下文水位、有没有排着的更高车道的事、会话现在能不能碰。
-  | { type: "tick"; ratio: number | null; pendingInput: boolean; starting: boolean }
+  // 看一次该不该开始什么：上下文水位、有没有排着的更高车道的事、会话现在能不能碰。boundary：一个单元刚结束（会话空着）。
+  | { type: "tick"; ratio: number | null; pendingInput: boolean; starting: boolean; boundary?: boolean }
   // pi 想压缩（扩展的 session_before_compact）。ready：写好的摘要对现在的会话还有效。
   | { type: "inline"; reason: InlineCompactionReason; ready: boolean }
   // 取到了要摘要的对话（tokens 是估算），子进程开始写。
@@ -271,6 +279,27 @@ function startIdleWork(state: IdleLaneState, event: Extract<IdleLaneEvent, { typ
     next = { ...next, compact: { ...next.compact, phase: "applying" } };
     effects.push(line("idle.apply", { job: "compact", id, readyForMs: next.compact.readyAt === null ? null : now - next.compact.readyAt }));
     effects.push({ type: "compact.apply", id });
+    return { state: next, effects };
+  }
+  const ratio0 = next.ratio;
+  const notesPending = ratio0 !== null && ratio0 >= limits.precipitateRatio && !next.precipitate.done;
+  const idleEnough = !event.pendingInput && idleLongEnough(next, now, limits);
+  // 上下文快满了：不等空闲满 graceMs，也不管有没有排着的输入，会话一空着就开始写摘要（提级）。取对话只碰会话几毫秒，
+  // 子进程不占 Lead。Lead 空闲够久、笔记还没整理时，先整理笔记（下面）。
+  if (
+    ratio0 !== null && ratio0 >= limits.promoteRatio && next.compact.phase === "idle" && next.precipitate.phase === "idle"
+    && (next.compact.retryAt === null || now >= next.compact.retryAt) && !(idleEnough && notesPending)
+  ) {
+    const made = nextId(next, "compact", now);
+    const compact = next.compact;
+    next = { ...made.state, compact: { ...compact, phase: "preparing", id: made.id, promoted: true, startedAt: now, readyAt: null, yieldLogged: false } };
+    const why = idleEnough ? "idle" : event.boundary ? "boundary" : "busy";
+    effects.push(line("idle.start", {
+      job: "compact", id: made.id, ratio: ratioText(ratio0), line: limits.promoteRatio, promoted: true, why,
+      idleMs: now - next.idleSince!, failures: compact.failures,
+    }));
+    effects.push(record(made.id, "compact", "started", { ratio: ratio0, promoted: true, why, failures: compact.failures }));
+    effects.push({ type: "compact.start", id: made.id, promoted: true });
     return { state: next, effects };
   }
   if (event.pendingInput) return { state: next, effects };

@@ -24,12 +24,16 @@ const tick = (ratio: number | null, extra: Partial<Extract<IdleLaneEvent, { type
 describe("idle lane: starting idle work", () => {
   it.each([
     // [说明, 空闲了多久, 水位, 有没有排着的输入, 在探网络, 期望]
-    ["before the idle grace: nothing", 14_999, 0.9, false, false, []],
+    ["before the idle grace: nothing", 14_999, 0.82, false, false, []],
     ["idle long enough, context under both lines: nothing", 15_000, 0.5, false, false, []],
     ["idle long enough, over the notes line: notes first", 15_000, 0.75, false, false, ["precipitate.start"]],
     ["over the compaction line but notes not done: notes first", 20_000, 0.85, false, false, ["precipitate.start"]],
-    ["a queued input waits for Lead: nothing", 60_000, 0.9, true, false, []],
+    ["a queued input waits for Lead: nothing", 60_000, 0.82, true, false, []],
     ["a system turn is probing the network: nothing", 60_000, 0.9, false, true, []],
+    // 提级：过了 85%，不等空闲满 graceMs，也不管排着的输入（子进程不占 Lead，取对话只碰会话几毫秒）。
+    ["over the promote line, right after a unit: the summary starts", 0, 0.86, false, false, ["compact.start"]],
+    ["over the promote line with a queued input: the summary starts", 1_000, 0.9, true, false, ["compact.start"]],
+    ["over the promote line, idle long enough, notes pending: notes first", 15_000, 0.9, false, false, ["precipitate.start"]],
     ["context unknown (just compacted): nothing", 60_000, null, false, false, []],
   ] as const)("%s", (_name, at, ratio, pendingInput, starting, expected) => {
     const { kinds } = run([[at, tick(ratio, { pendingInput, starting })]]);
@@ -42,12 +46,23 @@ describe("idle lane: starting idle work", () => {
       [16_000, { type: "busy", unitId: "unit_p", lane: 4 }],
       [40_000, { type: "precipitate.ended", outcome: "done" }],
       [40_000, { type: "idle" }],
-      [50_000, tick(0.85)],
-      [55_000, tick(0.85)],
+      [50_000, tick(0.83)],
+      [55_000, tick(0.83)],
     ]);
     expect(kinds).toEqual(["precipitate.start", "compact.start"]);
     expect(state.compact).toMatchObject({ phase: "preparing", promoted: false });
-    expect(logs.at(-1)).toMatch(/^\[sched\] idle\.start job=compact id=idle_compact_\w+ ratio=0\.85 line=0\.8 idleMs=15000 failures=0$/);
+    expect(logs.at(-1)).toMatch(/^\[sched\] idle\.start job=compact id=idle_compact_\w+ ratio=0\.83 line=0\.8 idleMs=15000 failures=0$/);
+  });
+
+  it("promotes the summary at a unit boundary when the context is nearly full, and logs why", () => {
+    const { kinds, logs, state } = run([
+      [0, { type: "busy", unitId: "unit_a", lane: 0 }],
+      [6_000, { type: "idle" }],
+      [6_000, tick(0.87, { boundary: true, pendingInput: true })],
+    ]);
+    expect(kinds).toEqual(["compact.start"]);
+    expect(state.compact).toMatchObject({ phase: "preparing", promoted: true });
+    expect(logs[0]).toMatch(/^\[sched\] idle\.start job=compact id=idle_compact_\w+ ratio=0\.87 line=0\.85 promoted=true why=boundary idleMs=0 failures=0$/);
   });
 
   it("never starts while a unit runs", () => {

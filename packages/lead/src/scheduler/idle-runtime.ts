@@ -60,6 +60,8 @@ export interface IdleLaneRuntimeOptions {
   compactionTimeoutMs?: number;
   // 让路时最多等正在跑的写操作多久。
   writeGraceMs?: number;
+  // 上下文溢出时，最多等正在写的摘要多久（等不到就让 pi 就地压缩）。
+  overflowWaitMs?: number;
   // 测试换掉子进程。
   summarize?: (request: IdleCompactRequest, options: SummarizeInChildOptions) => Promise<SummarizeInChildResult>;
 }
@@ -93,12 +95,15 @@ export class IdleLaneRuntime {
   readonly #now: () => number;
   readonly #timeoutMs: number;
   readonly #writeGraceMs: number;
+  readonly #overflowWaitMs: number;
   readonly #summarize: NonNullable<IdleLaneRuntimeOptions["summarize"]>;
   #timer: ReturnType<typeof setTimeout> | null = null;
   #timerAt: number | null = null;
   // 上一次 tick 的时间：定时器只等这以后的时刻。
   #lastCheckAt = Number.NEGATIVE_INFINITY;
   #child: AbortController | null = null;
+  // 正在写的摘要结束（成功、失败或者被叫停）时 resolve。溢出时等它。
+  #childSettled: Promise<void> | null = null;
   #childPid: number | null = null;
   #ready: ReadySummary | null = null;
   #session: Promise<void> | null = null;
@@ -120,6 +125,7 @@ export class IdleLaneRuntime {
     this.#now = options.now ?? Date.now;
     this.#timeoutMs = options.compactionTimeoutMs ?? 10 * 60_000;
     this.#writeGraceMs = options.writeGraceMs ?? 10_000;
+    this.#overflowWaitMs = options.overflowWaitMs ?? 60_000;
     this.#summarize = options.summarize ?? summarizeInChild;
     this.#state = initialIdleLaneState(this.#now());
   }
@@ -147,15 +153,17 @@ export class IdleLaneRuntime {
     this.dispatch({ type: "busy", unitId, lane });
   }
 
+  /** 单元结束了：会话空着的这一刻看一眼（上下文快满时马上开始写摘要，见 idle-lane.ts 的提级）。 */
   unitClosed(): void {
     this.dispatch({ type: "idle" });
+    this.check({ boundary: true });
   }
 
   /**
    * 看一眼该不该开始什么（单元结束、排着的事处理完以后，daemon 调它；定时器也调它）。
    * ifOlderThanMs：daemon 轮询里的心跳，离上一次看不到这么久时不看（读上下文水位要建一次投影）。
    */
-  check(options: { ifOlderThanMs?: number } = {}): void {
+  check(options: { ifOlderThanMs?: number; boundary?: boolean } = {}): void {
     if (this.#stopped) return;
     if (options.ifOlderThanMs !== undefined && this.#now() - this.#lastCheckAt < options.ifOlderThanMs) return;
     let ratio: number | null = null;
@@ -172,7 +180,7 @@ export class IdleLaneRuntime {
       return;
     }
     this.#lastCheckAt = this.#now();
-    this.dispatch({ type: "tick", ratio, pendingInput, starting });
+    this.dispatch({ type: "tick", ratio, pendingInput, starting, ...(options.boundary ? { boundary: true } : {}) });
   }
 
   /** Lead 忙着 L4 的活时，更高车道的输入到了。 */
@@ -267,6 +275,20 @@ export class IdleLaneRuntime {
       if (compact.phase === "preparing" && compact.id) this.#startChild(compact.id, event, ctx);
       this.#cancelled += 1;
       return { cancel: true };
+    }
+    // 上下文溢出，子进程正在写摘要：先等它（最多 overflowWaitMs）。它比现在就地重写一份早开始，所以不会更慢。
+    if (event.reason === "overflow" && !this.#ready && this.#childSettled
+      && (this.#state.compact.phase === "summarizing" || this.#state.compact.phase === "preparing")) {
+      const started = this.#now();
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      await Promise.race([
+        this.#childSettled,
+        new Promise<void>((resolve) => { timer = setTimeout(resolve, this.#overflowWaitMs); timer.unref?.(); }),
+      ]).finally(() => clearTimeout(timer));
+      this.#host.log(schedulerLine("idle.overflow_wait", {
+        job: "compact", id: this.#state.compact.id, waitedMs: this.#now() - started, ready: this.#ready !== null,
+        unit: this.#state.busyUnit ?? "-",
+      }));
     }
     const valid = this.#validReady(event.branchEntries as readonly BranchEntry[]);
     if (this.#ready && !valid) {
@@ -390,10 +412,11 @@ export class IdleLaneRuntime {
         this.#ready = null;
         return;
       case "precipitate.start":
+        // 整理笔记结束以后再看一眼：它的单元结束时（unitClosed）这里还记着「在跑」，接下来的压缩要等这一眼。
         void this.#host.runPrecipitation().then(
           (outcome) => this.dispatch({ type: "precipitate.ended", outcome: outcome === "skipped" ? "yielded" : outcome }),
           () => this.dispatch({ type: "precipitate.ended", outcome: "failed" }),
-        );
+        ).then(() => this.check());
         return;
       case "yield.unit":
         this.#yieldWhenSafe(effect.by, effect.unitId);
@@ -465,7 +488,7 @@ export class IdleLaneRuntime {
     const controller = new AbortController();
     this.#child = controller;
     this.#childPid = null;
-    void (async () => {
+    const settled = (async () => {
       let result: SummarizeInChildResult;
       try {
         const resolved = await auth;
@@ -503,6 +526,8 @@ export class IdleLaneRuntime {
       };
       this.dispatch({ type: "compact.ready", ms, chars: response.summary.length, chunks: response.chunks });
     })();
+    this.#childSettled = settled;
+    void settled.finally(() => { if (this.#childSettled === settled) this.#childSettled = null; });
   }
 
   // 让路：正在跑的写操作先做完（最多 writeGraceMs，spec D5），然后停下那个 L4 单元。
