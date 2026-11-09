@@ -1,4 +1,5 @@
-import { projectRoot } from "@pi-lead-child/core";
+import { homedir } from "node:os";
+import { projectRoot, tildeHome } from "@pi-lead-child/core";
 import { addActivity } from "@pi-lead-child/store";
 import type { Db } from "@pi-lead-child/store";
 import { getItem } from "@pi-lead-child/store";
@@ -200,10 +201,15 @@ export function persistSelectedRuntime(
   });
 }
 
-export function formatRuntimeCatalogForLead(catalog: RuntimeCatalog = probeChildRuntimeCatalog()): string {
+// 这段文字放进建工单和派发的工具说明，每一轮发给模型服务商。可执行文件在用户目录下时写成 ~/…，不带账号名；
+// 路径本身保留，Lead 靠它分辨是哪一份安装。
+export function formatRuntimeCatalogForLead(
+  catalog: RuntimeCatalog = probeChildRuntimeCatalog(),
+  home: string = homedir(),
+): string {
   const lines = catalog.entries.map((entry) => {
     const health = catalogEntryDisabled(entry) ? "已被用户停用（设置 → 执行器）"
-      : entry.available ? `可用 (${entry.executable})` : "不可用";
+      : entry.available ? `可用 (${tildeHome(entry.executable ?? "", home)})` : "不可用";
     const models = entry.models.length ? entry.models.join(", ") : "无已配置模型";
     const review = entry.capabilities.executableReadOnlyReview ? "核查时能跑命令（只读）" : "核查时只读代码、不能跑命令";
     return `- ${entry.id}: ${health} · 模型 ${models} · ${review}`;

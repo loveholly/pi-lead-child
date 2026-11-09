@@ -169,4 +169,17 @@ describe("formatRuntimeCatalogForLead", () => {
     expect(text).toContain("核查时能跑命令（只读）");
     expect(text).not.toContain("核查时只读代码、不能跑命令");
   });
+
+  // 这段文字放进建工单和派发的工具说明，每一轮发给模型服务商：用户目录下的执行器路径不能带账号名。
+  it("writes an executable under the home directory as ~/… and keeps other paths as they are", () => {
+    const text = formatRuntimeCatalogForLead(catalog({
+      codex: "/opt/homebrew/bin/codex",
+      claude: "/Users/alice/.local/bin/claude",
+      pi: "/Users/alicex/bin/pi",
+    }), "/Users/alice");
+    expect(text).toContain("claude: 可用 (~/.local/bin/claude)");
+    expect(text).toContain("codex: 可用 (/opt/homebrew/bin/codex)");
+    expect(text).toContain("pi: 可用 (/Users/alicex/bin/pi)");
+    expect(text).not.toContain("/Users/alice/");
+  });
 });

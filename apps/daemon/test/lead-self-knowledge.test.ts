@@ -6,7 +6,7 @@
 // 系统提示不变，get_environment 查到新的；用户目录写成 ~。
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
-import { writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import WebSocket from "ws";
@@ -229,6 +229,11 @@ describe("scenario 10: the user asks how many times Jev ran in Lead's session", 
   it("writes the home directory as ~ in everything the model receives with the system prompt", async () => {
     const home = dirname(dir);
     vi.stubEnv("HOME", home);
+    // 执行器装在用户目录下（例如 ~/.local/bin/claude）：建工单和派发的工具说明里写着它的路径。
+    const claude = join(dir, "bin", "claude");
+    mkdirSync(dirname(claude), { recursive: true });
+    writeFileSync(claude, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+    vi.stubEnv("PLC_CLAUDE_BIN", claude);
     const stub = await modelStub();
     writeConfig(stub.baseUrl, ["stub/m"]);
     const { send } = await start();
@@ -238,7 +243,9 @@ describe("scenario 10: the user asks how many times Jev ran in Lead's session", 
     const system = systemText(request);
     expect(system).toContain(`~/${basename(dir)}`);
     expect(system).not.toContain(`${home}/`);
-    expect(JSON.stringify(request.tools ?? [])).not.toContain(`${home}/`);
+    const tools = JSON.stringify(request.tools ?? []);
+    expect(tools).toContain(`claude: 可用 (~/${basename(dir)}/bin/claude)`);
+    expect(tools).not.toContain(`${home}/`);
   }, 60_000);
 
   // 工单 04 和 13 合在一起：当前局面放在每一轮输入的开头（situation 信封），环境放在系统提示里，两样互不覆盖。

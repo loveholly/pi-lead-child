@@ -1087,6 +1087,40 @@ describe("lead tools", () => {
     ]);
   });
 
+  // 执行器目录写进建工单和派发的工具说明，get_runtime_health 也返回它，每一轮发给模型服务商：
+  // 用户目录下的执行器路径写成 ~/…，不带账号名；用户目录以外的路径照原样。
+  it("writes executables under the home directory as ~/… in tool descriptions and get_runtime_health", async () => {
+    vi.stubEnv("HOME", "/Users/alice");
+    try {
+      const capabilities = new CapturingRuntime().capabilities;
+      const entry = (id: "codex" | "claude" | "pi", executable: string) => ({
+        id, available: true, executable, defaultModel: null, models: [], capabilities, reason: null,
+      });
+      deps = {
+        ...deps,
+        runtimeCatalog: { entries: [
+          entry("codex", "/opt/homebrew/bin/codex"),
+          entry("claude", "/Users/alice/.local/bin/claude"),
+          entry("pi", "/Users/alice/Workspace/acme/node_modules/.bin/pi"),
+        ] },
+        supervisor: { status: vi.fn(async () => ({}) as any), request: vi.fn() },
+      };
+      for (const name of ["create_task", "spawn_child"]) {
+        const description = tool(name).description as string;
+        expect(description).toContain("claude: 可用 (~/.local/bin/claude)");
+        expect(description).toContain("pi: 可用 (~/Workspace/acme/node_modules/.bin/pi)");
+        expect(description).toContain("codex: 可用 (/opt/homebrew/bin/codex)");
+        expect(description).not.toContain("/Users/alice");
+      }
+      const health = (await tool("get_runtime_health").execute("health", {})).content[0].text as string;
+      expect(health).toContain('"executable": "~/.local/bin/claude"');
+      expect(health).toContain('"executable": "/opt/homebrew/bin/codex"');
+      expect(health).not.toContain("/Users/alice");
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   // 2026-10-26：会话输入框右下角的模型选择。daemon 给了模型服务时，两个工具读同一份目录、走同一个操作（lead_model / switch），
   // 只在用户本人这一轮里换。
   it("list_lead_models and switch_lead_model use the composer's model service", async () => {

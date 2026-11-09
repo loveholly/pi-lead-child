@@ -3,6 +3,7 @@
 import { randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
 import { readFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { promisify } from "node:util";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { Type } from "typebox";
@@ -53,7 +54,7 @@ import { executionPlanText } from "@pi-lead-child/engine";
 import { sandboxHealth } from "@pi-lead-child/engine";
 import { acceptanceCriteriaText, recordedDeliverySnapshot } from "@pi-lead-child/engine";
 import { ACCEPTANCE_CRITERIA_LIMITS, addAcceptanceCriteria, normalizeCriterionTexts } from "@pi-lead-child/store";
-import { localIso, projectRoot, readTailLines } from "@pi-lead-child/core";
+import { localIso, projectRoot, readTailLines, tildeHome } from "@pi-lead-child/core";
 import type { RuntimeId, Item, ItemPriority, ItemStage, Run, VerificationPolicy, Workspace } from "@pi-lead-child/core";
 import type { AttachableLaunch } from "@pi-lead-child/runtime";
 import {
@@ -2671,7 +2672,8 @@ export function createLeadTools(deps: LeadDeps): ToolDefinition<any>[] {
         const status = deps.supervisor
           ? await deps.supervisor.status()
           : await supervisorRequest<SupervisorStatus>({ type: "status" });
-        return text(JSON.stringify({
+        // 结果发给模型服务商：执行器的路径等在用户目录下时写成 ~/…，不带账号名。
+        return text(tildeHome(JSON.stringify({
           ...status,
           childRuntimes: resolveLeadCatalog(deps),
           // 用户在设置里停用的 runtime（设置 → 执行器）。派发、核查和选型都跳过它们。
@@ -2695,7 +2697,7 @@ export function createLeadTools(deps: LeadDeps): ToolDefinition<any>[] {
                 ? "瞬时失败的自动重试到了上限（模型满载或网络中断）。派发照常进行，不会挂起。"
                 : null,
           })),
-        }, null, 2));
+        }, null, 2), homedir()));
       },
     }),
 
@@ -4188,7 +4190,7 @@ export function createLeadTools(deps: LeadDeps): ToolDefinition<any>[] {
       parameters: Type.Object({}),
       execute: async () => {
         if (!deps.environmentDetails) throw new Error("这个会话没有提供环境信息。用 get_runtime_health、list_connections 分开查。");
-        return text(deps.environmentDetails());
+        return text(tildeHome(deps.environmentDetails(), homedir()));
       },
     }),
     // 查事件日志（工单 14，spec D8）：系统里发生的每一件事都是一条事件。当前局面只列摘要，按预算截掉的变化用它查回来。

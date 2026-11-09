@@ -10,3 +10,4 @@ export * from "./wire-vocabulary.js";
 export * from "./sandbox-policy.js";
 export * from "./login-shell.js";
 export * from "./file-read.js";
+export * from "./home-paths.js";
