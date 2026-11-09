@@ -77,7 +77,7 @@ describe("thread follow-ups", () => {
 
 // 用户 2026-10-21：照 Slack 自己的关注规则（发起、回复过的 thread 会关注），把这些 thread 里的讨论默默沉淀下来。
 // 只记录、沉淀进记忆：不开卡、不开道、不问模型，也不进 Lead 的上下文。被 @ 时照常开卡，之后按道收，不会记两次。
-// 用户的账号起头的 thread 不在此列（2026-11-09），见下面的「threads started from the user's account」。
+// Lead 代用户发的消息起头的 thread 不在此列（2026-11-09），见下面的「threads Lead started for the user」。
 describe("threads the user follows, by Slack's own rules", () => {
   const level = (seq: number | null) => getEvent(db, seq!)!.level;
 
@@ -116,6 +116,15 @@ describe("threads the user follows, by Slack's own rules", () => {
     expect(adapter.memory!.kinds["slack.followed.message"]).toBe("message");
   });
 
+  it("follows a thread the user started", async () => {
+    const { hub } = setup();
+    const started = slack.selfReply("C0QUIET", "大家看下这个提案");
+    const mine = (await hub.receive("slack", started)).items[0]!;
+    expect(mine).toMatchObject({ role: "self_reply", delivery: "record" });
+    const reply = (await hub.receive("slack", slack.chatter("U0ZHANG", "我觉得可以", "C0QUIET", { thread: threadOf(started) }))).items[0]!;
+    expect(reply).toMatchObject({ kind: "slack.followed.message", delivery: "record", objectKey: mine.objectKey });
+  });
+
   it("does not follow threads in excluded channels, nor anything in direct messages", async () => {
     const adapter = createSlackChannelAdapter({ api: slack.api, now: () => clock, memory: { exclude: ["#quiet"] } });
     const hub = new ChannelHub({
@@ -129,10 +138,10 @@ describe("threads the user follows, by Slack's own rules", () => {
   });
 });
 
-// 用户的账号起头的 thread 是用户的 thread：用户本人在 Slack 里发的，和 Lead 代用户发的（推回来是 echo）一样。
-// 同事在里面的回复是在回用户的话：进会话卡。只回复过、不是起头的 thread 仍然只记录（上面的「关注」）。
+// Lead 代用户发的消息（推回来是 echo）起头的 thread 是用户的 thread：同事在里面的回复是在回用户让 Lead 问的话，进会话卡。
+// 用户本人在 Slack 里起头、回复过的 thread 仍然只记录（上面的「关注」，用户 2026-10-21，2026-11-09 再确认）。
 // 回归：Lead 代用户在订阅频道里发了一条 @ 同事的消息，同事在它的 thread 里回了一个问题，只被记成订阅频道的普通消息。
-describe("threads started from the user's account", () => {
+describe("threads Lead started for the user", () => {
   const by = "lead for user via turn:turn-1";
 
   async function subscribe(hub: ChannelHub) {
@@ -157,16 +166,6 @@ describe("threads started from the user's account", () => {
     const mention = (await hub.receive("slack", slack.mention("U0LI", "你看下？", { channel: "C0PROJ", thread: posted.ts }))).items[0]!;
     expect(mention).toMatchObject({ kind: "slack.mention.received", delivery: "card", cardId: reply.cardId });
     expect(getChannelCard(db, reply.cardId!)).toMatchObject({ messageCount: 2 });
-  });
-
-  it("takes a colleague's reply into a card when the user started the thread in Slack", async () => {
-    const { hub } = setup();
-    const started = slack.selfReply("C0QUIET", "大家看下这个提案");
-    const mine = (await hub.receive("slack", started)).items[0]!;
-    expect(mine).toMatchObject({ role: "self_reply", delivery: "record" });
-    const reply = (await hub.receive("slack", slack.chatter("U0ZHANG", "我觉得可以", "C0QUIET", { thread: threadOf(started) }))).items[0]!;
-    expect(reply).toMatchObject({ kind: "slack.thread.message", delivery: "card", objectKey: mine.objectKey });
-    expect(reply.cardId).not.toBeNull();
   });
 
   it("still only records a thread the user or Lead only replied in, and other threads of a subscribed channel", async () => {

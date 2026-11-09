@@ -103,8 +103,8 @@ export interface ChannelInbound {
   // 一个 thread 就会关注它）。没有道时 hub 照样只记录这条事件（不开道），以后 interest.followed 认它。
   // 推回来的回复（role echo）也可以带它：没有道时只记录（例如私信的 thread，2026-11-02），上下文包从事件里看得到这条回复。
   follows?: boolean;
-  // 这句话起头了它所在的对象（例如 Slack 频道里一个 thread 的根消息），用户本人的话（self_reply）和系统替用户发出去、
-  // 推回来的话（echo）都算：用户的账号起头的对象是用户的，interest.started 认它。只和 follows 一起用。
+  // 推回来的话（role echo）起头了它所在的对象（例如 Slack 频道里一个 thread 的根消息）：系统替用户发的消息起头的对象是
+  // 用户的，interest.started 认它。用户本人的话（self_reply）不带它：用户自己起头的只关注（2026-10-21）。只和 follows 一起用。
   starts?: boolean;
 }
 
@@ -297,7 +297,7 @@ export interface ChannelInterest {
   // 用户关注了这个对象（必须在适配器自己的名字下）：用户在里面说过话（记了用户本人的话，或者系统替用户发出去的话）。没有道也算。
   // 适配器照来源自己的关注规则用它（例如 Slack：发起或者回复过的 thread，见 ChannelInbound.follows）。
   followed(objectKey: string): boolean;
-  // 这个对象是用户的账号起头的（记过带 starts 的用户本人的话或者推回来的话）。别人在里面接着说，是在回用户的话。
+  // 这个对象是系统替用户发的消息起头的（记过带 starts 的推回来的话）。别人在里面接着说，是在回用户让系统发的话。
   started(objectKey: string): boolean;
 }
 

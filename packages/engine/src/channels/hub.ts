@@ -773,7 +773,7 @@ export class ChannelHub {
       ...(item.messageId ? { messageId: item.messageId } : {}),
       ...(item.audience ? { audience: item.audience } : {}),
       ...(item.replyTo ? { replyTo: item.replyTo } : {}),
-      ...(item.starts && item.role !== "message" ? { starts: true } : {}),
+      ...(item.starts && item.role === "echo" ? { starts: true } : {}),
       summary: `${item.sender.name}（${SENDER_TRUST_LABELS[item.sender.trust]}）在${item.laneLabel}：${oneLine(item.text, 300)}`,
       urgent: urgency?.urgent ?? false,
       ...(urgency ? { urgency: urgency.basis } : {}),
@@ -3506,10 +3506,10 @@ export class ChannelHub {
         `SELECT 1 FROM events WHERE entity_key = ? AND source = ?
            AND json_valid(payload) AND json_extract(payload, '$.role') IN ('self_reply', 'echo') LIMIT 1`,
       ).get(objectKey, adapter.id) !== undefined,
-      // 上面的话里有起头这个对象的那一句（ChannelInbound.starts）。
+      // 系统替用户发出去、推回来的话里有起头这个对象的那一句（ChannelInbound.starts）。用户本人起头的不算（只关注）。
       started: (objectKey) => own(objectKey) && this.db.prepare(
         `SELECT 1 FROM events WHERE entity_key = ? AND source = ?
-           AND json_valid(payload) AND json_extract(payload, '$.role') IN ('self_reply', 'echo')
+           AND json_valid(payload) AND json_extract(payload, '$.role') = 'echo'
            AND json_extract(payload, '$.starts') = 1 LIMIT 1`,
       ).get(objectKey, adapter.id) !== undefined,
     };
