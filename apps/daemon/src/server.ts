@@ -795,6 +795,10 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       pendingInput: () => hasUnansweredUserTurn()
         || (leadInput.pendingMessages().length > 0 && !(leadWakeRetry && leadWakeRetry.at > Date.now())),
       contextRatio: () => leadContextRatio(),
+      thresholdRatio: () => {
+        const usage = currentContextUsage();
+        return usage && usage.compactAt !== null && usage.window > 0 ? usage.compactAt / usage.window : null;
+      },
       runPrecipitation: () => runPrecipitation(),
       writeInFlight: () => Object.values(sched.unit?.tools ?? {}).find((tool) => tool.write)?.name ?? null,
       yieldUnit: (by) => { sched.dispatch({ type: "idle.yield", by }); },
@@ -3524,10 +3528,24 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
   // 上下文占窗口的比例（空闲车道用）。pi 的 getContextUsage 认得压缩：压缩以后还没有新的回答时是 null（不知道），空闲车道
   // 这时不开始整理和压缩（以前读最后一次回答的用量：空闲时接上的压缩以后还是旧的高水位，会马上又整理一次）。
   // 替身会话没有这个接口时读最后一次回答的用量（precipitate.ts）。
+  // pi 的估算按 4 个字符 1 个 token 算，对数字、编号多的文字偏少（开发模式下估算 85%，服务商报的是 94%）；pi 自己的
+  // 压缩线按服务商报的用量判断（_checkCompaction）。所以取两者中大的：最后一次回答报的用量（四项相加）和 pi 的估算。
   function leadContextRatio(): number | null {
     if (typeof session.getContextUsage !== "function") return contextUsageRatio(session);
     const usage = session.getContextUsage();
-    return usage && usage.tokens !== null && usage.contextWindow > 0 ? usage.tokens / usage.contextWindow : null;
+    if (!usage || usage.tokens === null || usage.contextWindow <= 0) return null;
+    const messages = (session as { agent?: { state?: { messages?: unknown } } }).agent?.state?.messages;
+    let reported = 0;
+    if (Array.isArray(messages)) {
+      for (let index = messages.length - 1; index >= 0; index -= 1) {
+        const message = messages[index] as { role?: unknown; stopReason?: unknown; usage?: Record<string, unknown> } | undefined;
+        if (message?.role !== "assistant" || !message.usage || message.stopReason === "error" || message.stopReason === "aborted") continue;
+        const count = (key: string) => (typeof message.usage![key] === "number" ? message.usage![key] as number : 0);
+        reported = count("totalTokens") || count("input") + count("output") + count("cacheRead") + count("cacheWrite");
+        break;
+      }
+    }
+    return Math.max(usage.tokens, reported) / usage.contextWindow;
   }
 
   // 沉淀检查：上下文过了 PRECIPITATE_RATIO，赶在压缩之前让 Lead 存笔记。什么时候做由空闲车道定（lead-scheduler spec D8，P4）：

@@ -42,6 +42,8 @@ export interface IdleLaneHost {
   pendingInput(): boolean;
   // Lead 的上下文占窗口的比例；读不到时为 null。
   contextRatio(): number | null;
+  // pi 自己的压缩线占窗口的比例（窗口减 reserveTokens）；不知道时为 null。
+  thresholdRatio?(): number | null;
   // 开整理笔记的 L4 单元，等它结束。yielded：给更高车道让了路；skipped：没开成（忙、断网）。
   runPrecipitation(): Promise<PrecipitationOutcome>;
   // 正在跑的单元里有没有正在跑的写操作（spec D5：写操作不打断）。返回工具名。
@@ -169,8 +171,10 @@ export class IdleLaneRuntime {
     let ratio: number | null = null;
     let pendingInput = false;
     let starting = false;
+    let thresholdRatio: number | null = null;
     try {
       ratio = this.#host.contextRatio();
+      thresholdRatio = this.#host.thresholdRatio?.() ?? null;
       pendingInput = this.#host.pendingInput();
       starting = this.#host.starting();
     } catch (error) {
@@ -180,7 +184,7 @@ export class IdleLaneRuntime {
       return;
     }
     this.#lastCheckAt = this.#now();
-    this.dispatch({ type: "tick", ratio, pendingInput, starting, ...(options.boundary ? { boundary: true } : {}) });
+    this.dispatch({ type: "tick", ratio, pendingInput, starting, thresholdRatio, ...(options.boundary ? { boundary: true } : {}) });
   }
 
   /** Lead 忙着 L4 的活时，更高车道的输入到了。 */

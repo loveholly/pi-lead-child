@@ -1,7 +1,7 @@
 // 空闲车道的决策层（lead-scheduler spec D8，P4）：假时钟、表驱动，覆盖每一种决定。
 import { describe, expect, it } from "vitest";
 import {
-  DEFAULT_IDLE_LANE_LIMITS, idleLaneLimitsFromEnv, idleLaneStep, initialIdleLaneState, inlineDecision, nextIdleCheckAt,
+  DEFAULT_IDLE_LANE_LIMITS, idleLaneLimitsFromEnv, idleLaneStep, initialIdleLaneState, inlineDecision, nextIdleCheckAt, promoteLine,
   type IdleLaneEffect, type IdleLaneEvent, type IdleLaneLimits, type IdleLaneState,
 } from "../src/scheduler/index.js";
 
@@ -62,7 +62,21 @@ describe("idle lane: starting idle work", () => {
     ]);
     expect(kinds).toEqual(["compact.start"]);
     expect(state.compact).toMatchObject({ phase: "preparing", promoted: true });
-    expect(logs[0]).toMatch(/^\[sched\] idle\.start job=compact id=idle_compact_\w+ ratio=0\.87 line=0\.85 promoted=true why=boundary idleMs=0 failures=0$/);
+    expect(logs[0]).toMatch(/^\[sched\] idle\.start job=compact id=idle_compact_\w+ ratio=0\.87 line=0\.85 promoted=true why=boundary step=0\.00 threshold=- idleMs=0 failures=0$/);
+  });
+
+  it("moves the promote line two steps before pi's line when steps are big (dev: one read is 9.5% of the window)", () => {
+    expect(promoteLine({ stepMax: 0 }, LIMITS, 0.8975)).toBe(0.85);
+    expect(promoteLine({ stepMax: 0.095 }, LIMITS, 0.8975)).toBeCloseTo(0.7075);
+    expect(promoteLine({ stepMax: 0.2 }, LIMITS, 0.8975)).toBe(0.7);
+    expect(promoteLine({ stepMax: 0.01 }, LIMITS, 0.959)).toBe(0.85);
+    const at = (ratio: number, time: number): [number, IdleLaneEvent] => [time, tick(ratio, { boundary: true, pendingInput: true, thresholdRatio: 0.8975 })];
+    const { kinds, logs } = run([
+      [0, { type: "busy", unitId: "unit_a", lane: 0 }], [6_000, { type: "idle" }], at(0.655, 6_000),
+      [6_100, { type: "busy", unitId: "unit_b", lane: 0 }], [12_000, { type: "idle" }], at(0.75, 12_000),
+    ]);
+    expect(kinds).toEqual(["compact.start"]);
+    expect(logs[0]).toMatch(/idle\.start job=compact .*ratio=0\.75 line=0\.71 promoted=true why=boundary step=0\.(09|10) threshold=0\.90 /);
   });
 
   it("never starts while a unit runs", () => {

@@ -117,6 +117,8 @@ export interface IdleLaneState {
   idleSince: number | null;
   // 最近一次读到的上下文水位（占窗口的比例）。
   ratio: number | null;
+  // 这个压缩周期里相邻两次读数之间最大的增长（一步最多加多少）：提级的线据此往前挪，留出两步的余量。
+  stepMax: number;
   compact: CompactJobState;
   precipitate: PrecipitateJobState;
   // 在等 Lead 空闲的没人等的后台重活（回收区的删除）。
@@ -127,7 +129,7 @@ export interface IdleLaneState {
 
 export function initialIdleLaneState(now: number): IdleLaneState {
   return {
-    busyUnit: null, busyLane: null, busySince: null, idleSince: now, ratio: null,
+    busyUnit: null, busyLane: null, busySince: null, idleSince: now, ratio: null, stepMax: 0,
     compact: idleCompactJob(0),
     precipitate: { phase: "idle", id: null, done: false, yields: 0, unitId: null, startedAt: null, yieldRequested: false },
     gated: 0, seq: 0,
@@ -150,7 +152,8 @@ export type IdleLaneEvent =
   // 单元结束了（Lead 空闲了）。
   | { type: "idle" }
   // 看一次该不该开始什么：上下文水位、有没有排着的更高车道的事、会话现在能不能碰。boundary：一个单元刚结束（会话空着）。
-  | { type: "tick"; ratio: number | null; pendingInput: boolean; starting: boolean; boundary?: boolean }
+  // thresholdRatio：pi 自己的压缩线占窗口的比例（窗口减 reserveTokens），不知道时为 null。
+  | { type: "tick"; ratio: number | null; pendingInput: boolean; starting: boolean; boundary?: boolean; thresholdRatio?: number | null }
   // pi 想压缩（扩展的 session_before_compact）。ready：写好的摘要对现在的会话还有效。
   | { type: "inline"; reason: InlineCompactionReason; ready: boolean }
   // 取到了要摘要的对话（tokens 是估算），子进程开始写。
@@ -214,6 +217,15 @@ export function idleLongEnough(state: IdleLaneState, now: number, limits: IdleLa
 }
 
 /**
+ * 提级的线：缺省 promoteRatio；知道 pi 的压缩线和一步的增长时，挪到压缩线前面两步（不早于整理笔记的线）。
+ * 开发模式下一次 read 加 1.9 万 token（窗口的 9.5%）：85% 的线离压缩线不到一步，摘要来不及写完上下文就溢出了。
+ */
+export function promoteLine(state: Pick<IdleLaneState, "stepMax">, limits: IdleLaneLimits, thresholdRatio: number | null | undefined): number {
+  if (thresholdRatio === null || thresholdRatio === undefined || state.stepMax <= 0) return limits.promoteRatio;
+  return Math.max(limits.precipitateRatio, Math.min(limits.promoteRatio, thresholdRatio - 2 * state.stepMax));
+}
+
+/**
  * 下一次该看一眼的时间（运行层据此排定时器）：空闲满 graceMs 的那一刻、摘要重试的时间。只算上一次看过（lastCheckAt）以后的：
  * 看过的那一刻不再看，免得定时器空转；没有要等的时为 null（之后由 daemon 在单元结束时叫 check）。
  */
@@ -271,7 +283,8 @@ function retryDelay(failures: number, limits: IdleLaneLimits): number {
 /** 空闲时开始该开始的活。按先后：接上写好的摘要（几毫秒，不等 graceMs）、放行后台重活、整理笔记、开始写摘要。 */
 function startIdleWork(state: IdleLaneState, event: Extract<IdleLaneEvent, { type: "tick" }>, now: number, limits: IdleLaneLimits): IdleLaneStep {
   const effects: IdleLaneEffect[] = [];
-  let next: IdleLaneState = { ...state, ratio: event.ratio ?? state.ratio };
+  const step = event.ratio !== null && state.ratio !== null && event.ratio > state.ratio ? event.ratio - state.ratio : 0;
+  let next: IdleLaneState = { ...state, ratio: event.ratio ?? state.ratio, stepMax: Math.max(state.stepMax, step) };
   if (next.busyUnit !== null || event.starting) return { state: next, effects };
   // 写好的摘要：Lead 一空闲就接上。碰会话的时间只有几毫秒；接上以后下一轮的上下文就小了。
   if (next.compact.phase === "ready" && next.compact.id) {
@@ -286,8 +299,9 @@ function startIdleWork(state: IdleLaneState, event: Extract<IdleLaneEvent, { typ
   const idleEnough = !event.pendingInput && idleLongEnough(next, now, limits);
   // 上下文快满了：不等空闲满 graceMs，也不管有没有排着的输入，会话一空着就开始写摘要（提级）。取对话只碰会话几毫秒，
   // 子进程不占 Lead。Lead 空闲够久、笔记还没整理时，先整理笔记（下面）。
+  const promoteAt = promoteLine(next, limits, event.thresholdRatio);
   if (
-    ratio0 !== null && ratio0 >= limits.promoteRatio && next.compact.phase === "idle" && next.precipitate.phase === "idle"
+    ratio0 !== null && ratio0 >= promoteAt && next.compact.phase === "idle" && next.precipitate.phase === "idle"
     && (next.compact.retryAt === null || now >= next.compact.retryAt) && !(idleEnough && notesPending)
   ) {
     const made = nextId(next, "compact", now);
@@ -295,7 +309,8 @@ function startIdleWork(state: IdleLaneState, event: Extract<IdleLaneEvent, { typ
     next = { ...made.state, compact: { ...compact, phase: "preparing", id: made.id, promoted: true, startedAt: now, readyAt: null, yieldLogged: false } };
     const why = idleEnough ? "idle" : event.boundary ? "boundary" : "busy";
     effects.push(line("idle.start", {
-      job: "compact", id: made.id, ratio: ratioText(ratio0), line: limits.promoteRatio, promoted: true, why,
+      job: "compact", id: made.id, ratio: ratioText(ratio0), line: ratioText(promoteAt), promoted: true, why,
+      step: ratioText(next.stepMax), threshold: event.thresholdRatio === null || event.thresholdRatio === undefined ? null : ratioText(event.thresholdRatio),
       idleMs: now - next.idleSince!, failures: compact.failures,
     }));
     effects.push(record(made.id, "compact", "started", { ratio: ratio0, promoted: true, why, failures: compact.failures }));
@@ -464,6 +479,7 @@ export function idleLaneStep(state: IdleLaneState, event: IdleLaneEvent, now: nu
         state: {
           ...state,
           ratio: null,
+          stepMax: 0,
           compact: idleCompactJob(0),
           precipitate: { ...state.precipitate, done: false, yields: 0 },
         },
@@ -492,7 +508,7 @@ export function idleLaneStep(state: IdleLaneState, event: IdleLaneEvent, now: nu
         if (compact.phase !== "ready") effects.push({ type: "compact.cancel", id: compact.id, why: `compacted_by_${event.how}` });
       }
       return {
-        state: { ...state, ratio: null, compact: idleCompactJob(0), precipitate: { ...state.precipitate, done: false, yields: 0 } },
+        state: { ...state, ratio: null, stepMax: 0, compact: idleCompactJob(0), precipitate: { ...state.precipitate, done: false, yields: 0 } },
         effects,
       };
     }
