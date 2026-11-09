@@ -436,6 +436,8 @@ describe("every ticket action leaves the same ledger from the page and from Lead
 
       expect(ownerActions(page.db)).toEqual(test.ownerAction ? [test.ownerAction] : []);
       expect(ownerActions(lead.db)).toEqual(test.ownerAction && test.authority === "on_behalf" ? [test.ownerAction] : []);
-    });
+    // merge、open_pr、abandon 两边各建一个真的 git 仓库、裸仓库和 worktree，再合并或推送：串行时 2–3 秒，
+    // 测试文件并发跑、机器又忙时到了 13–21 秒，超过全局的 15 秒（2026-11-09）。这里单独放到 60 秒，挂死照样抓得到。
+    }, 60_000);
   }
 });
