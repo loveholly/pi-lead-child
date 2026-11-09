@@ -51,6 +51,7 @@ PLC_TEST_SERIAL=1 npm test
 | `packages/core/test/sandbox-policy.test.ts` | `sandboxTrustEnv` 一组 | 钥匙串里的证书（`security`） |
 | `apps/daemon/test/vault-key.test.ts` | `the daemon's Keychain key` 一组 | 钥匙串 |
 | `scripts/desktop/test/agent-bundle.test.ts` | 两条签名的用例 | `codesign` |
+| `desktop/test/runtime-bundle.test.ts` | `unpackRuntime re-uses what did not change` 一组 | `cp -c`（APFS 克隆） |
 
 Linux 上的沙箱要 bubblewrap、socat 和 ripgrep。产品不在 Linux 上跑，所以 CI 不装它们，直接跳过前四个文件。
 
@@ -58,6 +59,12 @@ Linux 上的沙箱要 bubblewrap、socat 和 ripgrep。产品不在 Linux 上跑
 
 1. 用 `describe.runIf(process.platform === "darwin")` 或 `it.skipIf(process.platform !== "darwin")`。
 2. 把它加进上面的表，也加进 `.github/workflows/pr-checks.yml` 开头的清单。
+
+## CI 上 runner 和开发机的差别
+
+- runner 上没有 codex 和 claude 两个 CLI。runtime 目录按可执行文件在不在判断能不能用，所以 CI 在 PATH 上放两个占位脚本。测试注入自己的假 runtime，不运行它们；真被运行时，占位脚本报错退出。
+- 沙箱外执行命令用 `/bin/zsh -lc`。runner 默认没有 zsh，CI 先装上。
+- `TMPDIR` 不能是 `/tmp` 本身：engine 有的测试把 session 目录往上两级当数据目录，那会是 `/`。CI 用 `runner.temp`。
 
 ## CI
 

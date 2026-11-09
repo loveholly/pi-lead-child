@@ -17,6 +17,7 @@
 #   packages/core/test/sandbox-policy.test.ts        sandboxTrustEnv 一组：钥匙串里的证书（security）
 #   apps/daemon/test/vault-key.test.ts               the daemon's Keychain key 一组：钥匙串
 #   scripts/desktop/test/agent-bundle.test.ts        两条：codesign
+#   desktop/test/runtime-bundle.test.ts              unpackRuntime re-uses what did not change 一组：cp -c（APFS 克隆）
 # Linux 上的沙箱要 bubblewrap、socat 和 ripgrep，产品不在 Linux 上跑，所以不装它们，直接跳过。
 #
 # - lint 全仓库只用根目录的 .oxlintrc.json。npm run lint 从仓库根跑，apps/companion 的文件也在里面，所以不再单独跑
@@ -99,10 +100,13 @@ jobs:
         if: matrix.shard == 1
         run: npm run test:components
 
+      # 直接调 vitest。经 npm run test:companion 传参数会多一层 npm（npm -w … test），那一层把 --reporter、--shard
+      # 当成 npm 自己的配置吃掉：每片都跑全部文件，也不写 blob 报告（2026-11-09 第一次 CI）。
       - name: Test apps/companion (one shard)
+        working-directory: apps/companion
         env:
           SHARD: ${{ matrix.shard }}
-        run: npm run test:companion -- --reporter=default --reporter=blob --shard="$SHARD/2"
+        run: npx vitest run --reporter=default --reporter=blob --shard="$SHARD/2"
 
       - name: Keep the shard's report
         if: ${{ !cancelled() }}
@@ -159,8 +163,9 @@ jobs:
       matrix:
         shard: [1, 2, 3, 4]
     env:
-      # 测试会在临时目录下建 unix socket，路径要短。
-      TMPDIR: /tmp
+      # 测试会在临时目录下建 unix socket，路径要短。也不能是 /tmp 本身：engine 有的测试把 session 目录往上两级
+      # 当数据目录，TMPDIR=/tmp 时那是 /，写 /runtime-events 失败（EACCES）。runner.temp 是 /home/runner/work/_temp。
+      TMPDIR: ${{ runner.temp }}
     steps:
       - name: Check out the pull request
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -181,6 +186,24 @@ jobs:
         run: |
           git config --global user.name "pr-checks"
           git config --global user.email "pr-checks@example.com"
+
+      # 沙箱外执行命令（run_on_host、免沙箱的 bash）用 /bin/zsh -lc，和 macOS 上一样。ubuntu runner 没有 zsh。
+      - name: Install zsh for the host-command tests
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends zsh
+
+      # runtime 目录按可执行文件在不在判断 codex、claude 能不能用（packages/runtime 的 locateExecutable）。
+      # 开发机上装着这两个 CLI，runner 上没有，点名 codex 的测试就退回 pi，报 "child runtime 'pi' is not configured"。
+      # 这些测试注入自己的假 runtime 和模型目录，不运行 CLI。这里放两个占位：在 PATH 上能找到，真被运行时报错退出。
+      - name: Put placeholder codex and claude executables on PATH
+        run: |
+          mkdir -p "$RUNNER_TEMP/placeholder-cli"
+          for name in codex claude; do
+            printf '#!/bin/sh\necho "%s is a placeholder on CI; the tests must not run the real CLI" >&2\nexit 1\n' "$name" > "$RUNNER_TEMP/placeholder-cli/$name"
+            chmod +x "$RUNNER_TEMP/placeholder-cli/$name"
+          done
+          echo "$RUNNER_TEMP/placeholder-cli" >> "$GITHUB_PATH"
 
       - name: Test the root project (one shard, files in parallel)
         env:
