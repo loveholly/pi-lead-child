@@ -74,8 +74,10 @@ export interface UnitState {
   beganAt: number | null;
   // 预算从什么时候开始算：换模型、等扩展重载以后才开始（以前的 turnStartedAt）。排着的消息在同一次运行里开始答时重新算。
   budgetStartedAt: number | null;
-  // 顶层的工具调用次数（codemode 脚本里的嵌套调用不算），只为黄灯。
+  // 顶层的工具调用次数（codemode 脚本里的嵌套调用不算），只为黄灯：排着的消息开始答时清零。
   toolCalls: number;
+  // 这个单元一共调了几次顶层的工具（不清零），单元结束的日志和记录用它。
+  totalToolCalls: number;
   // 模型回复的次数（每一步一次），只为日志和统计。
   steps: number;
   yellowReminded: boolean;
@@ -394,7 +396,7 @@ export function schedulerStep(state: SchedulerState, event: SchedulerEvent, now:
         : [];
       const opened: UnitState = {
         id: event.id, lane: event.lane, source: event.source, origin: event.origin, turnId: event.turnId,
-        openedAt: now, beganAt: null, budgetStartedAt: null, toolCalls: 0, steps: 0,
+        openedAt: now, beganAt: null, budgetStartedAt: null, toolCalls: 0, totalToolCalls: 0, steps: 0,
         yellowReminded: false, secondReminded: false, queueNoticed: false, queueHeld: false, redLine: null, aborts: [],
         tools: {}, segment: 1,
       };
@@ -449,12 +451,12 @@ export function schedulerStep(state: SchedulerState, event: SchedulerEvent, now:
         state: { ...state, unit: null },
         effects: [
           { type: "log", line: schedulerLine("unit.end", {
-            ...unitFields(unit), outcome: event.outcome, ms, steps: unit.steps, toolCalls: unit.toolCalls, aborts,
+            ...unitFields(unit), outcome: event.outcome, ms, steps: unit.steps, toolCalls: unit.totalToolCalls, aborts,
             redLine: unit.redLine?.phase ?? "-",
           }) },
           { type: "record", kind: "unit_ended", payload: {
             unitId: unit.id, turnId: unit.turnId, lane: laneName(unit.lane), source: unit.source, outcome: event.outcome,
-            ms, steps: unit.steps, toolCalls: unit.toolCalls, aborts, redLine: unit.redLine?.phase ?? null,
+            ms, steps: unit.steps, toolCalls: unit.totalToolCalls, aborts, redLine: unit.redLine?.phase ?? null,
           } },
         ],
       };
@@ -466,7 +468,8 @@ export function schedulerStep(state: SchedulerState, event: SchedulerEvent, now:
     case "tool.start": {
       if (!unit) return { state, effects: [] };
       const tools = { ...unit.tools, [event.id]: { name: event.name, write: event.write } };
-      const next = withUnit(state, { ...unit, tools, toolCalls: unit.toolCalls + (event.top ? 1 : 0) });
+      const top = event.top ? 1 : 0;
+      const next = withUnit(state, { ...unit, tools, toolCalls: unit.toolCalls + top, totalToolCalls: unit.totalToolCalls + top });
       return event.top ? checkBudget(next, event.facts, now) : { state: next, effects: [] };
     }
     case "tool.end": {

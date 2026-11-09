@@ -31,7 +31,7 @@ import { isSummaryTokenCapError, leadCompactionInstructions, LEAD_COMPACTION_BUD
 import { contextUsageLine, leadContextUsage, type LeadContextUsage } from "@pi-lead-child/lead";
 import { startHostBypassClock } from "./host-bypass-clock.js";
 import { userMessagePlacement } from "./user-placement.js";
-import { createLeadInput, defaultDigestBatch, isReminderFireEvent, type DigestBatchPolicy } from "./lead-input.js";
+import { createLeadInput, defaultDigestBatch, isReminderFireEvent, leadEventRoute, type DigestBatchPolicy } from "./lead-input.js";
 import { compactionEndOutcome, createLeadHealthTracker, isEmptyLengthStop, leadContextFullError } from "./lead-health.js";
 import { serverMessages } from "./server.messages.js";
 import { dnsProbe, keylessProbe, NetworkMonitor, type NetworkProbe } from "./network.js";
@@ -49,7 +49,7 @@ import {
   createAgentTaskDispatcher, recoverAgentTasksAfterRestart, type AgentTaskDispatcherOptions, type DaemonAgentTaskDispatcher,
 } from "./agent-tasks.js";
 import {
-  CHANNEL_CARDS_SNAPSHOT_RESOURCE, CHANNEL_SETTINGS_SNAPSHOT_RESOURCE, EVENT_SOURCES, LEAD_QUEUE_RESOURCE, type GrantLocalRepo, type LeadQueue,
+  CHANNEL_CARDS_SNAPSHOT_RESOURCE, CHANNEL_SETTINGS_SNAPSHOT_RESOURCE, EVENT_SOURCES, LEAD_QUEUE_RESOURCE, MESSAGE_EVENT_KIND, type GrantLocalRepo, type LeadQueue,
 } from "@pi-lead-child/protocol";
 import {
   DAEMON_ENTITY_KEY, DAEMON_STARTED_KIND, isUserActionRequest, LEAD_WAIT_EXPIRED_KIND, type LocalMcpLaunch, type UserActionRequest,
@@ -5382,6 +5382,14 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
   // 事件写入时马上知道（推）：事务提交以后通知（store 的 event-notify.ts）。要 Lead 处理的事据此马上叫醒它，
   // interrupt 级的插进正在跑的这一轮；其余的等按批叫醒。
   const unsubscribeEvents = subscribeCommittedEvents(db, (events) => {
+    // 交给 Lead 的输入进来了（lead-scheduler spec D12 第 1 条）：外部的人的消息和要 Lead 处理的系统事件，带车道。
+    // 只进当前局面的（digest、record 级）和不交给 Lead 的不记，免得刷屏。
+    for (const event of events) {
+      if (leadEventRoute(event) === "skip") continue;
+      const external = event.kind === MESSAGE_EVENT_KIND && isExternalEvent(event);
+      if (!external && event.level !== "tell" && event.level !== "interrupt") continue;
+      sched.noteInput({ kind: external ? "external" : "system", seq: event.seq, level: event.level });
+    }
     if (events.some((event) => event.level === "tell" || event.level === "interrupt")) dispatchLeadWork();
     // 排着的外部消息可能变了：进来了新消息，或者卡结束了（卡上的动作也记一条事件）。
     publishLeadQueue();
@@ -5510,6 +5518,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       const entry: ActiveChannelTurn = { turn, assistantText: "", commandId: command.commandId };
       publishTurnStarted(entry, "queued");
       holdTurnForRestart(entry);
+      sched.noteInput({ kind: "user", turnId: turn.id, placement: "hold_for_restart" });
       return { mode: "started", turnId: turn.id };
     }
 
@@ -5524,8 +5533,11 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     if (userMessagePlacement({ ...placementFacts(), followUp: mode === "followUp" }) === "own_turn_after") {
       // 这一轮带着外部内容（lead-tools-and-routing spec D16，user-placement.ts）：不插进去，等它结束后开一轮只属于用户的。
       holdForOwnTurn(prompt, { turn, assistantText: "", commandId: command.commandId });
+      sched.noteInput({ kind: "user", turnId: turn.id, placement: "own_turn_after" });
       return { mode: "queued", turnId: turn.id };
     }
+    // 用户的消息进来了（lead-scheduler spec D12 第 1 条）：车道 L0，放在哪里。
+    sched.noteInput({ kind: "user", turnId: turn.id, placement: !sched.busy ? "start" : mode === "followUp" ? "follow_up" : "steer" });
     if (sched.busy && mode === "followUp") {
       // 排队（工单 04，spec D6）：Lead 答完这一轮以后再放进去，连着排队的几条一起答。
       queueMicrotask(() => {
@@ -5798,8 +5810,10 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       const turn = createTurn(db, { originKind: steerOrigin.originKind, userText: steerOrigin.userText, state: "queued" });
       userTurnPrompts.set(turn.id, message);
       holdForOwnTurn(message, { turn, assistantText: "" });
+      sched.noteInput({ kind: "user", turnId: turn.id, placement: "own_turn_after" });
       return false;
     }
+    sched.noteInput({ kind: "user", turnId: null, placement: sched.busy ? "steer" : "start" });
     if (sched.busy) { void steerLead(message, steerOrigin).catch((e: any) => log(`steer error: ${e.message}`)); return false; }
     void runTurn(message);
     return true;

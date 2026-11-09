@@ -32,6 +32,19 @@ export function laneName(lane: Lane): string {
   return LANES[lane].name;
 }
 
+/** 一个输入的种类：用户本人的消息、外部的人的消息、系统事件（D12 第 1 条的「来源」）。 */
+export type InputKind = "user" | "external" | "system";
+
+/**
+ * 一个输入的车道，以及车道是怎么定的（D2、D12 第 1 条）。how：source 是按来源定；external_default 是外部的人的消息，
+ * 现在没有逐条的紧急度，按 L1 算。level 是系统事件的级别（tell、interrupt 要 Lead 处理，是 L2；别的是 L3）。
+ */
+export function inputLane(input: { kind: InputKind; level?: string | null }): { lane: Lane; how: "source" | "external_default" } {
+  if (input.kind === "user") return { lane: 0, how: "source" };
+  if (input.kind === "external") return { lane: 1, how: "external_default" };
+  return { lane: input.level === "tell" || input.level === "interrupt" ? 2 : 3, how: "source" };
+}
+
 /** 一个单元由什么开的。user：用户本人的消息；aish：外部通道直接开的一轮；system：daemon 叫醒 Lead 的一轮。 */
 export type UnitSource = "user" | "aish" | "system";
 

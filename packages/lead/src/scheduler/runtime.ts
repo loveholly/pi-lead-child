@@ -13,7 +13,7 @@ import {
   type WaitingEntry,
 } from "./core.js";
 import type { SchedulerSnapshot } from "@pi-lead-child/protocol";
-import { LANES, laneName, type Lane, type UnitSource } from "./lanes.js";
+import { inputLane, LANES, laneName, type InputKind, type Lane, type UnitSource } from "./lanes.js";
 
 export type { SchedulerSnapshot };
 
@@ -112,6 +112,25 @@ export class LeadSchedulerRuntime {
     }
   }
 
+  /**
+   * 一个输入进来了（D12 第 1 条）：来源、车道、车道是怎么定的、放在哪里（用户的消息：新开、插话、排队……）。
+   * 带上正在跑的单元编号：它出现在那个单元的时间线里，能看出它是在哪个单元跑的时候到的。只写编号和种类，不写原文。
+   */
+  noteInput(input: {
+    kind: InputKind; turnId?: string | null; seq?: number | null; level?: string | null; placement?: string | null;
+  }): Lane {
+    const { lane, how } = inputLane(input);
+    this.#options.log(schedulerLine("input", {
+      unit: this.#state.unit?.id ?? "-", kind: input.kind, lane: laneName(lane), how,
+      ...(input.turnId !== undefined ? { turn: input.turnId ?? "-" } : {}),
+      ...(input.seq !== undefined && input.seq !== null ? { seq: input.seq } : {}),
+      ...(input.level ? { level: input.level } : {}),
+      ...(input.placement ? { placement: input.placement } : {}),
+      running: this.#state.unit ? laneName(this.#state.unit.lane) : "-",
+    }));
+    return lane;
+  }
+
   /** extension 报告一步现在在哪个阶段。 */
   noteStage(stage: LeadStageInfo | null): void {
     this.#stage = stage;
@@ -180,9 +199,9 @@ export class LeadSchedulerRuntime {
         deadlineMs: LANES[unit.lane].firstResponseMs,
         budget: {
           usedMs: unit.budgetStartedAt === null ? null : now - unit.budgetStartedAt, budgetMs: facts.budgetMs,
-          yellowReminded: unit.yellowReminded, secondReminded: unit.secondReminded,
+          toolCalls: unit.toolCalls, yellowReminded: unit.yellowReminded, secondReminded: unit.secondReminded,
         },
-        toolCalls: unit.toolCalls, steps: unit.steps, segment: unit.segment, redLine: unit.redLine?.phase ?? null,
+        toolCalls: unit.totalToolCalls, steps: unit.steps, segment: unit.segment, redLine: unit.redLine?.phase ?? null,
         aborts: unit.aborts.map(abortReasonText),
         tools: Object.values(unit.tools).map((tool) => ({ name: tool.name, write: tool.write })),
         stage: stage ? { stage: stage.stage, step: stage.step, sinceMs: now - stage.since, ...(stage.tool ? { tool: stage.tool } : {}) } : null,

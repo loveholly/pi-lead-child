@@ -108,6 +108,12 @@ describe("the 2026-11-09 priority inversion, replayed", () => {
     await vi.waitFor(() => expect(lead.aborts()).toBe(1), { timeout: 5_000 });
     await vi.waitFor(() => expect(turn(first.turnId).state).toBe("completed"), { timeout: 5_000 });
 
+    // 两个输入都有记录：用户的消息是 L0、新开一个单元；同事的消息是 L1，是在用户的单元跑的时候到的。
+    const unitId = unitSnapshot.unit.id as string;
+    expect(logs).toEqual(expect.arrayContaining([
+      expect.stringMatching(new RegExp(`^\\[sched\\] input unit=- kind=user lane=L0 how=source turn=${first.turnId} placement=start`, "u")),
+      expect.stringMatching(new RegExp(`^\\[sched\\] input unit=${unitId} kind=external lane=L1 how=external_default seq=\\d+ .*running=L0`, "u")),
+    ]));
     // 没有劝 Lead 先去回同事。
     expect(lead.calls.some((call) => has(call, QUEUE))).toBe(false);
     expect(logs.some((line) => /\[sched\] decide unit=unit_\w+ lane=L0 .*decision=queue_hold reason=user_unit queued=L1:external:1:/u.test(line))).toBe(true);

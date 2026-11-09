@@ -4,7 +4,7 @@
 import { describe, expect, it } from "vitest";
 import {
   abortedByRedLine, abortedForRestart, canInterruptForSteer, countedWaiting, handoffGate, initialSchedulerState, isBusy,
-  redLinePhase, schedulerStep, stoppedByUser, unitLane,
+  inputLane, redLinePhase, schedulerStep, stoppedByUser, unitLane,
   type BudgetFacts, type SchedulerEffect, type SchedulerEvent, type SchedulerLimits, type SchedulerState, type WaitingEntry,
 } from "../src/scheduler/index.js";
 
@@ -69,6 +69,18 @@ describe("lanes (D1, D2)", () => {
     [{ source: "system" as const, system: "system:precipitate" }, 4],
   ])("puts %o in lane L%i", (input, lane) => {
     expect(unitLane(input)).toBe(lane);
+  });
+});
+
+describe("the lane of an input (D2, D12 item 1)", () => {
+  it.each([
+    [{ kind: "user" as const }, { lane: 0, how: "source" }],
+    [{ kind: "external" as const }, { lane: 1, how: "external_default" }],
+    [{ kind: "system" as const, level: "interrupt" }, { lane: 2, how: "source" }],
+    [{ kind: "system" as const, level: "tell" }, { lane: 2, how: "source" }],
+    [{ kind: "system" as const, level: "digest" }, { lane: 3, how: "source" }],
+  ])("puts %o in %o", (input, expected) => {
+    expect(inputLane(input)).toEqual(expected);
   });
 });
 
@@ -229,6 +241,20 @@ describe("the red line", () => {
     m.send({ type: "prompt.returned", limits: LIMITS });
     expect(m.of("redline.handoff")).toEqual([]);
     expect(abortedForRestart(m.state)).toBe(true);
+  });
+
+  // 可观测性的缺口（P1 验收时发现）：排着的消息开始答时，黄灯的计数清零，单元结束的日志也跟着少算了工具调用。
+  it("keeps the unit's total tool calls when a queued message restarts the lights", () => {
+    const m = machine();
+    openUnit(m);
+    m.send({ type: "tool.start", id: "t1", name: "grep", write: false, top: true, facts: facts() });
+    m.send({ type: "tool.start", id: "t2", name: "grep", write: false, top: true, facts: facts() });
+    m.send({ type: "budget.restart", why: "follow_up" });
+    m.send({ type: "tool.start", id: "t3", name: "grep", write: false, top: true, facts: facts() });
+    expect(m.state.unit).toMatchObject({ toolCalls: 1, totalToolCalls: 3 });
+    m.send({ type: "unit.close", outcome: "answered" });
+    expect(m.logs().at(-1)).toContain("toolCalls=3");
+    expect(m.of("record").at(-1)?.payload).toMatchObject({ toolCalls: 3 });
   });
 
   it("restarts both lights when a queued message starts in the same run, but not in the middle of a red line", () => {

@@ -72,7 +72,9 @@ export interface SchedulerSnapshot {
     openedAt: string;
     elapsedMs: number;
     deadlineMs: number | null;
-    budget: { usedMs: number | null; budgetMs: number; yellowReminded: boolean; secondReminded: boolean };
+    // 两盏灯从什么时候算起（排着的消息在同一次运行里开始答时重算）：用了多久、顶层的工具调用次数。
+    budget: { usedMs: number | null; budgetMs: number; toolCalls: number; yellowReminded: boolean; secondReminded: boolean };
+    // 这个单元一共调了几次顶层的工具。
     toolCalls: number;
     steps: number;
     segment: number;

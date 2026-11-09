@@ -121,6 +121,21 @@ describe("LeadSchedulerRuntime", () => {
     expect(rt.controller).toBeNull();
   });
 
+  // 可观测性的缺口（P1 验收时发现）：输入进来时没有记录，单元的时间线里看不到同事的消息是什么时候到的。
+  it("logs each input with its lane, how the lane was chosen and the unit that was running", () => {
+    const logs: string[] = [];
+    const rt = new LeadSchedulerRuntime({ log: (line) => logs.push(line), newUnitId: () => "unit_r" });
+    expect(rt.noteInput({ kind: "user", turnId: "turn_1", placement: "start" })).toBe(0);
+    rt.openUnit({ source: "user", lane: 0, origin: null, turnId: "turn_1" });
+    expect(rt.noteInput({ kind: "external", seq: 140, level: "tell" })).toBe(1);
+    expect(rt.noteInput({ kind: "user", turnId: "turn_2", placement: "follow_up" })).toBe(0);
+    expect(logs.filter((line) => line.startsWith("[sched] input"))).toEqual([
+      "[sched] input unit=- kind=user lane=L0 how=source turn=turn_1 placement=start running=-",
+      "[sched] input unit=unit_r kind=external lane=L1 how=external_default seq=140 level=tell running=L0",
+      "[sched] input unit=unit_r kind=user lane=L0 how=source turn=turn_2 placement=follow_up running=L0",
+    ]);
+  });
+
   it("describes the running unit and the waiting lanes", () => {
     let clock = 1_000;
     const rt = new LeadSchedulerRuntime({ log: () => {}, now: () => clock, newUnitId: () => "unit_s" });
@@ -133,7 +148,7 @@ describe("LeadSchedulerRuntime", () => {
     });
     expect(snapshot.unit).toEqual(expect.objectContaining({
       id: "unit_s", lane: "L0", turnId: "turn_9", elapsedMs: 12_000, deadlineMs: 10_000,
-      budget: expect.objectContaining({ usedMs: 12_000, budgetMs: 150_000 }),
+      budget: expect.objectContaining({ usedMs: 12_000, budgetMs: 150_000, toolCalls: 0 }),
       stage: { stage: "A", step: 2, sinceMs: 12_000 },
     }));
     expect(snapshot.lanes[1]).toEqual({
