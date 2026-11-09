@@ -4,13 +4,17 @@
 // turnStartedAt、budgetStartedAt、runToolCalls、overflowReminded、secondReminded、queueNoticed、redLine 的五个阶段、
 // toolsInFlight、userStopRequested、restartAbort），规则分散在 checkLeadBudget、stopForRedLine、continueAfterRedLine、
 // noticeQueue、restartLeadBudget、stopLeadTurn、drainLead 里。现在这些状态和规则都在这里，server.ts 只执行这里给出的事：
-// 发提醒、中止、送交接消息、写日志和事件。规则和以前一样。
+// 发提醒、中止、送交接消息、写日志和事件。规则和以前一样，只改了一处（优先级反转，见 countedWaiting）。
 //
 // 两盏灯（lead 的 overflow.ts、red-line.ts，用户 2026-11-03）：
 //   · 黄灯（缺省 2 分钟或 10 次工具调用）：提醒一次；
 //   · 红灯（就地预算，缺省 2 分 30 秒）：有人在等时停下这一轮，叫 Lead 交接；没有人在等时再提醒一次，之后有人开始等时
 //     照样停下。正在跑的写操作先做完（最多 writeGraceMs），然后中断；交接最多 handoffMs，到时再中断一次。
 // 排队说明（lead-self-routing spec C）：一个对话排队超过阈值时插一条说明，同一个单元只插一次。
+//
+// 优先级反转（spec「背景」，用户 2026-11-09 的决定 2）：外部的人的消息不能抢占用户本人的 L0 单元。L0 单元里，
+// 只有 L0 的等待（用户本人的消息）算数：外部消息只排队，不让这个单元停下、不让 Lead 先去回他们。L0 单元本身就是
+// 用户在等，所以过了就地预算一定停下，不看用户的消息有没有文字。
 //
 // 所有决定都写一条 [sched] 日志（D12）：决定了什么、为什么、依据的数字、单元编号和 turn id。不写消息原文。
 import type { WaitingConversation } from "../overflow.js";
@@ -195,14 +199,17 @@ export function canInterruptForSteer(state: SchedulerState): boolean {
   return !abortedByRedLine(state);
 }
 
-/** 算数的等待：所有在等的人（用户本人和外部的人）都算数。 */
-export function countedWaiting(_unit: Pick<UnitState, "lane">, waiting: readonly WaitingEntry[]): WaitingEntry[] {
-  return [...waiting];
+/**
+ * 算数的等待（优先级反转的修正）：L0 单元里只有 L0 的等待算数，外部的人只排队。别的车道的单元里，所有在等的人都算数
+ * （和以前一样）。
+ */
+export function countedWaiting(unit: Pick<UnitState, "lane">, waiting: readonly WaitingEntry[]): WaitingEntry[] {
+  return unit.lane === 0 ? waiting.filter((entry) => entry.lane === 0) : [...waiting];
 }
 
-/** 过了就地预算时有没有人在等。 */
-function someoneWaiting(_unit: Pick<UnitState, "lane">, counted: readonly WaitingEntry[]): boolean {
-  return counted.length > 0;
+/** 过了就地预算时有没有人在等：L0 单元本身就是用户在等。 */
+function someoneWaiting(unit: Pick<UnitState, "lane">, counted: readonly WaitingEntry[]): boolean {
+  return unit.lane === 0 || counted.length > 0;
 }
 
 // ── 日志 ─────────────────────────────────────────────────────────────────────

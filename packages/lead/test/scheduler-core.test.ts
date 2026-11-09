@@ -3,7 +3,7 @@
 // 只能起一个 daemon 来测。现在每一种决定都在这里按表测一遍。
 import { describe, expect, it } from "vitest";
 import {
-  abortedByRedLine, abortedForRestart, canInterruptForSteer, handoffGate, initialSchedulerState, isBusy,
+  abortedByRedLine, abortedForRestart, canInterruptForSteer, countedWaiting, handoffGate, initialSchedulerState, isBusy,
   redLinePhase, schedulerStep, stoppedByUser, unitLane,
   type BudgetFacts, type SchedulerEffect, type SchedulerEvent, type SchedulerLimits, type SchedulerState, type WaitingEntry,
 } from "../src/scheduler/index.js";
@@ -266,6 +266,52 @@ describe("the queue notice", () => {
   });
 });
 
+// 优先级反转（spec「背景」，用户 2026-11-09 的决定 2）：外部的人的消息不能抢占用户本人的 L0 单元。
+describe("external messages do not preempt the user's unit", () => {
+  it("counts only L0 waits in an L0 unit, and every wait elsewhere", () => {
+    const waiting = [user(10_000), colleague(2_000)];
+    expect(countedWaiting({ lane: 0 }, waiting)).toEqual([user(10_000)]);
+    expect(countedWaiting({ lane: 2 }, waiting)).toEqual(waiting);
+  });
+
+  it("does not tell Lead about a colleague in the user's unit, and still tells it about the user's own queued messages", () => {
+    const m = machine();
+    openUnit(m);
+    m.send({ type: "queue.check", facts: facts([colleague(600_000)]) });
+    expect(m.of("notice.queue")).toEqual([]);
+    expect(m.logs().filter((line) => line.includes("decision=queue_hold"))).toHaveLength(1);
+    m.send({ type: "queue.check", facts: facts([colleague(601_000)]) });
+    expect(m.logs().filter((line) => line.includes("decision=queue_hold"))).toHaveLength(1);
+    m.send({ type: "queue.check", facts: facts([colleague(700_000), user(61_000)]) });
+    expect(m.of("notice.queue")).toEqual([{ type: "notice.queue", waiting: [user(61_000)] }]);
+  });
+
+  it("stops the user's unit at the budget even when the user's message has no text, and names only the user", () => {
+    const m = machine();
+    openUnit(m);
+    m.advance(150_000);
+    // 图片消息没有文字：以前 daemon 不把它算作在等，红线只提醒。
+    m.send({ type: "budget.check", facts: facts([]) });
+    expect(m.of("remind.second")).toEqual([]);
+    expect(m.of("abort")).toEqual([{ type: "abort", reason: { kind: "budget" } }]);
+    expect(m.logs().find((line) => line.includes("decision=red_line_stop"))).toContain("waiting=L0:unit");
+  });
+
+  it("leaves the colleague out of the red-line decision and the yellow reminder of the user's unit", () => {
+    const m = machine();
+    openUnit(m);
+    m.advance(120_000);
+    m.send({ type: "budget.check", facts: facts([user(120_000), colleague(1_000)]) });
+    expect(m.of("remind.yellow")[0]?.waiting).toEqual([user(120_000)]);
+    m.advance(30_000);
+    m.send({ type: "budget.check", facts: facts([user(150_000), colleague(31_000)]) });
+    const decision = m.logs().find((line) => line.includes("decision=red_line_stop"))!;
+    expect(decision).toContain("waiting=L0:user:1:150s");
+    expect(decision).toContain("queued=L1:external:1:31s");
+    expect(m.state.unit?.redLine?.waiting).toEqual([user(150_000)]);
+  });
+});
+
 describe("/stop and drain", () => {
   it("stops a running unit with the user_stop reason, and does nothing when Lead is idle", () => {
     const m = machine();
@@ -295,6 +341,36 @@ describe("/stop and drain", () => {
 
 // 回放：事故的时间线按比例照搬，人和原文换成编造的。
 describe("replays", () => {
+  // 2026-11-09 13:34：用户的小请求，Lead 在用户自己的这一轮里卡在发请求前 9 分 42 秒。13:37:18 红线判断「没有人在等」，
+  // 只提醒；13:45:10 一位同事的两个词的闲聊 DM 到了，只等了 2 秒，红线就停下了用户的这一轮。
+  // 期望：L0 单元在就地预算到期时停下，停下的依据是用户本人；同事的 DM 只排队，不出现在停下的依据里。
+  it("2026-11-09: stops the user's unit at the budget because of the user, and the colleague's DM only queues", () => {
+    const m = machine();
+    openUnit(m);
+    m.send({ type: "tool.start", id: "abandon", name: "ticket_action", write: false, top: true, facts: facts([user(0)]) });
+    m.send({ type: "tool.start", id: "grep", name: "bash", write: true, top: true, facts: facts([user(0)]) });
+    m.advance(10_000);
+    m.send({ type: "tool.end", id: "abandon" });
+    m.send({ type: "tool.end", id: "grep" });
+    // 之后一直卡着：每秒轮询一次。
+    let stoppedAt: number | null = null;
+    for (let second = 11; second <= 600 && stoppedAt === null; second += 1) {
+      m.advance(1_000);
+      const dm = second >= 140 ? [colleague((second - 140) * 1_000)] : [];
+      // 用户本人只有这一轮正在回答的那一条：排队说明不算它。
+      const waiting = (answering: boolean) => [...(answering ? [user(second * 1_000)] : []), ...dm];
+      m.send({ type: "queue.check", facts: facts(waiting) });
+      m.send({ type: "budget.check", facts: facts(waiting) });
+      if (m.of("abort").length) stoppedAt = second;
+    }
+    expect(stoppedAt).toBe(150);
+    expect(m.of("remind.second")).toEqual([]);
+    const decision = m.logs().find((line) => line.includes("decision=red_line_stop"))!;
+    expect(decision).toMatch(/unit=unit_a lane=L0 turn=turn_u1 decision=red_line_stop elapsedMs=150000 budgetMs=150000 waiting=L0:user:1:150s queued=L1:external:1:10s/u);
+    expect(m.of("notice.queue")).toEqual([]);
+    expect(m.state.unit?.redLine?.waiting.every((entry) => entry.lane === 0)).toBe(true);
+  });
+
   // 2026-11-03：一轮就地查了 6 分多钟，三条用户消息排了 6–9 分钟。期望：在就地预算到期时停下，交接。
   it("2026-11-03: stops the in-place investigation at the budget while the user's messages queue", () => {
     const m = machine();

@@ -5103,6 +5103,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
   }
 
   // 红线消息里写的在等的人：送的时候重新算（这期间可能又来了人）；都已经送到时用停下时的那一份。
+  // L0 单元里只写用户本人（外部的人只排队，lead-scheduler spec D4）。
   function redLineWaiting(atStop: WaitingEntry[]): WaitingEntry[] {
     const unit = sched.unit;
     const now = waitingEntries(Date.now());
@@ -5142,7 +5143,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
   // 带每条的第一句；等这一轮结束后单独开一轮的（D16）只算条数，原文不放进这一轮。
   // 这一轮正在回答的用户也在等（lead-scheduler spec P0，2026-11-09）：以前不算，红线判断「没有人在等」，只提醒不停；
   // 用户等了 10 分钟，一条同事的闲聊 DM 到了以后红线才停下这一轮。排队说明（noticeQueue）不算它：
-  // 说明讲的是排在这一轮后面的消息，Lead 本来就在回答这一条。
+  // 说明讲的是排在这一轮后面的消息，Lead 本来就在回答这一条。P1：没有文字的消息（只有图片）也算。
   function waitingEntries(now: number, options: { answering?: boolean } = {}): WaitingEntry[] {
     const people = leadInput.queue().map((entry): WaitingEntry => ({
       who: entry.senders.join("、") || entry.conversation, conversation: entry.conversation, count: entry.count,
@@ -5156,7 +5157,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     });
     const unanswered = activeChannelTurn?.placement === "steer" && !activeChannelTurn.assistantText.trim() ? [activeChannelTurn] : [];
     const answering = options.answering !== false && activeChannelTurn && activeChannelTurn !== systemEntryThisTurn
-      && activeChannelTurn.turn.user_text.trim() ? [activeChannelTurn] : [];
+      && !isSystemTurnOrigin(activeChannelTurn.turn.origin_kind) ? [activeChannelTurn] : [];
     const inRun = fresh([...answering, ...unanswered, ...queuedInputs.map((input) => input.entry)]);
     const held = fresh(carryOverTurns.map((carried) => carried.entry));
     const all = [...inRun, ...held];
