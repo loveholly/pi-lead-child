@@ -1,3 +1,6 @@
+import { readdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { configDefaults, defineConfig } from "vitest/config";
 
 // 仓库此前没有 vitest 配置，于是 testTimeout 一直是缺省的 5s。这个值对本仓库是错的：
@@ -13,7 +16,19 @@ import { configDefaults, defineConfig } from "vitest/config";
 // 拿这个换掉随机红是划算的。
 // 另外，本仓库有大量测试会同时启动真实 HTTP/WebSocket/Unix socket server。受限执行环境下
 // 文件级并发会把这些 listener 放大成 `listen EPERM` 风暴，导致全量 `npm test` 红、单文件
-// 复跑绿。默认串行跑根测试，牺牲一点墙钟时间，换来可复现的门禁结果。
+// 复跑绿。所以本机缺省串行跑根测试，牺牲一点墙钟时间，换来可复现的门禁结果。
+//
+// CI（GitHub Actions 设了 CI=true）没有这个限制，按文件并发跑，每个 worker 是一个子进程（pool: forks）。
+// 本机想并发时设 PLC_TEST_PARALLEL=1；在 CI 上想串行时设 PLC_TEST_PARALLEL=0。见 docs/testing.md。
+// 用 forks，不用 threads：vitest.setup.ts 的孤儿进程检查按进程认归属（看 process.pid 的子孙）。threads 下所有文件
+// 同在一个进程里，检查会把同时在跑的别的文件启动的进程算到这个文件头上。
+//
+// 隔离（2026-11-09，vitest 指南「Test Isolation」）：缺省每个测试文件重新加载全部模块。store、protocol、client
+// 三个包的测试大多只调纯函数和 SQLite，加载模块的时间比跑用例还长：这三个包串行跑 354 秒，关掉隔离以后 191 秒。
+// 所以这三个包里不改全局状态的文件放进 shared 组，关掉隔离（isolate: false），同一个 worker 里的文件共用加载好的模块。
+// 改全局状态的文件（vi.mock、vi.spyOn、假时钟、改 process.env 等，见 STATEFUL）留在 isolated 组：关掉隔离以后，
+// 前一个文件加载过的模块不会再被 mock 替换，改过的状态也会带到下一个文件。分组看文件内容，新文件自动进对的组。
+// 别的包和 apps/ 也大量起 daemon、socket 和子进程，有模块级状态，仍然每个文件隔离。
 //
 // 另有一个约每十轮出现一次的偶发失败，症状是 `AssertionError: expected false to be true`。
 // 它在本分支之前就存在（steer-stop / linger / daemon / aish-adapter 在 master 上即如此）。
@@ -50,16 +65,39 @@ import { configDefaults, defineConfig } from "vitest/config";
 //
 // 打开交付里的文件（工单 07）时，daemon 在 macOS 上执行 open，会在用户桌面上打开文件。PLC_OPEN_FILES=off 让测试里的 daemon
 // 缺省用一个一律拒绝的 opener（engine 的 daemonFileOpener）。要测打开文件的测试自己注入假的 opener。
+const SHARED_PACKAGES = ["packages/store", "packages/protocol", "packages/client"];
+const STATEFUL = /\bvi\.(?:mock|doMock|stubEnv|stubGlobal|useFakeTimers|resetModules|spyOn)\(|process\.env\.\w+\s*=[^=]|delete process\.env|process\.chdir\(/;
+const ROOT = fileURLToPath(new URL(".", import.meta.url));
+const SHARED_FILES = SHARED_PACKAGES.flatMap((dir) => readdirSync(join(ROOT, dir, "test"), { recursive: true, encoding: "utf8" })
+  .filter((file) => /\.test\.ts$/.test(file))
+  .map((file) => `${dir}/test/${file.split("\\").join("/")}`))
+  .filter((file) => !STATEFUL.test(readFileSync(join(ROOT, file), "utf8")));
+
+const parallelSwitch = process.env.PLC_TEST_PARALLEL;
+const parallel = parallelSwitch === undefined || parallelSwitch === "" ? Boolean(process.env.CI) : parallelSwitch !== "0";
+
 export default defineConfig({
   test: {
     env: { PLC_DESKTOP_NOTIFY: "off", PLC_GATEWAY_PORT: "0", PLC_LEAD_DRAIN_MS: "50", PLC_OPEN_FILES: "off" },
     setupFiles: ["./vitest.setup.ts"],
-    include: ["packages/*/test/**/*.test.ts", "apps/daemon/test/**/*.test.ts", "apps/cli/test/**/*.test.ts", "scripts/*/test/**/*.test.ts", "desktop/test/**/*.test.ts"],
+    // include 写在下面两组里：组继承这里的设置，数组是拼起来的，写在这里两组就都包含全部文件。
     exclude: [...configDefaults.exclude, ".claude/**", "packages/components/**"],
     testTimeout: 15_000,
     hookTimeout: 15_000,
-    fileParallelism: false,
-    maxWorkers: 1,
+    pool: "forks",
+    fileParallelism: parallel,
+    ...(parallel ? {} : { maxWorkers: 1 }),
+    projects: [
+      {
+        extends: true,
+        test: {
+          name: "isolated",
+          include: ["packages/*/test/**/*.test.ts", "apps/daemon/test/**/*.test.ts", "apps/cli/test/**/*.test.ts", "scripts/*/test/**/*.test.ts", "desktop/test/**/*.test.ts"],
+          exclude: SHARED_FILES,
+        },
+      },
+      { extends: true, test: { name: "shared", include: SHARED_FILES, isolate: false } },
+    ],
     reporters: ["default", "json"],
     outputFile: { json: "./.vitest-report.json" },
   },
