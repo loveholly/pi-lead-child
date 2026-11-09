@@ -162,11 +162,13 @@ jobs:
       fail-fast: false
       matrix:
         shard: [1, 2, 3, 4]
-    env:
-      # 测试会在临时目录下建 unix socket，路径要短。也不能是 /tmp 本身：engine 有的测试把 session 目录往上两级
-      # 当数据目录，TMPDIR=/tmp 时那是 /，写 /runtime-events 失败（EACCES）。runner.temp 是 /home/runner/work/_temp。
-      TMPDIR: ${{ runner.temp }}
     steps:
+      # 测试会在临时目录下建 unix socket，路径要短。也不能是 /tmp 本身：engine 有的测试把 session 目录往上两级
+      # 当数据目录，TMPDIR=/tmp 时那是 /，写 /runtime-events 失败（EACCES）。RUNNER_TEMP 是 /home/runner/work/_temp。
+      # 不能写成 job 级的 env: TMPDIR: ${{ runner.temp }}：job 级 env 里没有 runner 上下文，整个 workflow 文件会无效。
+      - name: Use the runner's temp directory as TMPDIR
+        run: echo "TMPDIR=$RUNNER_TEMP" >> "$GITHUB_ENV"
+
       - name: Check out the pull request
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
