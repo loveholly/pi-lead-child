@@ -4707,9 +4707,8 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       if (workspaceSweepRunning) return;
       if (lastWorkspaceSweepAt === null || sweepNow - lastWorkspaceSweepAt >= workspaceSweepMs) {
         // 空闲车道（P4）：Lead 空闲满 graceMs 才扫；推迟超过一个间隔（Lead 一直忙）时照样扫。
-        // 启动后的第一次不等：重启前留在回收区的删除也要等空闲（闸门在 workspace.ts），扫描本身很快。
-        const overdue = lastWorkspaceSweepAt === null || sweepNow - lastWorkspaceSweepAt >= 2 * workspaceSweepMs;
-        if (!idleLane.mayStartSweep(overdue)) return;
+        // 启动后的第一次不等：扫描本身很快，它要删的回收区目录照样等空闲（闸门在 workspace.ts）。
+        if (lastWorkspaceSweepAt !== null && !idleLane.mayStartSweep(sweepNow - lastWorkspaceSweepAt >= 2 * workspaceSweepMs)) return;
         lastWorkspaceSweepAt = sweepNow;
         workspaceSweepRunning = true;
         void sweepWorkspaces(db, new Date(sweepNow)).then((workspaceSweep) => {

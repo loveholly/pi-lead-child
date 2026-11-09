@@ -431,9 +431,10 @@ export function idleLaneStep(state: IdleLaneState, event: IdleLaneEvent, now: nu
       if (!compact.id) return { state, effects: [] };
       const ms = compact.startedAt === null ? null : now - compact.startedAt;
       return {
-        // 新的周期：推迟的计数清零，整理笔记重新武装。
+        // 新的周期：推迟的计数清零，整理笔记重新武装。水位要等下一次回答才知道。
         state: {
           ...state,
+          ratio: null,
           compact: idleCompactJob(0),
           precipitate: { ...state.precipitate, done: false, yields: 0 },
         },
@@ -462,7 +463,7 @@ export function idleLaneStep(state: IdleLaneState, event: IdleLaneEvent, now: nu
         if (compact.phase !== "ready") effects.push({ type: "compact.cancel", id: compact.id, why: `compacted_by_${event.how}` });
       }
       return {
-        state: { ...state, compact: idleCompactJob(0), precipitate: { ...state.precipitate, done: false, yields: 0 } },
+        state: { ...state, ratio: null, compact: idleCompactJob(0), precipitate: { ...state.precipitate, done: false, yields: 0 } },
         effects,
       };
     }
