@@ -45,6 +45,28 @@ describe("sched trace", () => {
     expect(text).not.toContain("unit_dd4");
   });
 
+  // lead-scheduler spec P2：交出去的单元，结果在另一个单元里交回、转告；挂起的单元在另一个单元里恢复。只看用户那一个单元的
+  // 时间线，要能一路查到结果（开发模式的复查发现以前查不到）。
+  it("follows a hand-off to the unit where its result comes back, and a suspended unit to where it resumes", () => {
+    const logLines = [
+      "[2026-11-09T15:57:00.000Z] [sched] unit.start unit=unit_u1 lane=L0 turn=turn_7 source=user origin=- deadlineMs=10000",
+      "[2026-11-09T15:57:10.000Z] [sched] handoff unit=unit_u1 turn=turn_7 pkg=hof_a1b2c3d4 of=unit_u1 entry=lead_midway ticket=8 ms=36",
+      "[2026-11-09T15:57:13.000Z] [sched] unit.end unit=unit_u1 lane=L0 turn=turn_7 outcome=answered ms=13000",
+      "[2026-11-09T15:57:35.000Z] [sched] unit.start unit=unit_r2 lane=L2 turn=- source=system origin=system:blocker deadlineMs=300000",
+      "[2026-11-09T15:57:35.010Z] [sched] lane unit=unit_r2 turn=- from=L2 to=L0 why=handoff_result",
+      "[2026-11-09T15:57:35.020Z] [sched] result unit=unit_r2 of=unit_u1 pkg=hof_a1b2c3d4 ticket=8 lane=L0",
+      "[2026-11-09T15:57:55.000Z] [sched] unit.end unit=unit_r2 lane=L0 turn=turn_9 outcome=answered ms=20000",
+      "[2026-11-09T15:58:00.000Z] [sched] unit.start unit=unit_z9 lane=L3 turn=- source=system origin=system:digest deadlineMs=1800000",
+    ];
+    const sources = { logLines, sessionEntries: [], events: [] };
+    expect(unitsOf("unit_u1", sources).sort()).toEqual(["unit_r2", "unit_u1"]);
+    expect(unitsOf("turn_7", sources).sort()).toEqual(["unit_r2", "unit_u1"]);
+    const text = formatSchedTrace(schedTrace("unit_u1", unitsOf("unit_u1", sources), sources)).join("\n");
+    expect(text).toContain("[sched] result unit=unit_r2 of=unit_u1");
+    expect(text).toContain("unit.end unit=unit_r2");
+    expect(text).not.toContain("unit_z9");
+  });
+
   it("accepts unit and turn ids only", () => {
     expect(SCHED_TRACE_ID.test("unit_mw9asd3m002")).toBe(true);
     expect(SCHED_TRACE_ID.test("turn_575d99e3-b509-4ef5")).toBe(true);

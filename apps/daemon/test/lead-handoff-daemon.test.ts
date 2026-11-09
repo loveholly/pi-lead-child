@@ -187,6 +187,9 @@ describe("a hand-off, from the user's request to the relayed result", () => {
     const relay = lead.calls.find((call) => has(call, "用户在等：写一条回复转告结果"))!;
     expect(relay.inputs.join("\n")).toContain(RESULT);
     await vi.waitFor(() => expect(logs.some((line) => line.startsWith("[sched] lane ") && line.includes("to=L0") && line.includes("why=handoff_result"))).toBe(true), { timeout: 5_000 });
+    // 交回的结果写明它是从哪个单元交出去的（plc sched trace 据此从用户的单元一路查到结果）。
+    const userUnit = /unit=(unit_\S+)/u.exec(handoffLine)![1]!;
+    expect(logs.some((line) => line.startsWith("[sched] result ") && line.includes(`of=${userUnit}`) && line.includes(`ticket=${ticketId}`))).toBe(true);
     if (process.env.HANDOFF_TEST_DEBUG) setTimeout(() => console.log(JSON.stringify(db.prepare("SELECT origin_kind, state, substr(assistant_text,1,60) AS t FROM channel_turns").all())), 2_000);
     await vi.waitFor(() => expect(db.prepare("SELECT 1 FROM channel_turns WHERE assistant_text LIKE ?").get(`%${RESULT}%`)).toBeTruthy(), { timeout: 5_000 });
 

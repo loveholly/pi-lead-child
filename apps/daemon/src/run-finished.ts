@@ -132,7 +132,7 @@ export function recordRunFinished(
     error: args.error?.message ?? null, wakeLead: true, needsUser: false, routine: true,
     ...(light ? { lightTask: true } : {}),
     ...(external ? { external: true } : {}),
-    ...(handoff ? { handoffLane: handoff.lane, handoffPackage: handoff.packageId } : {}),
+    ...(handoff ? { handoffLane: handoff.lane, handoffPackage: handoff.packageId, handoffUnit: handoff.unitId } : {}),
   };
   const blocker = run && !args.error && !external && current?.stage === "blocked"
     ? sameRunBlocker(db, args.itemId, run.id)

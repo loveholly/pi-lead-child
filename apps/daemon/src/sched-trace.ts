@@ -39,9 +39,12 @@ function logTime(line: string): number | null {
   return match ? Date.parse(match[1]!) : null;
 }
 
-/** 这个 id 关联到哪些单元：本身是单元编号，或者日志、会话文件、事件里和这个 turn 一起出现的单元。 */
+/**
+ * 这个 id 关联到哪些单元：本身是单元编号，或者日志、会话文件、事件里和这个 turn 一起出现的单元。
+ * 再加上接着它做的单元（日志里写着 of=<单元> 的那些行，lead-scheduler spec P2）：交回的结果在哪个单元里转告、挂起的单元
+ * 在哪个单元里恢复或交出去。这样从用户的那一个单元能一路查到结果。
+ */
 export function unitsOf(id: string, sources: SchedTraceSources, unitsFromEvents: readonly string[] = []): string[] {
-  if (id.startsWith("unit_")) return [id];
   // 空闲车道的作业：连同它开的单元（整理笔记那一轮）一起查。
   if (id.startsWith("idle_")) {
     const units = new Set([id]);
@@ -52,12 +55,27 @@ export function unitsOf(id: string, sources: SchedTraceSources, unitsFromEvents:
     return [...units];
   }
   const units = new Set(unitsFromEvents);
+  if (id.startsWith("unit_")) {
+    units.add(id);
+    for (const line of sources.logLines) {
+      if (!line.includes(`of=${id}`)) continue;
+      for (const match of line.matchAll(UNIT_FIELD)) units.add(match[1]!);
+    }
+    return [...units];
+  }
   for (const line of sources.logLines) {
     if (!line.includes(`turn=${id}`)) continue;
     for (const match of line.matchAll(UNIT_FIELD)) units.add(match[1]!);
   }
   for (const entry of sources.sessionEntries) {
     if (entry.turnId === id && typeof entry.unitId === "string") units.add(entry.unitId);
+  }
+  // 这一轮的单元交出去或挂起以后，接着它做的单元。
+  for (const unit of [...units]) {
+    for (const line of sources.logLines) {
+      if (!line.includes(`of=${unit}`)) continue;
+      for (const match of line.matchAll(UNIT_FIELD)) units.add(match[1]!);
+    }
   }
   return [...units];
 }

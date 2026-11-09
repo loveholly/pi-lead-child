@@ -4076,6 +4076,16 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       // 子 agent 交回的结果走原请求者的车道（lead-scheduler spec D1、H6）：用户的请求交出去，结果回来也是 L0。
       const handoffLane = Math.min(...deliveredEvents.map(handoffLaneOf));
       if (handoffLane < (sched.unit?.lane ?? 0)) sched.dispatch({ type: "unit.lane", lane: handoffLane as Lane, why: "handoff_result" });
+      // 交回的结果在这个单元里（D12）：记一行，写明它是从哪个单元交出去的，plc sched trace 从原来的单元一路查到这里。
+      for (const event of deliveredEvents) {
+        const inner = event.payload.payload as Record<string, unknown> | undefined;
+        const of = typeof inner?.handoffUnit === "string" ? inner.handoffUnit : null;
+        if (!of) continue;
+        log(schedulerLine("result", {
+          unit: sched.unit?.id ?? "-", of, pkg: typeof inner?.handoffPackage === "string" ? inner.handoffPackage : "-",
+          ticket: typeof event.payload.itemId === "number" ? event.payload.itemId : "-", lane: `L${sched.unit?.lane ?? "-"}`,
+        }));
+      }
       // 交接包的目标（H3）：用户的原话，或者交给这一轮的事和系统的说明。只进交接包，不进日志。
       handoffs.beginUnit({
         unitId, turnId: channelTurn?.turn.id ?? null,
