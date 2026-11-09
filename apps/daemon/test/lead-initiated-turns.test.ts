@@ -178,13 +178,19 @@ function notificationState(itemId: number) {
   return db.prepare("SELECT state, delivered_via FROM notifications WHERE item_id=?").get(itemId);
 }
 
-function newBlocker(summary: string): number {
+function newBlocker(summary: string, extra: Record<string, unknown> = {}): number {
   const itemId = createItem(db, { title: "runtime exception", brief: "b", createdBy: "system" });
   addInbox(db, {
     itemId, severity: "blocker", source: "structural", summary,
-    payload: { kind: "unhandled_run_exception", runId: 7, detail: "decoder exploded" }, lossless: true,
+    payload: { kind: "unhandled_run_exception", runId: 7, detail: "decoder exploded", ...extra }, lossless: true,
   });
   return itemId;
+}
+
+// 交回给用户的结果（lead-scheduler spec H6）：系统叫醒 Lead 的一轮，车道是 L0（handoffLane）。用户的消息不抢占 L0 的单元，
+// 按「Lead 忙时你发的消息」的设置插进去或排队（D4）。车道是 L1–L3 的系统回合，用户的消息抢占它（lead-preempt-daemon.test.ts）。
+function newUserResult(summary: string): number {
+  return newBlocker(summary, { handoffLane: 0 });
 }
 
 describe("a blocker wake-up", () => {
@@ -311,7 +317,7 @@ describe("a user who steers into a turn the lead started itself", () => {
     await start(lead);
     const plc = await v2Client("plc");
     const companion = await v2Client("phone");
-    newBlocker("插话之前的 blocker");
+    newUserResult("插话之前的 blocker");
     await vi.waitFor(() => expect(lead.prompts.some((prompt) => prompt.includes("系统检测到新的异常"))).toBe(true));
     plc.chat("先别管它，告诉我 #3 怎么样了");
     await vi.waitFor(() => expect(plc.events.some((event) => event.type === "lead.turn.started" && event.payload.mode === "steered"))
@@ -425,7 +431,7 @@ describe("a system turn that fails while a user's steer waits", () => {
     const lead = stubLead("hang");
     await start(lead);
     const plc = await v2Client("plc");
-    newBlocker("插话之后失败的 blocker");
+    newUserResult("插话之后失败的 blocker");
     await vi.waitFor(() => expect(lead.prompts.some((prompt) => prompt.includes("系统检测到新的异常"))).toBe(true));
     plc.chat("先别管它");
     await vi.waitFor(() => expect(plc.events.some((event) => event.type === "lead.turn.started" && event.payload.mode === "steered"))
@@ -445,7 +451,7 @@ describe("a system turn that fails while a user's steer waits", () => {
     await start(lead);
     const plc = await v2Client("plc");
     const other = await v2Client("other");
-    newBlocker("插话之后失败的 blocker");
+    newUserResult("插话之后失败的 blocker");
     await vi.waitFor(() => expect(lead.prompts.some((prompt) => prompt.includes("系统检测到新的异常"))).toBe(true));
     plc.chat("先别管它");
     await vi.waitFor(() => expect(plc.events.some((event) => event.type === "lead.turn.started" && event.payload.mode === "steered"))
@@ -465,7 +471,7 @@ describe("a system turn that fails while a user's steer waits", () => {
     const lead = stubLead("hang", { steerWaits: true });
     await start(lead);
     const plc = await v2Client("plc");
-    newBlocker("插话之后失败的 blocker");
+    newUserResult("插话之后失败的 blocker");
     await vi.waitFor(() => expect(lead.prompts.some((prompt) => prompt.includes("系统检测到新的异常"))).toBe(true));
     plc.chat("先别管它");
     await vi.waitFor(() => expect(plc.events.some((event) => event.type === "lead.turn.started" && event.payload.mode === "steered"))

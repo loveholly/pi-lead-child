@@ -51,6 +51,7 @@ import { LEAD_CODEMODE_TOOL, LEAD_HAND_TOOLS, leadHandsExtension } from "./hands
 import { handbookGuardExtension } from "./handbook-guard.js";
 import { leadSchedulerExtension, type LeadSchedulerHooks } from "./scheduler/extension.js";
 import type { LeadHandoffDeps } from "./hand-off-tool.js";
+import type { LeadBackgroundJobs } from "./background-jobs.js";
 import type { LeadSchedulerRuntime } from "./scheduler/runtime.js";
 import { idleLaneExtension, type IdleLaneRuntime } from "./scheduler/idle-runtime.js";
 import { TurnEvidence } from "./credibility/evidence.js";
@@ -227,6 +228,8 @@ export async function createLeadSession(opts: {
   // 交接（lead-scheduler spec P2）：扩展的钩子（做过的步骤、每一步的预算状态、让出点）和 hand_off、resume_unit 用的服务。
   schedulerHooks?: LeadSchedulerHooks;
   handoff?: LeadHandoffDeps;
+  // 长的只读命令转后台（lead-scheduler spec D6，P3）的出口：daemon 记下作业，结束时把输出交给 Lead。
+  backgroundJobs?: LeadBackgroundJobs;
 }): Promise<{
   session: LeadEngine; modelName: string; syncToolAccess: () => void; reloadExtensions: () => Promise<void>;
   models: string[]; switchModel: (spec: string) => Promise<void>; reportsInputDelivery: boolean; interruptStep: () => boolean;
@@ -427,6 +430,7 @@ export async function createLeadSession(opts: {
           db: opts.db, dataDir: opts.dataDir,
           ...(opts.turnOrigin ? { turnOrigin: opts.turnOrigin } : {}),
           ...(opts.currentTurnId ? { currentTurnId: opts.currentTurnId } : {}),
+          ...(opts.backgroundJobs ? { backgroundJobs: opts.backgroundJobs } : {}),
           log: (line) => console.error(line),
         }),
       },

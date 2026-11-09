@@ -3,7 +3,7 @@
 //
 // 只留档，不交给 Lead：record 级，写入时就记处置 handled_by_rule（store 的 lead-scheduler-events.ts）；Lead 的输入跳过它们
 // （daemon 的 lead-input.ts）。payload 里只有编号、数字和种类，不写消息原文（D12）。
-import { Type } from "typebox";
+import { Type, type Static } from "typebox";
 import { registerEventKind, type EventKindDefinition } from "./events.ts";
 
 export const SCHEDULER_RECORD_KINDS = [
@@ -123,3 +123,19 @@ export interface IdleLaneSnapshot {
   // 在等 Lead 空闲的后台重活（回收区的删除）。
   gated: number;
 }
+
+// 这一步现在的状态（lead-scheduler spec D11，P3 的 S8c）：Lead 在等模型的第一段输出、等过了 30 秒时，界面不再一律写「Thinking」，
+// 写「模型回复慢」。daemon 发 snapshot.required（resource 是 lead-step，只发给声明了 include=lead_step 的连接：旧客户端严格
+// 校验，不认识这个 resource 会把它当成「全部重取」），payload 的 status 是现在的状态；恢复正常或者这一步结束时是 null。
+export const LEAD_STEP_OPT_IN = "lead_step";
+export const LEAD_STEP_RESOURCE = "lead-step";
+
+export const LeadStepStatusSchema = Type.Object({
+  // 这一步在回答哪一轮（会话里的轮次）。系统回合还没落成一轮时为 null。
+  turnId: Type.Union([Type.String(), Type.Null()]),
+  // model_slow：请求发出以后过了 30 秒还没有第一段输出。不算卡死，不中止（D7）。
+  kind: Type.Literal("model_slow"),
+  // 请求是什么时候发出的（ISO）：界面据此写已经等了多久。
+  since: Type.String(),
+}, { additionalProperties: false });
+export type LeadStepStatus = Static<typeof LeadStepStatusSchema>;

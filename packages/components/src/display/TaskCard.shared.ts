@@ -166,7 +166,7 @@ export function formatDuration(ms: number | null | undefined, locale: Locale = '
 }
 
 export function taskCardSummary(
-  { status, steps, durationMs }: Pick<TaskCardProps, 'status' | 'steps' | 'durationMs'>,
+  { status, steps, durationMs, runningTitle }: Pick<TaskCardProps, 'status' | 'steps' | 'durationMs' | 'runningTitle'>,
   locale: Locale = 'en',
 ): TaskCardSummary {
   const m = taskCardMessages(locale);
@@ -175,7 +175,7 @@ export function taskCardSummary(
   if (status === 'thinking' || status === 'working') {
     // 还在跑：调用方给了用时（这一轮开始到现在）就写在后面，例如「Thinking · 12 秒」。
     const running = [...tools].reverse().find((step) => step.state === 'running');
-    if (status === 'thinking' || !running) return { tone: 'running', title: 'Thinking', detail: null, time: duration };
+    if (status === 'thinking' || !running) return { tone: 'running', title: runningTitle || 'Thinking', detail: null, time: duration };
     return { tone: 'running', title: running.name, detail: summarizeToolArgs(running.args) || null, time: duration };
   }
   const count = tools.length ? m.toolCount(tools.length) : null;

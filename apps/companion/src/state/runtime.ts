@@ -1835,6 +1835,8 @@ export class CompanionStateRuntime {
           invalidations.push(RESOURCE_KEYS.leadQueue);
           continue;
         }
+        // 补发的「这一步现在的状态」是当时的样子，不用它：这一步多半早就结束了。
+        if (mutation.type === 'lead-step.replace' && event.seq <= this.replayThroughSeq) continue;
         applyControlPlaneMutation(this.control, sessionId, mutation);
       }
       for (const mutation of reduction.streams) this.applyStreamMutation(mutation);

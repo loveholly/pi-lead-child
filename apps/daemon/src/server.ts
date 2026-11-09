@@ -23,10 +23,11 @@ import {
   userQueueNoticeMs,
 } from "@pi-lead-child/lead";
 import {
-  abortedByRedLine, abortedForRestart, admitSystemUnit, budgetStatusLine, canInterruptForSteer, countedWaiting, handoffGate,
-  IdleLaneRuntime, idleLaneLimitsFromEnv, LeadHandoffs, LeadSchedulerRuntime, redLinePhase as schedRedLinePhase, schedulerLine,
-  stepP90Ms, stoppedByUser, unitLane, yieldedToInput, type PrecipitationOutcome,
-  type BudgetFacts, type Lane, type SchedulerEffect, type SchedulerLimits, type UnitOutcome, type WaitingEntry,
+  abortedByRedLine, abortedForPreempt, abortedForRestart, admitSystemUnit, budgetStatusLine, canInterruptForSteer, countedWaiting,
+  handoffGate, IdleLaneRuntime, idleLaneLimitsFromEnv, LeadHandoffs, LeadSchedulerRuntime, redLinePhase as schedRedLinePhase,
+  schedulerLine, stepP90Ms, stoppedByUser, unitLane, yieldedToInput, type PrecipitationOutcome,
+  type BudgetFacts, type Lane, type LeadBackgroundJobs, type SchedulerEffect, type SchedulerLimits, type UnitOutcome,
+  type WaitingEntry,
 } from "@pi-lead-child/lead";
 import { isSummaryTokenCapError, leadCompactionInstructions, LEAD_COMPACTION_BUDGETS, type CompactionProgress } from "@pi-lead-child/lead";
 import { contextUsageLine, leadContextUsage, type LeadContextUsage } from "@pi-lead-child/lead";
@@ -50,7 +51,7 @@ import {
   createAgentTaskDispatcher, recoverAgentTasksAfterRestart, type AgentTaskDispatcherOptions, type DaemonAgentTaskDispatcher,
 } from "./agent-tasks.js";
 import {
-  CHANNEL_CARDS_SNAPSHOT_RESOURCE, CHANNEL_SETTINGS_SNAPSHOT_RESOURCE, EVENT_SOURCES, LEAD_QUEUE_RESOURCE, MESSAGE_EVENT_KIND, type GrantLocalRepo, type LeadQueue,
+  CHANNEL_CARDS_SNAPSHOT_RESOURCE, CHANNEL_SETTINGS_SNAPSHOT_RESOURCE, EVENT_SOURCES, LEAD_QUEUE_RESOURCE, LEAD_STEP_RESOURCE, MESSAGE_EVENT_KIND, type GrantLocalRepo, type LeadQueue,
 } from "@pi-lead-child/protocol";
 import {
   DAEMON_ENTITY_KEY, DAEMON_STARTED_KIND, isUserActionRequest, LEAD_WAIT_EXPIRED_KIND, type LocalMcpLaunch, type UserActionRequest,
@@ -860,6 +861,42 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       return Boolean(item && item.stage !== "done" && item.stage !== "cancelled");
     },
   });
+  // 长的只读命令转后台（lead 的 background-jobs.ts，lead-scheduler spec D6，P3）：作业起止各记一行 [sched]（D12 第 11 条）；
+  // 结束时把输出作为一件事交给 Lead（inbox，叫醒 Lead），车道是作业开始时那个单元的车道（D1：结果走原请求者的车道）。
+  // 输出是本机命令的结果，不算外部内容（turn-origin.ts）。
+  const backgroundJobOwners = new Map<string, { unitId: string | null; lane: Lane; turnId: string | null }>();
+  const backgroundJobs: LeadBackgroundJobs = {
+    started: (job) => {
+      const unit = sched.unit;
+      backgroundJobOwners.set(job.id, { unitId: unit?.id ?? null, lane: unit?.lane ?? 2, turnId: unit?.turnId ?? null });
+      log(schedulerLine("job.bg_start", {
+        id: job.id, unit: unit?.id ?? "-", turn: unit?.turnId ?? "-", lane: `L${unit?.lane ?? 2}`, tool: job.tool, softMs: job.softMs,
+        call: job.toolCallId,
+      }));
+    },
+    finished: (job) => {
+      const owner = backgroundJobOwners.get(job.id);
+      backgroundJobOwners.delete(job.id);
+      log(schedulerLine("job.bg_end", {
+        id: job.id, unit: owner?.unitId ?? "-", tool: job.tool, ms: job.ms, error: job.isError, chars: job.text.length,
+      }));
+      const output = job.text.length > 3_000 ? `…${job.text.slice(-3_000)}` : job.text;
+      try {
+        addInbox(db, {
+          dedupScope: `lead-job:${job.id}`, severity: "attention", source: "structural",
+          summary: `你转到后台的作业 ${job.id}（${job.tool}：${job.command.slice(0, 160)}）${job.isError ? "出错结束" : "做完了"}，`
+            + `一共跑了 ${Math.round(job.ms / 1_000)} 秒。输出：\n${output || "（没有输出）"}`,
+          payload: {
+            kind: "lead_job_finished", jobId: job.id, error: job.isError, wakeLead: true, needsUser: false, routine: true,
+            resultLane: owner?.lane ?? 2, ...(owner?.unitId ? { unitId: owner.unitId } : {}),
+          },
+          lossless: true,
+        });
+      } catch (error) {
+        log(schedulerLine("job.bg_record_failed", { id: job.id, error: error instanceof Error ? error.message : String(error) }));
+      }
+    },
+  };
   // 两盏灯（lead 的 overflow.ts 和 red-line.ts，用户 2026-11-03）的状态和红线的阶段在调度器里（core.ts）。
   // 这里只留交接窗口的定时器：它是执行层的东西，到点时告诉调度器（handoff.timeout）。
   let handoffTimer: NodeJS.Timeout | null = null;
@@ -2157,10 +2194,10 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
   // 正在跑的这一轮带着外部内容（不是用户本人开的，或者插进了外部消息的原文）时，用户的消息等它结束后单独开一轮
   // （lead-tools-and-routing spec D16，user-placement.ts）：存进 carryOverTurns，这一轮结束时 dispatchLeadWork 先开它。
   // 界面显示「排队」。
-  function holdForOwnTurn(prompt: string, entry: ActiveChannelTurn): void {
+  function holdForOwnTurn(prompt: string, entry: ActiveChannelTurn, why = "the running turn read external content"): void {
     publishTurnStarted(entry, "queued", { placement: "queued" });
     carryOverTurns.push({ prompt, entry });
-    log(`user message ${entry.turn.id} waits for its own turn: the running turn read external content`);
+    log(`user message ${entry.turn.id} waits for its own turn: ${why}`);
   }
 
   // Lead 在做空闲车道的活（L4）时用户发来的消息：存进 carryOverTurns，叫那个 L4 单元让路。它结束时 dispatchLeadWork 先开这一轮。
@@ -2907,7 +2944,10 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       work: handoffs,
       budgetStatus: () => leadBudgetStatus(),
       yieldPoint: () => { sched.dispatch({ type: "yield.check", facts: budgetFacts(), stepP90Ms: stepP90Ms() }); },
+      // 这一步现在的状态（lead-scheduler spec D11，P3）：等模型等过了 30 秒，界面写「模型回复慢」，不再一律写「Thinking」。
+      stepStatus: (status) => publishLeadStep(status),
     },
+    backgroundJobs,
     handoff: {
       handoffs,
       forced: () => schedRedLinePhase(sched.state) === "handoff",
@@ -3429,6 +3469,9 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
         } else if (stoppedByAbort && yieldedToInput(sched.state)) {
           // 空闲车道的活（整理笔记）给新输入让了路（P4）：不是失败，这一轮就此结束，下一次空闲再接着做。
           log("lead idle work stopped: it yields to a new input");
+        } else if (stoppedByAbort && abortedForPreempt(sched.state)) {
+          // 用户本人的消息抢占了这一轮（lead-scheduler spec D4，P3）：不是失败。单元已经挂起，交接包存好了。
+          log("lead step stopped: the user's message preempted this unit");
         } else if (event.message.stopReason === "error" || event.message.stopReason === "aborted") {
           const rawError = String(
             event.message.errorMessage
@@ -4083,11 +4126,13 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       // 交回的结果在这个单元里（D12）：记一行，写明它是从哪个单元交出去的，plc sched trace 从原来的单元一路查到这里。
       for (const event of deliveredEvents) {
         const inner = event.payload.payload as Record<string, unknown> | undefined;
-        const of = typeof inner?.handoffUnit === "string" ? inner.handoffUnit : null;
+        const of = typeof inner?.handoffUnit === "string" ? inner.handoffUnit : typeof inner?.unitId === "string" ? inner.unitId : null;
         if (!of) continue;
         log(schedulerLine("result", {
           unit: sched.unit?.id ?? "-", of, pkg: typeof inner?.handoffPackage === "string" ? inner.handoffPackage : "-",
           ticket: typeof event.payload.itemId === "number" ? event.payload.itemId : "-", lane: `L${sched.unit?.lane ?? "-"}`,
+          // 转到后台的作业（P3，D6）的结果也一样记。
+          ...(typeof inner?.jobId === "string" ? { job: inner.jobId } : {}),
         }));
       }
       // 交接包的目标（H3）：用户的原话，或者交给这一轮的事和系统的说明。只进交接包，不进日志。
@@ -4290,7 +4335,8 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       );
       // 必须告诉用户的事（2026-10-19，例如 Lead 请求的重启完成了）：这一轮成功了，Lead 却一言不发（回了 NO_REPLY）。
       // 不允许静默：系统直接在会话里说。失败的一轮不在这里：事件还在游标后面，下一轮再交给 Lead。
-      if (succeeded && options.system && !outcome.voiced) {
+      // 被用户的消息抢占、挂起的单元不算：那些事在交接包里，Lead 恢复或交出去以后再说。
+      if (succeeded && options.system && !outcome.voiced && !abortedForPreempt(sched.state)) {
         for (const event of mustTell) tellUserDirectly(event);
       }
       if (digested) log(`digest: ${digested} event(s) digested`);
@@ -4306,9 +4352,11 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       // 单元结束（lead-scheduler spec D12）：关联编号用这一轮最后接文字的那一轮，结果按停下、被重启打断、断网、成败分。
       if (runTurnId) sched.dispatch({ type: "unit.turn", turnId: runTurnId });
       const unitOutcome: UnitOutcome = stoppedByUser(sched.state) ? "stopped" : interrupted ? "interrupted"
-        : yieldedToInput(sched.state) ? "yielded" : offline ? "offline" : succeeded ? "answered" : "failed";
+        : yieldedToInput(sched.state) ? "yielded" : abortedForPreempt(sched.state) ? "suspended"
+        : offline ? "offline" : succeeded ? "answered" : "failed";
       lastUnitOutcome = unitOutcome;
       handoffs.endUnit(unitId);
+      publishLeadStep(null);
       sched.closeUnit(unitOutcome);
       idleLane.unitClosed();
       publishLeadQueue();
@@ -5171,10 +5219,11 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     });
   }
 
-  // 交给这一轮的事件里，交接出去的工单交回的结果带着原来的车道（run-finished.ts 的 handoffLane）。没有时是 9（不提级）。
+  // 交给这一轮的事件里，交回的结果带着原来的车道：交接出去的工单（run-finished.ts 的 handoffLane）、转到后台的作业
+  // （resultLane）。没有时是 9（不提级）。
   function handoffLaneOf(event: EventRecord): number {
     const inner = event.payload.payload as Record<string, unknown> | undefined;
-    const lane = typeof event.payload.handoffLane === "number" ? event.payload.handoffLane : inner?.handoffLane;
+    const lane = typeof event.payload.handoffLane === "number" ? event.payload.handoffLane : inner?.handoffLane ?? inner?.resultLane;
     return typeof lane === "number" && Number.isInteger(lane) && lane >= 0 && lane <= 4 ? lane : 9;
   }
 
@@ -5356,6 +5405,19 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     const text = handed ? m.handedOff(handed.ticketId) : m.suspended(leadDisplayName(db));
     publishTurnText(tail, `${tail.assistantText.trim() ? "\n\n" : ""}${text}`);
     log(schedulerLine("confirm", { unit: unit.id, turn: tail.turn.id, by: "template", handedOff: handed ? handed.ticketId : "-" }));
+  }
+
+  // 这一步现在的状态推给界面（lead-scheduler spec D11）：只发给声明了 include=lead_step 的连接（protocol 的 gatewayEventOptIn）。
+  let leadStepShown = false;
+  function publishLeadStep(status: { kind: "model_slow"; since: number } | null): void {
+    if (!status && !leadStepShown) return;
+    leadStepShown = Boolean(status);
+    const turnId = activeChannelTurn?.turn.id ?? null;
+    log(schedulerLine("ui.step", { unit: sched.unit?.id ?? "-", turn: turnId ?? "-", status: status?.kind ?? "clear" }));
+    publishControlEvent({
+      type: "snapshot.required", requiredScope: "chat",
+      payload: { resource: LEAD_STEP_RESOURCE, status: status ? { turnId, kind: status.kind, since: new Date(status.since).toISOString() } : null },
+    });
   }
 
   // 每一步的预算状态（lead-scheduler spec D3）：一批工具做完以后附在最后一个结果后面。没有在做的单元时为 null。
@@ -5765,6 +5827,16 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       // Lead 在做空闲车道的活（整理笔记，L4）：用户的话不插进那一轮，那一轮在下一个让出点停下，用户的话马上单独开一轮
       // （lead-scheduler spec D1、D8，P4）。
       holdForIdleYield(prompt, { turn, assistantText: "", commandId: command.commandId });
+      return { mode: "queued", turnId: turn.id };
+    }
+    // 空闲车道（L4）的单元在上面让路；这里只剩 L1–L3。
+    // 抢占（lead-scheduler spec D4、D10，P3）：Lead 在做的不是用户的事（系统事件、外部消息，车道 L1–L3）时，用户本人的消息
+    // 不插进那一轮，也不排在它后面：调度器中止那一步（工具在跑时等到下一个让出点），单元挂起，这条消息马上开一轮只属于用户的。
+    // L0 的单元（用户自己的事、交回给用户的结果）照旧按忙时的放置方式。
+    if (sched.busy && sched.unit && sched.unit.lane > 0 && !sched.draining) {
+      holdForOwnTurn(prompt, { turn, assistantText: "", commandId: command.commandId }, `it preempts ${sched.unit.id}`);
+      sched.noteInput({ kind: "user", turnId: turn.id, placement: "preempt" });
+      sched.dispatch({ type: "preempt.request", by: turn.id, stage: sched.stage?.stage ?? null });
       return { mode: "queued", turnId: turn.id };
     }
     if (userMessagePlacement({ ...placementFacts(), followUp: mode === "followUp" }) === "own_turn_after") {

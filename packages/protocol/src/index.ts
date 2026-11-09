@@ -11,6 +11,7 @@ import {
   TicketReplyActionIdSchema,
 } from "./ticket-chat.ts";
 import { LEAD_QUEUE_OPT_IN, LEAD_QUEUE_RESOURCE } from "./lead-queue.ts";
+import { LEAD_STEP_OPT_IN, LEAD_STEP_RESOURCE } from "./lead-scheduler.ts";
 import { TurnPlacementSchema } from "./lead-follow-ups.ts";
 import { LEAD_ACTIVITY_OPT_IN, LEAD_ACTIVITY_RESOURCE } from "./lead-activity.ts";
 import { ReminderSettingsSchema } from "./reminders.ts";
@@ -1395,6 +1396,8 @@ export function gatewayEventOptIn(event: Pick<GatewayEvent, "type" | "payload">)
   if (event.type === "snapshot.required" && event.payload.resource === LEAD_ACTIVITY_RESOURCE) return LEAD_ACTIVITY_OPT_IN;
   if (event.type === "snapshot.required" && event.payload.resource === TICKET_REPLY_ACTIONS_RESOURCE) return TICKET_REPLY_ACTIONS_OPT_IN;
   if (event.type === "snapshot.required" && event.payload.resource === LEAD_QUEUE_RESOURCE) return LEAD_QUEUE_OPT_IN;
+  // 这一步现在的状态（模型回复慢，lead-scheduler spec D11）：只发给声明了 include=lead_step 的连接，理由同上。
+  if (event.type === "snapshot.required" && event.payload.resource === LEAD_STEP_RESOURCE) return LEAD_STEP_OPT_IN;
   return null;
 }
 

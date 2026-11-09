@@ -79,6 +79,17 @@ describe('the collapsed line', () => {
   });
 });
 
+// lead-scheduler spec D11（P3）：等模型等过了 30 秒，还在想的这一轮写调用方给的一句（「模型回复慢」），不写「Thinking」。
+describe('the running title', () => {
+  it('replaces "Thinking" while the model is slow, and leaves a running tool alone', () => {
+    expect(taskCardSummary({ status: 'thinking', steps: [], durationMs: 45_000, runningTitle: '模型回复慢' }))
+      .toEqual({ tone: 'running', title: '模型回复慢', detail: null, time: '45 s' });
+    const steps = [tool('a', 'query_tickets', { stage: 'review' }, { state: 'running' })];
+    expect(taskCardSummary({ status: 'working', steps, runningTitle: '模型回复慢' }).title).toBe('query_tickets');
+    expect(taskCardSummary({ status: 'thinking', steps: [], runningTitle: null }).title).toBe('Thinking');
+  });
+});
+
 describe('grouping', () => {
   it('groups consecutive calls of the same tool, and nothing else', () => {
     const items = groupTaskSteps([

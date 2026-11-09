@@ -69,6 +69,8 @@ export interface ControlPlaneStoreState extends ControlPlaneData {
   upsertChannelCard(card: import('@pi-lead-child/protocol').ChannelCardDto): void;
   // Lead 忙时排着的外部消息（工单 10）：推送和接口的回答都是整份，整体替换。
   replaceLeadQueue(queue: import('@pi-lead-child/protocol').LeadQueue): void;
+  // 这一步现在的状态（模型回复慢，lead-scheduler spec D11）：推送是整份，整体替换；null 是撤掉。
+  replaceLeadStep(status: import('@pi-lead-child/protocol').LeadStepStatus | null): void;
   replaceInbox(view: InboxView): void;
   replaceProjectOverviews(overviews: ProjectOverview[]): void;
   replaceTimeline(timeline: TimelineResponse): void;
@@ -126,6 +128,7 @@ export function createInitialControlPlaneData(): ControlPlaneData {
     leadActivity: EMPTY_LEAD_ACTIVITY,
     channelCards: [],
     leadQueue: null,
+    leadStep: null,
     inboxView: null,
     projectOverviews: null,
     timeline: null,
@@ -274,6 +277,10 @@ export function createControlPlaneStore() {
     replaceLeadQueue: (queue) => {
       if (JSON.stringify(get().leadQueue) === JSON.stringify(queue)) return;
       set({ leadQueue: queue });
+    },
+    replaceLeadStep: (status) => {
+      if (JSON.stringify(get().leadStep) === JSON.stringify(status)) return;
+      set({ leadStep: status });
     },
     upsertChannelCard: (card) => {
       const current = get().channelCards;

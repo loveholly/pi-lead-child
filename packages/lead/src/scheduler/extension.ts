@@ -31,6 +31,9 @@ import { redLineGateExtension } from "../red-line.js";
 import type { LeadSchedulerRuntime, LeadStageInfo } from "./runtime.js";
 
 export const STAGE_A_WARN_MS = 10_000;
+// 等模型的第一段输出（B1、B2）等过这么久：记一条「模型回复慢」（D7、S8c）。这不算卡死，不中止。
+export const STAGE_B_SLOW_MS = 30_000;
+export const STAGE_B_SLOW_MS_ENV = "PLC_LEAD_MODEL_SLOW_MS";
 
 export interface LeadSchedulerExtensionOptions {
   // daemon 的日志（同步写）。不给时不写日志，只写会话文件。
@@ -40,6 +43,7 @@ export interface LeadSchedulerExtensionOptions {
   // 这一步在回答哪一轮（关联编号）。
   turnId?: () => string | null;
   stageAWarnMs?: number;
+  stageBSlowMs?: number;
   now?: () => number;
   // daemon 的调度器（runtime.ts）：单元编号、阶段、会话文件里的调度记录、阶段 A 超时的事件。不给时只记阶段。
   scheduler?: Pick<LeadSchedulerRuntime, "unit" | "noteStage" | "bindSessionRecorder" | "unbindSessionRecorder" | "noteStageSlow">;
@@ -56,6 +60,8 @@ export interface LeadSchedulerHooks {
   budgetStatus?: () => string | null;
   // 让出点：第 step 步就要开始（step ≥ 2）。
   yieldPoint?: (step: number) => void;
+  // P3：这一步现在的状态变了（D11）：等模型等过了 30 秒是 model_slow，有了第一段输出或者这一步结束时是 null。
+  stepStatus?: (status: { kind: "model_slow"; since: number } | null) => void;
 }
 
 export interface LeadStepTiming {
@@ -92,6 +98,7 @@ interface StepState {
   tools: Map<string, { name: string; startedAt: number }>;
   toolTimes: Array<{ name: string; ms: number; error: boolean }>;
   aWarned: boolean;
+  bSlow: boolean;
 }
 
 function field(value: number | null): number | string {
@@ -132,6 +139,15 @@ export function leadSchedulerExtension(options: LeadSchedulerExtensionOptions = 
       if (stageATimer) clearTimeout(stageATimer);
       stageATimer = null;
     };
+    // 模型回复慢（P3，D7 的 B2、S8c）：请求发出以后 slowMs 还没有第一段输出，记一条，带上已经等了多久。不中止：
+    // 经过代理时响应头要等模型想完才回（P0 的发现），B1 和 B2 一起算。
+    const envSlow = Number(process.env[STAGE_B_SLOW_MS_ENV]);
+    const slowMs = options.stageBSlowMs ?? (Number.isFinite(envSlow) && envSlow > 0 ? envSlow : STAGE_B_SLOW_MS);
+    let stageBTimer: ReturnType<typeof setTimeout> | null = null;
+    const clearStageBTimer = () => {
+      if (stageBTimer) clearTimeout(stageBTimer);
+      stageBTimer = null;
+    };
     const turnId = () => {
       try { return options.turnId?.() ?? null; } catch { return null; }
     };
@@ -156,6 +172,12 @@ export function leadSchedulerExtension(options: LeadSchedulerExtensionOptions = 
 
     const finishStep = (state: StepState) => {
       clearStageATimer();
+      clearStageBTimer();
+      // 这一步一直没等到输出就结束了（中止、出错）：界面上的「模型回复慢」撤掉。
+      if (state.bSlow) {
+        state.bSlow = false;
+        hook(() => options.hooks?.stepStatus?.(null));
+      }
       const end = now();
       const unit = unitId();
       const timing: LeadStepTiming = {
@@ -186,7 +208,7 @@ export function leadSchedulerExtension(options: LeadSchedulerExtensionOptions = 
       const state: StepState = {
         step: stepInRun, startedAt: now(), requestAt: null, responseAt: null, status: null,
         firstOutputAt: null, lastOutputAt: null, maxGapMs: 0, modelEndAt: null, stop: null,
-        tools: new Map(), toolTimes: [], aWarned: false, toolCalls: 0,
+        tools: new Map(), toolTimes: [], aWarned: false, bSlow: false, toolCalls: 0,
       };
       current = state;
       stage(state, "A");
@@ -214,6 +236,21 @@ export function leadSchedulerExtension(options: LeadSchedulerExtensionOptions = 
       state.requestAt = now();
       stage(state, "B1");
       clearStageATimer();
+      clearStageBTimer();
+      stageBTimer = setTimeout(() => {
+        stageBTimer = null;
+        if (current !== state || state.firstOutputAt !== null || state.requestAt === null) return;
+        state.bSlow = true;
+        const waited = now() - state.requestAt;
+        const unit = unitId();
+        const where = state.responseAt === null ? "B1" : "B2";
+        log(`[sched] stage.slow stage=B${unit !== undefined ? ` unit=${unit ?? "-"}` : ""} run=${run} step=${state.step} turn=${turnId() ?? "-"} at=${where} waitedMs=${waited} thresholdMs=${slowMs} model_slow=true stall=false`);
+        record({ kind: "stage_slow", stage: "B", at: new Date().toISOString(), run, step: state.step, waitedMs: waited, where });
+        if (unit) scheduler?.noteStageSlow({ unitId: unit, turnId: turnId(), stage: "B", step: state.step, waitedMs: waited, thresholdMs: slowMs, where });
+        const since = state.requestAt;
+        hook(() => options.hooks?.stepStatus?.({ kind: "model_slow", since }));
+      }, slowMs);
+      stageBTimer.unref?.();
       const a = state.requestAt - state.startedAt;
       if (state.aWarned || a >= warnMs) {
         log(`[sched] stage.over stage=A run=${run} step=${state.step} turn=${turnId() ?? "-"} ms=${a} thresholdMs=${warnMs} ${hostLoad()}`);
@@ -235,6 +272,12 @@ export function leadSchedulerExtension(options: LeadSchedulerExtensionOptions = 
       const at = now();
       if (state.firstOutputAt === null) {
         state.firstOutputAt = at;
+        clearStageBTimer();
+        if (state.bSlow && state.requestAt !== null) {
+          log(`[sched] stage.over stage=B run=${run} step=${state.step} turn=${turnId() ?? "-"} ms=${at - state.requestAt} thresholdMs=${slowMs}`);
+          state.bSlow = false;
+          hook(() => options.hooks?.stepStatus?.(null));
+        }
         stage(state, "C");
       } else if (state.lastOutputAt !== null) state.maxGapMs = Math.max(state.maxGapMs, at - state.lastOutputAt);
       state.lastOutputAt = at;
@@ -290,6 +333,7 @@ export function leadSchedulerExtension(options: LeadSchedulerExtensionOptions = 
 
     pi.on("session_shutdown", () => {
       clearStageATimer();
+      clearStageBTimer();
       scheduler?.unbindSessionRecorder(record);
     });
   };

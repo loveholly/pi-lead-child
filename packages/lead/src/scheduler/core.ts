@@ -23,6 +23,13 @@
 //   · 交接窗口里 Lead 调了 hand_off（handoff.made）：交出去了。窗口到时或者这一段结束时还没交，单元挂起（unit.suspend）：
 //     交接包存下来，下一轮由 Lead 决定，系统不替它派出子 agent。
 //
+// P3「抢占」（spec D4、D10，用户 2026-11-09 的决定 1）：用户本人的消息到达，正在跑的单元不是 L0（系统事件、外部消息、
+// 子 agent 交回的事）时：
+//   · Lead 在等模型（没有工具在跑）：中止这一步（abort preempt），单元挂起（H10），马上处理用户的消息；
+//   · 有工具在跑（写操作不能打断，D5）：记下「要抢占」，到下一个让出点（工具结果回来以后、下一次模型请求之前）再中止和挂起；
+//   · L0 的单元（用户自己的事、交回给用户的结果）不抢占：用户的消息按「忙时的放置方式」排队或插话。
+// 外部的人的消息永远不抢占用户的 L0 单元（P1）。
+//
 // 所有决定都写一条 [sched] 日志（D12）：决定了什么、为什么、依据的数字、单元编号和 turn id。不写消息原文。
 import type { WaitingConversation } from "../overflow.js";
 import { abortReasonText, type LeadAbortReason } from "./controller.js";
@@ -66,8 +73,8 @@ export interface ToolInFlight {
   write: boolean;
 }
 
-// yielded：空闲车道的单元给更高车道的输入让了路（P4）。
-export type UnitOutcome = "answered" | "failed" | "stopped" | "interrupted" | "offline" | "yielded";
+// yielded：空闲车道的单元给更高车道的输入让了路（P4）。suspended：用户本人的消息抢占了这个单元，单元挂起（P3）。
+export type UnitOutcome = "answered" | "failed" | "stopped" | "interrupted" | "offline" | "yielded" | "suspended";
 
 export interface UnitState {
   id: string;
@@ -101,6 +108,8 @@ export interface UnitState {
   segment: number;
   // 这个单元用 hand_off 交出去了：交接包编号（P2）。
   handedOff: string | null;
+  // 用户本人的消息要抢占这个单元，但当时有工具在跑：到下一个让出点再中止（P3）。by 是用户那一轮。
+  preemptPending: { by: string; at: number } | null;
 }
 
 export interface SchedulerState {
@@ -152,7 +161,9 @@ export type SchedulerEvent =
   // P2：让出点（一步的工具结果回来以后、下一次模型请求之前）。stepP90Ms：一步的 p90。
   | { type: "yield.check"; facts: BudgetFacts; stepP90Ms: number }
   // P2：Lead 用 hand_off 交出去了（packageId 是交接包）。
-  | { type: "handoff.made"; packageId: string; ticketId: number; entry: string };
+  | { type: "handoff.made"; packageId: string; ticketId: number; entry: string }
+  // P3：用户本人的消息（by 是那一轮）要抢占正在跑的单元。stage 是这一步现在的阶段（只为日志）。
+  | { type: "preempt.request"; by: string; stage: string | null };
 
 /** 要写进 events 表和会话文件的调度记录（D12）。payload 里只有编号、数字和种类。 */
 export type SchedulerRecordKind = "unit_started" | "unit_ended" | "decided" | "aborted" | "lane_changed" | "stage_slow"
@@ -176,7 +187,7 @@ export type SchedulerEffect =
   // 红线中断以后这一次 prompt 返回了：在同一个单元里送红线消息，并在 timeoutMs 以后发 handoff.timeout。
   | { type: "redline.handoff"; elapsedMs: number; waiting: WaitingEntry[]; timeoutMs: number }
   // P2：把这个单元挂起（H10）：交接包存下来，不需要模型调用。
-  | { type: "unit.suspend"; reason: "handoff_timeout" | "handoff_skipped" };
+  | { type: "unit.suspend"; reason: "handoff_timeout" | "handoff_skipped" | "preempt" };
 
 export interface SchedulerStep {
   state: SchedulerState;
@@ -206,6 +217,11 @@ export function abortedForRestart(state: SchedulerState): boolean {
 /** 空闲车道的单元给更高车道的输入让了路（P4）：这一步以 aborted 结束不是失败。 */
 export function yieldedToInput(state: SchedulerState): boolean {
   return state.unit?.aborts.some((reason) => reason.kind === "idle_yield") ?? false;
+}
+
+/** 用户本人的消息抢占了这个单元（P3）：这一步以 aborted 结束不是失败，单元挂起。 */
+export function abortedForPreempt(state: SchedulerState): boolean {
+  return state.unit?.aborts.some((reason) => reason.kind === "preempt") ?? false;
 }
 
 /** 这一步以 aborted 结束，是红线要求的（停下，或者交接超时）。 */
@@ -430,7 +446,7 @@ export function schedulerStep(state: SchedulerState, event: SchedulerEvent, now:
         id: event.id, lane: event.lane, source: event.source, origin: event.origin, turnId: event.turnId,
         openedAt: now, beganAt: null, budgetStartedAt: null, toolCalls: 0, totalToolCalls: 0, steps: 0,
         yellowReminded: false, secondReminded: false, queueNoticed: false, queueHeld: false, redLine: null, aborts: [],
-        tools: {}, segment: 1, handedOff: null,
+        tools: {}, segment: 1, handedOff: null, preemptPending: null,
       };
       const deadline = LANES[event.lane].firstResponseMs;
       return {
@@ -582,6 +598,10 @@ export function schedulerStep(state: SchedulerState, event: SchedulerEvent, now:
       };
     }
     case "yield.check": {
+      // 让出点：用户本人的消息在等着抢占（当时有工具在跑），现在中止这一步、挂起单元（P3）。
+      if (unit?.preemptPending && !unit.redLine && !state.draining && !unit.aborts.some((reason) => reason.kind === "preempt")) {
+        return preemptNow(state, unit.preemptPending.by, now, "yield_point", now - unit.preemptPending.at);
+      }
       // 让出点（D3、D4）：用掉的时间加上一步的 p90 会超过就地预算时，这一步不再开始，在这里停下，请 Lead 交接。
       if (!unit || state.draining || unit.budgetStartedAt === null || unit.redLine || event.facts.compacting) return { state, effects: [] };
       const elapsed = now - unit.budgetStartedAt;
@@ -626,5 +646,52 @@ export function schedulerStep(state: SchedulerState, event: SchedulerEvent, now:
         ],
       };
     }
+    case "preempt.request": {
+      if (!unit) return { state, effects: [] };
+      const fields = { ...unitFields(unit), by: event.by, stage: event.stage ?? "-" };
+      const skip = (reason: string): SchedulerStep => ({
+        state, effects: [{ type: "log", line: schedulerLine("decide", { ...fields, decision: "no_preempt", reason }) }],
+      });
+      // L0 单元是用户自己的事（或者交回给用户的结果）：不抢占，按忙时的放置方式。
+      if (unit.lane === 0) return skip("l0_unit");
+      if (state.draining) return skip("draining");
+      // 红线在停这一轮、请 Lead 交接：这一轮马上结束，用户的消息接着开一轮。
+      if (unit.redLine) return skip("red_line");
+      if (unit.aborts.some((reason) => reason.kind === "preempt")) return skip("already_preempted");
+      const running = Object.values(unit.tools);
+      if (running.length) {
+        // 工具在跑（写操作不能打断，D5）：到下一个让出点再中止。
+        if (unit.preemptPending) return skip("already_pending");
+        return {
+          state: withUnit(state, { ...unit, preemptPending: { by: event.by, at: now } }),
+          effects: [{ type: "log", line: schedulerLine("decide", {
+            ...fields, decision: "preempt_wait", reason: "tool", tool: running.map((tool) => tool.name).join(","),
+            write: running.some((tool) => tool.write),
+          }) }],
+        };
+      }
+      return preemptNow(state, event.by, now, "model");
+    }
   }
+}
+
+/** 抢占（P3）：中止这一步，单元挂起，交接包存下来（H10）。不需要模型调用。 */
+function preemptNow(state: SchedulerState, by: string, now: number, at: "model" | "yield_point", waitedMs?: number): SchedulerStep {
+  const unit = state.unit!;
+  const reason: LeadAbortReason = { kind: "preempt", by };
+  const elapsedMs = now - (unit.budgetStartedAt ?? unit.openedAt);
+  return {
+    state: withUnit(state, { ...unit, aborts: [...unit.aborts, reason], preemptPending: null }),
+    effects: [
+      { type: "log", line: schedulerLine("decide", {
+        ...unitFields(unit), decision: "preempt", by, at, elapsedMs, steps: unit.steps,
+        ...(waitedMs !== undefined ? { waitedMs } : {}),
+      }) },
+      { type: "record", kind: "decided", payload: {
+        unitId: unit.id, turnId: unit.turnId, lane: laneName(unit.lane), decision: "preempt", by, at, elapsedMs,
+      } },
+      ...abortEffects(unit, reason, now),
+      { type: "unit.suspend", reason: "preempt" },
+    ],
+  };
 }
