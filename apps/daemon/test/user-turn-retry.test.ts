@@ -222,9 +222,15 @@ function queueLead(options: { hold?: (message: string) => boolean; lateSteer?: b
   };
 }
 
-function blockerTicket(summary: string) {
+function blockerTicket(summary: string, payload?: Record<string, unknown>) {
   const itemId = createItem(db, { title: "迁移脚本", brief: "b", createdBy: "user" });
-  addInbox(db, { itemId, severity: "blocker", source: "structural", summary: `工单 #${itemId} ${summary}` });
+  addInbox(db, { itemId, severity: "blocker", source: "structural", summary: `工单 #${itemId} ${summary}`, ...(payload ? { payload } : {}) });
+}
+
+// 交回给用户的结果（lead-scheduler spec H6）：系统叫醒 Lead 的一轮，车道是 L0（handoffLane）。用户的消息不抢占 L0 的
+// 单元，按设置插进去或排队（D4）。L1–L3 的系统回合，用户的消息抢占它，不再插进去（P3）。
+function userResultTicket(summary: string) {
+  blockerTicket(summary, { handoffLane: 0 });
 }
 
 const deliveries = (stub: { delivered: string[] }, text: string) => stub.delivered.filter((entry) => entry.includes(text)).length;
@@ -264,7 +270,8 @@ describe("a message that arrives around a failing system turn", () => {
     expect(deliveries(stub, "探测窗口里发的")).toBe(1);
   });
 
-  it("reaches Lead once when it was steered into a turn that then failed because the network was down", async () => {
+  // P3：用户本人的消息抢占这一轮系统回合（L2），不插进去；那一轮随即因为断网失败。消息照样只送到 Lead 一次。
+  it("reaches Lead once when it preempts a system turn that then fails because the network was down", async () => {
     const net = network();
     const stub = queueLead({ hold: (message) => message.includes("系统检测到新的异常"), onHeldFailure: () => net.down() });
     const { send } = await start(stub as never, net);
@@ -281,13 +288,32 @@ describe("a message that arrives around a failing system turn", () => {
     expect(deliveries(stub, "插话的一条")).toBe(1);
   });
 
+  // 插话还会插进 L0 的系统回合（交回给用户的结果）：插进去以后那一轮因为断网失败，消息只送到 Lead 一次。
+  it("reaches Lead once when it was steered into a turn that then failed because the network was down", async () => {
+    const net = network();
+    const stub = queueLead({ hold: (message) => message.includes("系统检测到新的异常"), onHeldFailure: () => net.down() });
+    const { send } = await start(stub as never, net);
+    userResultTicket("后台 agent 交回了结果");
+    await vi.waitFor(() => expect(stub.held()).toBe(true));
+
+    const turnId = await send("插话的一条", "steer");
+    await pause(100);
+    stub.releaseHeld();
+    await vi.waitFor(() => expect(turn(turnId).state).toBe("queued"));
+    net.up();
+    await vi.waitFor(() => expect(turn(turnId).state).toBe("completed"), { timeout: 3_000 });
+    await pause(300);
+    expect(deliveries(stub, "插话的一条")).toBe(1);
+  });
+
+  // pi 在那一轮失败以后才受理插话（插话和失败赛跑）：只有 L0 的单元还会收插话，所以这一轮是交回给用户的结果。
   it("gets exactly one answer when Lead accepts the steer only after the turn failed", async () => {
     const net = network();
     const stub = queueLead({
       hold: (message) => message.includes("系统检测到新的异常"), lateSteer: true, onHeldFailure: () => net.down(),
     });
     const { send } = await start(stub as never, net);
-    blockerTicket("执行重试已耗尽");
+    userResultTicket("后台 agent 交回了结果");
     await vi.waitFor(() => expect(stub.held()).toBe(true));
 
     const turnId = await send("晚到的插话", "steer");
