@@ -86,10 +86,11 @@ describe("the stage timing of Lead's steps", () => {
     emit("turn_start", { turnIndex: 0, timestamp: clock });
     advance(50);
     emit("before_provider_request", { payload: {} });
-    advance(30_000);
+    // 等模型不到 30 秒：不到「模型回复慢」的时限（P3 的 B 阶段计时器），这里只看中止的步骤。
+    advance(20_000);
     emit("message_end", assistant("aborted"));
     emit("agent_end", {});
-    expect(lines).toEqual(["[sched] step run=1 step=1 turn=turn_a A=50 B1=- B2=- C=- stream=- tools=- total=30050 stop=aborted"]);
+    expect(lines).toEqual(["[sched] step run=1 step=1 turn=turn_a A=50 B1=- B2=- C=- stream=- tools=- total=20050 stop=aborted"]);
   });
 
   it("counts steps per run and starts again with each run", () => {

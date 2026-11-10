@@ -481,7 +481,8 @@ describe('control-plane client', () => {
     // include=ui_surfaces：选收 Lead 生成的富交互卡片（带 surface 的 lead.tool.updated，2026-10-15）。
     // include=reply_actions：选收工单回复的动作按钮有了判断结果（2026-10-19）。
     // include=lead_queue：选收 Lead 忙时排着的外部消息（工单 10）。
-    expect(urls).toEqual(['wss://daemon.test/plc/v1/paired/events?ticket=wst_once&protocol=2&after_seq=7&include=lead_health%2Cui_surfaces%2Clead_activity%2Creply_actions%2Clead_queue']);
+    // include=lead_step：选收 Lead 这一步的状态，比如「模型回复慢」（lead-scheduler P3，D7）。
+    expect(urls).toEqual(['wss://daemon.test/plc/v1/paired/events?ticket=wst_once&protocol=2&after_seq=7&include=lead_health%2Cui_surfaces%2Clead_activity%2Creply_actions%2Clead_queue%2Clead_step']);
     sockets[0].open();
     sockets[0].receive({
       type: 'hello.v2', protocolVersion: 2, serverTime: '2026-07-23T09:00:00.000Z',
