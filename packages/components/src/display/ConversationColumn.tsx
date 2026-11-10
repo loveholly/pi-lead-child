@@ -36,15 +36,30 @@ function useColumnGlide() {
     const laidOut = () => (node.offsetParent === parent
       ? parent.getBoundingClientRect().left + parent.clientLeft + node.offsetLeft
       : node.getBoundingClientRect().left);
+    // 判断「换了位置」用的位置：沿 offsetParent 一路加 offsetLeft，完全不含 transform。
+    // laidOut() 里的 getBoundingClientRect 带着外层容器动画的位移：会话栏的布局动画（LayoutTransition）
+    // 刚开始时量到的值不是排好版的位置，动画播完时又没有尺寸变化来更新它。以前下一次只是变高（发了一条消息），
+    // 就把这段旧的差值当成移动，整列又滑一次（2026-11-10）。
+    const layoutLeft = () => {
+      let x = 0;
+      for (let el: HTMLElement | null = node; el; el = el.offsetParent as HTMLElement | null) {
+        x += el.offsetLeft + ((el.offsetParent as HTMLElement | null)?.clientLeft ?? 0);
+      }
+      return x;
+    };
     // 开始观察时浏览器先通知一次当前尺寸，那一次只记位置。
     let left: number | null = null;
+    let laidOutLeft: number | null = null;
     let glide: Animation | null = null;
     const observer = new ResizeObserver(() => {
       const next = laidOut();
       const previous = left;
       left = next;
+      const nextLayout = layoutLeft();
+      const previousLayout = laidOutLeft;
+      laidOutLeft = nextLayout;
       // 父级只是变高了（来了新消息），位置没变：正在播的动画接着播。
-      if (previous === null || Math.abs(next - previous) < 0.5) return;
+      if (previous === null || previousLayout === null || Math.abs(nextLayout - previousLayout) < 0.5) return;
       // 上一段动画还没播完时，它还带着一段位移：从你现在看到的位置接着滑，不跳回去。
       const shift = node.getBoundingClientRect().left - next;
       glide?.cancel();

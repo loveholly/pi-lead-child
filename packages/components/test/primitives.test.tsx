@@ -107,12 +107,20 @@ describe('the conversation column moving with its pane', () => {
     const { ConversationColumn } = await import('../src');
     renderUI(<Box testID="pane"><ConversationColumn testID="column"><Text>回复</Text></ConversationColumn></Box>);
     const column = screen.getByTestId('column');
-    let left = 520;
-    column.getBoundingClientRect = () => ({ top: 0, bottom: 100, left, right: left + 700, width: 700, height: 100, x: left, y: 0, toJSON: () => ({}) });
+    // laidOut：排好版的位置（offsetLeft，不含 transform）。shift：外层容器的动画（会话栏的布局动画）带来的位移，
+    // 只出现在 getBoundingClientRect 里。
+    let laidOut = 520;
+    let shift = 0;
+    Object.defineProperty(column, 'offsetLeft', { configurable: true, get: () => laidOut });
+    column.getBoundingClientRect = () => {
+      const left = laidOut + shift;
+      return { top: 0, bottom: 100, left, right: left + 700, width: 700, height: 100, x: left, y: 0, toJSON: () => ({}) };
+    };
     const watching = observers.filter((entry) => entry.targets.includes(column.parentElement!));
     expect(watching.length).toBeGreaterThan(0);
-    const move = (to: number) => {
-      left = to;
+    const move = (to: number, paneShift = 0) => {
+      laidOut = to;
+      shift = paneShift;
       act(() => watching.forEach((entry) => entry.callback([], {} as ResizeObserver)));
     };
     // 开始观察时浏览器先通知一次当前尺寸：那一次不是移动。
@@ -141,6 +149,17 @@ describe('the conversation column moving with its pane', () => {
     const { animate, move } = await renderColumn();
     move(512);
     expect(animate).not.toHaveBeenCalled();
+  });
+
+  it('does not slide again when a block grows after the pane finished its own layout animation', async () => {
+    const { animate, move } = await renderColumn();
+    // 工单面板关上：会话栏变宽。会话栏自己的布局动画刚开始，这一刻量到的位置里还带着它的位移。
+    move(317, 150);
+    expect(animate).toHaveBeenCalledTimes(1);
+    // 会话栏的动画播完，位移归零，尺寸没变，所以没有通知。之后发了一条消息，块变高：
+    // 列的位置没变，不能再滑一次。
+    move(317, 0);
+    expect(animate).toHaveBeenCalledTimes(1);
   });
 });
 
