@@ -801,7 +801,14 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       },
       runPrecipitation: () => runPrecipitation(),
       writeInFlight: () => Object.values(sched.unit?.tools ?? {}).find((tool) => tool.write)?.name ?? null,
-      yieldUnit: (by) => { sched.dispatch({ type: "idle.yield", by }); },
+      yieldUnit: (by) => {
+        // 会话不能中断（老的会话端口没有 abort）：让不了路。不记让路的决定，那一轮照常做完，排着的事等它结束（和以前一样）。
+        if (typeof session.abort !== "function") {
+          log(schedulerLine("idle.yield_skipped", { unit: sched.unit?.id ?? "-", reason: "cannot_abort" }));
+          return;
+        }
+        sched.dispatch({ type: "idle.yield", by });
+      },
       compact: (instructions) => {
         if (typeof session.compact !== "function") return Promise.reject(new Error("the session cannot compact"));
         return session.compact(instructions);

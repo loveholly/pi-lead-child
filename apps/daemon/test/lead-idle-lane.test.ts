@@ -39,15 +39,23 @@ const never = new Promise<void>(() => {});
 const has = (call: FakeCall, text: string) => call.inputs.some((input) => input.includes(text));
 const NOTES = "沉淀检查";
 
-async function boot(script: (call: FakeCall) => FakeReply | Promise<FakeReply>) {
+async function boot(script: (call: FakeCall) => FakeReply | Promise<FakeReply>, options: { noAbort?: boolean } = {}) {
   const logs: string[] = [];
   const lead = fakePiLead(script, {
     smartModel: scriptedSmartModel({ answers: { ask_kind: "other" } }),
     contextUsage: { window: 1_000, tokens: 750 },
   });
+  // noAbort：会话不能中断（老的会话端口没有 abort）。
+  const factory = options.noAbort
+    ? async (args: unknown) => {
+      const made = await lead.factory(args);
+      const { abort: _abort, ...session } = made.session;
+      return { ...made, session };
+    }
+    : lead.factory;
   daemon = await startDaemon({
     dataDir: dir, dbPath, log: (line: string) => { logs.push(line); }, notifyDesktop: () => {}, triageShadow: false,
-    sessionFactory: lead.factory as never,
+    sessionFactory: factory as never,
   });
   const owner = createLoopbackBinding(db, { name: "Mac 网页" });
   const http = async (path: string, body?: unknown) => {
@@ -128,6 +136,33 @@ describe("the idle lane: Lead's notes turn yields to new input", () => {
       "SELECT json_extract(payload, '$.outcome') AS outcome, json_extract(payload, '$.lane') AS lane FROM events WHERE kind = 'scheduler.unit_ended' ORDER BY seq",
     ).all() as Array<{ outcome: string; lane: string }>;
     expect(ended).toEqual(expect.arrayContaining([{ outcome: "yielded", lane: "L4" }, { outcome: "answered", lane: "L4" }]));
+  }, 30_000);
+
+  // 会话不能中断时，空闲车道让不了路：不记 idle_yield 的决定，那一轮也不算让过路（结局照实是 answered），
+  // 用户的话等它做完再单独开一轮（和以前一样）。以前（P4 的第一版）照样记「让路」并把那一轮记成 yielded，
+  // 整理笔记其实一直在跑。
+  it("does not claim a yield the session cannot do, and answers the user after the notes turn", async () => {
+    let finishNotes!: () => void;
+    const notesDone = new Promise<void>((resolve) => { finishNotes = resolve; });
+    let notesCalls = 0;
+    const { logs, say, turn } = await boot((call) => {
+      if (has(call, NOTES)) {
+        notesCalls += 1;
+        return notesCalls === 1 ? { say: [notesDone, "NO_REPLY"] } : { say: "NO_REPLY" };
+      }
+      return { say: "十点。" };
+    }, { noAbort: true });
+    await vi.waitFor(() => expect(notesCalls).toBe(1), { timeout: 5_000 });
+    const asked = await say("t1", "现在几点");
+    expect(asked.mode).toBe("queued");
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(turn(asked.turnId).state).toBe("queued");
+    expect(logs.some((line) => /^\[sched\] idle\.yield_skipped unit=unit_\w+ reason=cannot_abort$/u.test(line))).toBe(true);
+    expect(logs.some((line) => line.includes("decision=idle_yield"))).toBe(false);
+    finishNotes();
+    await vi.waitFor(() => expect(turn(asked.turnId).state).toBe("completed"), { timeout: 5_000 });
+    expect(logs.some((line) => /\[sched\] unit\.end unit=unit_\w+ lane=L4 .*outcome=answered/u.test(line))).toBe(true);
+    expect(logs.some((line) => /\[sched\] unit\.end .*outcome=yielded/u.test(line))).toBe(false);
   }, 30_000);
 
   it("also yields to an event Lead must handle, which then gets a turn of its own", async () => {

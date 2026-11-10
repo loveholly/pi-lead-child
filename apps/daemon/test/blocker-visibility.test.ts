@@ -46,7 +46,9 @@ afterEach(async () => {
 
 type Mode = "healthy" | "down";
 
-// 不调用模型的 Lead。整理笔记那一轮挂起，直到 releaseNotes()。contextFull：每一轮之后都会安排整理笔记。
+// 不调用模型的 Lead。整理笔记那一轮挂起，直到 releaseNotes()。contextFull：第一次 prompt 以后上下文水位在 90%
+// （之前 10%），每一轮之后都会安排整理笔记。空闲车道（lead-scheduler P4）在 Lead 空闲时整理：开头就 90% 的话，
+// daemon 一起来就会整理，不是这里要测的。这个会话没有 abort（不能中断）：整理笔记那一轮让不了路，照常做完。
 // hold：符合条件的那一轮挂起，直到 releaseHeld()；放开以后那一轮失败（模型返回 503），heldSucceeds 时成功。
 function stubLead(
   mode: Mode,
@@ -61,17 +63,19 @@ function stubLead(
   let releaseNotes: (() => void) | null = null;
   let releaseHeld: (() => void) | null = null;
   const emit = (event: unknown) => { for (const listener of listeners) listener(event); };
+  const usage = { input: 10, output: 0, cacheRead: 0 };
   const factory = async () => ({
     modelName: "stub/model",
     session: {
       sessionId: "stub-session",
       ...(options.contextFull ? {
         model: { contextWindow: 100 },
-        agent: { state: { messages: [{ role: "assistant", usage: { input: 90, output: 0, cacheRead: 0 } }] } },
+        agent: { state: { messages: [{ role: "assistant", usage }] } },
       } : {}),
       subscribe(listener: (event: any) => void) { listeners.push(listener); return () => {}; },
       async prompt(message: string) {
         prompts.push(message);
+        usage.input = 90;
         options.onPrompt?.(message);
         if (message.includes("沉淀检查")) await new Promise<void>((resolve) => { releaseNotes = resolve; });
         const held = options.hold?.(message) ?? false;
@@ -325,6 +329,10 @@ describe("a Lead turn that answers a blocker with NO_REPLY", () => {
 });
 
 describe("a note-keeping turn", () => {
+  // 空闲车道（lead-scheduler P4）缺省等 Lead 空闲 15 秒再整理笔记；这里不等。规则本身不变：整理笔记那一轮不灌、
+  // 不消费 inbox，那时来的 blocker 不 followUp 进去，整理完以后单独一轮。
+  beforeEach(() => { vi.stubEnv("PLC_LEAD_IDLE_GRACE_MS", "0"); });
+
   it("neither drains nor consumes the inbox, and gets no blocker follow-up", async () => {
     let attentionAdded = false;
     const lead = stubLead("healthy", {
