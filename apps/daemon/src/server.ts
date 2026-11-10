@@ -31,6 +31,7 @@ import {
 } from "@pi-lead-child/lead";
 import { isSummaryTokenCapError, leadCompactionInstructions, LEAD_COMPACTION_BUDGETS, type CompactionProgress } from "@pi-lead-child/lead";
 import { contextUsageLine, leadContextUsage, type LeadContextUsage } from "@pi-lead-child/lead";
+import { isInterruptedForSteer } from "@pi-lead-child/lead";
 import { userMessagePlacement } from "./user-placement.js";
 import { createLeadInput, defaultDigestBatch, isReminderFireEvent, leadEventRoute, type DigestBatchPolicy } from "./lead-input.js";
 import { compactionEndOutcome, createLeadHealthTracker, isEmptyLengthStop, leadContextFullError } from "./lead-health.js";
@@ -59,6 +60,7 @@ import { leadModelSpec, MODEL_SETTINGS_RESOURCE, parseLeadModelSpec, SETUP_RESOU
 import { connectLeadProviderKeys, ModelSettings } from "./model-settings.js";
 import { loadDecisionModels } from "./decision-models.js";
 import { isStopCommand, LEAD_AVATAR_RESOURCE, parseFairyEyeCommand } from "@pi-lead-child/protocol";
+import { CONVERSATION_TURN_INTERRUPTED_BY_STEER } from "@pi-lead-child/protocol";
 import type { ChannelHub, ChannelLookupCandidate, ChannelOwnerMessage } from "@pi-lead-child/engine";
 import {
   autoReplyDisclosure, disclosureAssistantName, disclosureOwnerName, fairyEyeReply, leadAvatarSlackEmoji, setLeadAvatarFairyEye,
@@ -960,6 +962,9 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     tools?: Map<string, { name: string; state: "running" | "done" | "failed"; result: string }>;
     // 用户在 Lead 忙时发来的消息怎么放的（工单 04，spec D6）：插话（steer）或排队（followUp）。
     placement?: "steer" | "followUp";
+    // 这一轮的回答写到一半被插话打断了（lead 的 step-interrupt.ts，2026-11-10）：已经写出的字留着，
+    // 收口时 lead.message.completed 带 interrupted="steer"，界面在字后面接「被你的插话打断」。
+    interruptedBySteer?: boolean;
   }
   // assistant 文本的"出水口"：lead 说的话流进哪一条 channel_turn（= 会话流里的哪个气泡）。
   let activeChannelTurn: ActiveChannelTurn | null = null;
@@ -969,9 +974,13 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
   // 迟到到"lead 真的又开口了"才改接，是为了不制造空气泡：插话之后一言不发就收尾时，
   // 原轮次保住已有文本，插话轮次停在 steered（前端渲染成一行提示，见 companion 的 steeredNotice）。
   let pendingSteerSink: ActiveChannelTurn | null = null;
-  // 打断式插话（interruptForSteer）刚中止了 Lead 这一步的模型请求：那一步以 stopReason=aborted 结束，不算失败。
+  // 打断式插话（interruptForSteer）刚中止了 Lead 这一步的模型请求。那一步怎样结束（lead 的 step-interrupt.ts）：
+  //   · 还没写字：stopReason=aborted，不算失败；
+  //   · 已经写出了字：一条正常结束的回答，带 interruptedBy="steer"（写出的字留在上下文里）。
   // 下一条助手消息结束时清掉（中止没赶上、这一步照常结束时也清掉）。
   let stepInterruptedForSteer = false;
+  // 上一条回答写到一半被插话打断了（上面第二种）：插话接过出水口时，交出去的那一轮收口时带上标记（handOverTo）。
+  let answerCutForSteer = false;
   // 交给 pi 排队、还没送到模型的用户消息（插话和排队消息），按交出去的先后（工单 04）。
   //   · 会话报告输入送到的时刻（message_start，role=user）时，按原文找到它，出水口改接给它（handOverTo）；
   //   · 这一轮失败时，pi 队列里还剩的据此找回它们的轮次（等那一次自动重试，或者给「重发」），
@@ -1319,7 +1328,11 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       type: "lead.message.completed", requiredScope: "chat",
       turnId: entry.turn.id,
       itemId: entry.turn.item_id ?? undefined,
-      payload: { messageId: `msg_${entry.turn.id}`, text: entry.assistantText },
+      // interrupted：回答写到一半被插话打断了（2026-11-10）。事件落在账本里，会话快照从这里读（include=interrupted）。
+      payload: {
+        messageId: `msg_${entry.turn.id}`, text: entry.assistantText,
+        ...(entry.interruptedBySteer ? { interrupted: CONVERSATION_TURN_INTERRUPTED_BY_STEER } : {}),
+      },
     });
     // 工单 agent 答完了这一轮：在后台判断回复下面要不要给动作按钮。不等它，回答已经送达。
     if (entry.turn.origin_kind.endsWith(":ticket-agent") && entry.turn.item_id !== null && entry.assistantText.trim()) {
@@ -2030,7 +2043,12 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
   function handOverTo(next: ActiveChannelTurn): void {
     settleSystemTurnBuffer();
     pendingSystemOrigin = null;
-    if (activeChannelTurn && activeChannelTurn !== next) closeHandedOver(activeChannelTurn, next);
+    if (activeChannelTurn && activeChannelTurn !== next) {
+      // 交出去的这一轮的回答写到一半被插话打断了：字照原样留着，收口时标上（界面接「被你的插话打断」）。
+      if (answerCutForSteer) activeChannelTurn.interruptedBySteer = true;
+      closeHandedOver(activeChannelTurn, next);
+    }
+    answerCutForSteer = false;
     activeChannelTurn = next;
   }
 
@@ -2152,8 +2170,9 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
   }
 
   // 插话前面的说明（用户 2026-11-09：「需要注意让 lead agent 不能遗漏打断前的任务」）。插话送进来时，Lead 正做到一半：
-  // 告诉它插话之前在做什么、这句话没改掉原来的事时要接着做完。打断式插话（interruptForSteer）中止的那半步不在上下文里，
-  // 上下文和在一步的边界插话一样，这段说明对两种插话都适用。原来的事是正在接文字的那一轮：用户的一轮是回答他前面那句话，
+  // 告诉它插话之前在做什么、这句话没改掉原来的事时要接着做完。打断式插话（interruptForSteer）中止的那一步：还没写字的不在上下文里，
+  // 和在一步的边界插话一样；写出了字的作为一条回答留在上下文里，lead 的 step-interrupt.ts 发给模型时在插话前面另加一段
+  // 「上一条回答被打断了」的说明。这段说明对几种插话都适用。原来的事是正在接文字的那一轮：用户的一轮是回答他前面那句话，
   // Lead 自己发起的一轮是处理叫醒它的事。不引用原话：原话就在上下文里，再抄一遍只会让两句话混在一起。
   function steerNote(): string {
     const current = activeChannelTurn;
@@ -2165,10 +2184,11 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     ].join("\n"));
   }
 
-  // 打断式插话（用户 2026-11-09，lead 的 step-interrupt.ts）：插话收进 pi 的队列以后，Lead 这一步的模型如果还在想
-  // （没写字、没调工具），就中止这一步的模型请求，pi 马上把插话送进去再想一次，不用等这一步想完、它调的工具跑完。
-  // 正在跑的工具、压缩不打断；/stop、红线、停机的时候不做。插话已经送到了（不在 queuedInputs 里）时也不做。
-  // 中止的那半步以 stopReason=aborted 结束：message_end 那里认出是这里要求的（stepInterruptedForSteer），不算失败。
+  // 打断式插话（用户 2026-11-09，lead 的 step-interrupt.ts）：插话收进 pi 的队列以后，Lead 这一步的模型如果还在想，
+  // 或者在写字、还没调工具（2026-11-10），就中止这一步的模型请求，pi 马上把插话送进去再请求一次，不用等这一步写完、它调的工具跑完。
+  // 正在跑的工具、在流的工具参数、压缩不打断；/stop、红线、停机的时候不做。插话已经送到了（不在 queuedInputs 里）时也不做。
+  // message_end 那里认出是这里要求的（stepInterruptedForSteer），不算失败：没写字的以 stopReason=aborted 结束；
+  // 写出了字的以一条正常结束、带 interruptedBy="steer" 的回答结束，字留在原来那一轮（answerCutForSteer）。
   // 工具在跑时（2026-11-10，.scratch/tool-occupancy/eval-2026-11-10.md）：能转后台的（免沙箱直接跑的 run_on_host、
   // 标了 read_only 的 bash）马上转后台，命令不停，这一步结束，插话马上送到。以前插话要等 20 秒的软时限，回答要 15–18 秒。
   // 有副作用、不能转后台的工具照旧等它做完。
@@ -3466,8 +3486,11 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
         // "This operation was aborted"，pi-ai 的 lazyStream 把准备阶段的失败一律记成 stopReason "error"，请求根本没发到上游
         // （2026-11-03：每次红线都记成模型失败，Lead 被判停摆，积压的事推给了用户）。daemon 自己要求的中断两种都认。
         const stoppedByAbort = event.message.stopReason === "aborted" || event.message.stopReason === "error";
-        // 打断式插话中止的那一步（interruptForSteer）：只在模型开始回答以后中止，pi-ai 记成 aborted。用过一次就清掉。
+        // 打断式插话中止的那一步（interruptForSteer）。用过一次就清掉。
+        //   · 还没写字：pi-ai 记成 aborted；
+        //   · 写出了字：lead 的 step-interrupt.ts 把它换成一条正常结束的回答，带 interruptedBy="steer"（cutForSteer）。
         const interruptedForSteer = stepInterruptedForSteer && event.message.stopReason === "aborted";
+        const cutForSteer = stepInterruptedForSteer && isInterruptedForSteer(event.message);
         stepInterruptedForSteer = false;
         if (interruptedForSteer) {
           // 不是失败：pi 接着把插话送进去再调一次模型（同一次运行），这一轮照常往下走。
@@ -3512,12 +3535,18 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
           // 界面标记从「已插入」改为「下一轮回答」（spec D6）。
           const calledTools = Array.isArray(event.message.content)
             && event.message.content.some((part: any) => part?.type === "toolCall");
+          if (cutForSteer) {
+            // 回答写到一半被插话打断（2026-11-10）：不是这一轮最后的回答，插话马上在同一次运行里送进去。
+            // 写出的字留在原来那一轮，插话接过出水口时那一轮收口并标上（handOverTo）。
+            answerCutForSteer = true;
+            log(`lead step cut for a steer after ${assistantMessageText(event.message).length} chars of text: the words stay, Lead reads the steer now`);
+          }
           // 红线以后 Lead 交接完了（这一段最后的回答）：工具限制解除，排着的消息照常答。
-          if (!calledTools && schedRedLinePhase(sched.state) === "handoff") {
+          if (!calledTools && !cutForSteer && schedRedLinePhase(sched.state) === "handoff") {
             sched.dispatch({ type: "handoff.done" });
             log("lead red line: hand-off done");
           }
-          if (!calledTools && inputDeliveryEvents) {
+          if (!calledTools && !cutForSteer && inputDeliveryEvents) {
             for (const input of queuedInputs) {
               if (input.kind !== "steer" || input.nextTurn) continue;
               input.nextTurn = true;
@@ -4392,6 +4421,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       pendingSteerSink = null;
       pendingSystemOrigin = null;
       systemTurnBuffer = null;
+      answerCutForSteer = false;
       streamingMessageText = "";
       activeTurnError = null;
       aishStream = null;

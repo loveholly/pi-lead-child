@@ -187,6 +187,7 @@ import {
   CHAT_IMAGES_CAPABILITY,
   CHAT_IMAGES_INCLUDE,
   CONVERSATION_ANSWER_STARTED_INCLUDE,
+  CONVERSATION_INTERRUPTED_INCLUDE,
   CHAT_PLACEMENT_CAPABILITY,
   ChatImageSchema,
   TicketAttachmentContentSchema,
@@ -1272,7 +1273,9 @@ export class ControlPlaneClient {
     const full = `tool_calls,surfaces,placement,${TICKET_REPLY_ACTIONS_INCLUDE}`;
     // 用户发的图片（include=images）总是先要：页面打开时快照在 hello.v2 之前就取了，那时还不知道 daemon 的能力。
     // 开始回答的时刻（include=answer_started，2026-11-09）也先要：旧 daemon 回 400，退回不带它的一档。
+    // 被插话打断的轮次（include=interrupted，2026-11-10）同样：旧 daemon 回 400，退回不带它的一档。
     const includes = [
+      `${full},${CHAT_IMAGES_INCLUDE},${CONVERSATION_ANSWER_STARTED_INCLUDE},${CONVERSATION_INTERRUPTED_INCLUDE}`,
       `${full},${CHAT_IMAGES_INCLUDE},${CONVERSATION_ANSWER_STARTED_INCLUDE}`,
       `${full},${CHAT_IMAGES_INCLUDE}`, full, 'tool_calls,surfaces,placement', 'tool_calls,surfaces',
     ];

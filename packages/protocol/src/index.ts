@@ -1026,11 +1026,19 @@ export const ConversationTurnSchema = StrictObject({
   // Lead 开始回答这一轮的时刻（include=answer_started 才有，有记录的轮次才有；2026-11-09）。
   // 排队、插话的消息发出以后要等别的轮次答完才开始回答：会话按它放 Lead 的回答和用户的这句话，回答的用时也从它算。
   answerStartedAt: Type.Optional(Type.String()),
+  // 这一轮的回答写到一半被打断了（include=interrupted 才有，被打断的轮次才有；2026-11-10）。
+  // steer：用户的插话打断了它，已经写出的字照原样留着，界面在后面接「被你的插话打断」（设计规范 P10.2）。
+  interrupted: Type.Optional(Type.Literal("steer")),
 });
 export type ConversationTurn = Static<typeof ConversationTurnSchema>;
 
 // GET /v1/conversation/turns 的 include 取值：每一轮带上开始回答的时刻（answerStartedAt）。旧 daemon 不认识，回 400。
 export const CONVERSATION_ANSWER_STARTED_INCLUDE = "answer_started";
+
+// GET /v1/conversation/turns 的 include 取值：被打断的轮次带上 interrupted（2026-11-10）。旧 daemon 不认识，回 400。
+// 这一轮收口时 daemon 发的 lead.message.completed 的 payload 也带同一个 interrupted（事件的 payload 校验是开放的）。
+export const CONVERSATION_INTERRUPTED_INCLUDE = "interrupted";
+export const CONVERSATION_TURN_INTERRUPTED_BY_STEER = "steer";
 
 // 会话里两轮的先后：和 daemon 的快照一样按 (createdAt, id) 排（store 的 listTurns）。客户端按它合并分页和单轮校正。
 export function compareConversationTurns(

@@ -213,6 +213,12 @@ const TURN_ID_CHUNK = 400;
 // （payload.placement），它已经落在账本里；会话快照读它，「下一轮回答」刷新以后和实时看到的一样，不另外存一份。
 // 走 gateway_events_turn_type 索引。只给要的轮次（快照里还停在 steered 的几轮）。
 export function latestTurnStartedPayloads(db: Db, turnIds: readonly string[]): Map<string, Record<string, unknown>> {
+  return latestTurnEventPayloads(db, turnIds, "lead.turn.started");
+}
+
+// 每一轮最后一条某种事件的 payload，按轮次 id。读不懂的 payload 当作没有。
+// 例如 lead.message.completed：回答写到一半被插话打断的轮次，收口时 payload 带 interrupted（2026-11-10）。
+export function latestTurnEventPayloads(db: Db, turnIds: readonly string[], eventType: string): Map<string, Record<string, unknown>> {
   const ids = [...new Set(turnIds)];
   const byTurn = new Map<string, Record<string, unknown>>();
   for (let start = 0; start < ids.length; start += TURN_ID_CHUNK) {
@@ -221,10 +227,10 @@ export function latestTurnStartedPayloads(db: Db, turnIds: readonly string[]): M
       `SELECT g.turn_id, g.payload FROM gateway_events g
        JOIN (
          SELECT turn_id, MAX(seq) AS seq FROM gateway_events
-         WHERE turn_id IN (${chunk.map(() => "?").join(",")}) AND event_type = 'lead.turn.started'
+         WHERE turn_id IN (${chunk.map(() => "?").join(",")}) AND event_type = ?
          GROUP BY turn_id
        ) latest ON latest.seq = g.seq`,
-    ).all(...chunk) as Array<{ turn_id: string; payload: string }>;
+    ).all(...chunk, eventType) as Array<{ turn_id: string; payload: string }>;
     for (const row of rows) {
       try {
         const payload: unknown = JSON.parse(row.payload || "{}");

@@ -152,6 +152,32 @@ describe('a message Lead answered together with the next one', () => {
   });
 });
 
+// 2026-11-10：Lead 正在写长文时你插话，它马上停下来答你（lead 的 step-interrupt.ts）。写出的那一段照原样留着，
+// 后面接一个琥珀虚线胶囊「被你的插话打断」（设计规范 P10.2，主题 11.7 的接尾），不是失败卡片，也没有「重发」。
+describe('an answer that your steer interrupted', () => {
+  it('keeps the words Lead wrote and marks them as interrupted by your message', () => {
+    setup([
+      turn('turn-1', { state: 'completed', assistantText: 'A 的长文第一段。', interrupted: 'steer' }),
+      turn('turn-2', {
+        state: 'completed', userText: '写短一点', assistantText: '短版。',
+        createdAt: '2026-10-17T01:00:02.000Z', updatedAt: '2026-10-17T01:00:03.000Z',
+      }),
+    ]);
+    expect(screen.getByText('A 的长文第一段。')).toBeTruthy();
+    const tails = screen.getAllByTestId('interrupted-by-steer');
+    expect(tails).toHaveLength(1);
+    expect(tails[0]!.textContent).toBe('Interrupted by your message');
+    expect(screen.queryByTestId('failure-card')).toBeNull();
+    expect(screen.queryByText('Resend')).toBeNull();
+  });
+
+  it('shows no mark for an answer that was not interrupted, or from a daemon that does not say', () => {
+    setup([turn('turn-1', { state: 'completed', assistantText: '完整的回答。' })]);
+    expect(screen.getByText('完整的回答。')).toBeTruthy();
+    expect(screen.queryByTestId('interrupted-by-steer')).toBeNull();
+  });
+});
+
 describe('the composer while Lead is busy', () => {
   it('lets the user queue the message instead of steering it in', () => {
     const runtime = setup([], { busy: true, capabilities: [CHAT_PLACEMENT_CAPABILITY] });

@@ -57,7 +57,15 @@ async function start(lead: ReturnType<typeof fakePiLead>) {
     expect(result.success).toBe(true);
     return result.data as { turnId: string; mode: string };
   };
-  return { events, send, logs, hello: events.find((event) => event.type === "hello.v2") };
+  // 会话快照（GET /v1/conversation/turns），用这个配对的身份。
+  const turnsSnapshot = async (include: string) => {
+    const response = await fetch(`http://127.0.0.1:${daemon!.pairedPort}/v1/conversation/turns?include=${include}`, {
+      headers: { authorization: `Bearer ${issued.accessToken}` },
+    });
+    expect(response.status).toBe(200);
+    return (await response.json() as { items: Array<Record<string, unknown>> }).items;
+  };
+  return { events, send, logs, turnsSnapshot, hello: events.find((event) => event.type === "hello.v2") };
 }
 
 // 一条 tell 级的系统事件：要叫醒 Lead 的 blocker（默认分诊定成 tell）。
@@ -247,7 +255,8 @@ describe("scenario 2: B steers into the round that answers A", () => {
 
 // 打断式插话（用户 2026-11-09：「可以支持打断式插话，但是需要注意让 lead agent 不能遗漏打断前的任务」）。
 // 截图那天：Lead 还在想上一步，插话等了 2 分半才送到。现在模型还在想时，这一步的模型请求停下，插话马上送进去；
-// 插话前面有一段说明：插进来之前 Lead 在做什么，没改掉原来的事就要接着做完。正在跑的工具、已经写出来的字不打断。
+// 插话前面有一段说明：插进来之前 Lead 在做什么，没改掉原来的事就要接着做完。正在跑的工具不打断。
+// Lead 正在写字时也打断（2026-11-10 插话验收：「写短一点」要等 2000 字的长文写完）：写出的字留在原来那一轮，标上「被插话打断」。
 describe("interrupting Lead's unfinished step for a steer", () => {
   it("delivers the steer at once while the model is still thinking, with a note about the earlier task", async () => {
     const lead = fakePiLead(async (call) => {
@@ -304,24 +313,44 @@ describe("interrupting Lead's unfinished step for a steer", () => {
     expect(callWith(lead.calls, "问题 B")).toBe(1);
   });
 
-  it("does not interrupt once Lead has started writing its answer", async () => {
-    const holdA = deferred();
+  // 回归（2026-11-10 插话验收）：以前 Lead 写出了字就不打断，插话要等这一段写完。
+  it("cuts the answer Lead is writing: A keeps the words it got, marked as interrupted, and B is answered at once", async () => {
+    const never = new Promise<never>(() => {});
     const lead = fakePiLead(async (call) => {
       const input = call.inputs.join("\n");
-      if (input.includes("问题 A")) return { say: ["A 的回", holdA.promise, "答。"] };
-      if (input.includes("问题 B")) return { say: "B 的回答。" };
+      // A 的回答写了一段以后一直在写（不结束）：只有打断才能让 B 送到。
+      if (input.includes("问题 A")) return { say: ["A 的长文第一段。", never, "永远写不到这里。"] };
+      if (input.includes("问题 B")) return { say: "短版。" };
       return { say: "收到。" };
     }, { interruptible: true });
-    const { send } = await start(lead);
+    const { events, send, turnsSnapshot } = await start(lead);
 
     const a = await send("问题 A");
-    await vi.waitFor(() => expect(turn(a.turnId).assistant_text).toBe("A 的回"));
+    await vi.waitFor(() => expect(turn(a.turnId).assistant_text).toBe("A 的长文第一段。"));
     const b = await send("问题 B", "steer");
-    await pause(100);
-    expect(lead.interrupts()).toBe(0);
-    holdA.resolve();
-    await vi.waitFor(() => expect(turn(b.turnId)).toMatchObject({ state: "completed", assistant_text: "B 的回答。" }));
-    expect(turn(a.turnId)).toMatchObject({ state: "completed", assistant_text: "A 的回答。" });
+    expect(b.mode).toBe("steered");
+
+    await vi.waitFor(() => expect(turn(b.turnId)).toMatchObject({ state: "completed", assistant_text: "短版。" }));
+    expect(lead.interrupts()).toBe(1);
+    expect(lead.calls).toHaveLength(2);
+    expect(callWith(lead.calls, "问题 B")).toBe(1);
+    // A 留着已经写出的字，按完成收口：不是失败，也不是「和下一条一起回答」。
+    expect(turn(a.turnId)).toMatchObject({ state: "completed", error: null, assistant_text: "A 的长文第一段。" });
+    expect(userMessageOutcome(a.turnId)).toMatchObject({ outcome: "done" });
+    expect(events.some((event) => event.type === "notice.created")).toBe(false);
+    expect(events.some((event) => event.type === "lead.turn.failed")).toBe(false);
+    // 收口的事件带着「被插话打断」；B 的收口没有。
+    const completed = (turnId: string) => events.filter((event) => event.type === "lead.message.completed" && event.turnId === turnId).at(-1);
+    expect(completed(a.turnId).payload).toMatchObject({ text: "A 的长文第一段。", interrupted: "steer" });
+    expect(completed(b.turnId).payload.interrupted).toBeUndefined();
+    // B 马上送进了这一轮，没有被标成「下一轮回答」。
+    expect(events.some((event) => event.type === "lead.turn.started" && event.turnId === b.turnId && event.payload.placement === "next_turn")).toBe(false);
+    // 刷新以后一样：快照里 A 带 interrupted，B 不带；没要这个 include 的客户端拿不到这个字段（旧客户端严格校验）。
+    const withInterrupted = await turnsSnapshot("placement,interrupted");
+    expect(withInterrupted.find((item) => item.id === a.turnId)).toMatchObject({ interrupted: "steer", assistantText: "A 的长文第一段。" });
+    expect(withInterrupted.find((item) => item.id === b.turnId)!.interrupted).toBeUndefined();
+    const without = await turnsSnapshot("placement");
+    expect(without.find((item) => item.id === a.turnId)!.interrupted).toBeUndefined();
   });
 });
 

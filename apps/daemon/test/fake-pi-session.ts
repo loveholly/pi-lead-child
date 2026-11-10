@@ -11,6 +11,8 @@
 //   · abort()：中断正在等的回答，发 stopReason=aborted 的 message_end，等这次运行结束才返回。正在跑的工具不打断：
 //     这一批工具做完以后才以 aborted 结束（pi 等正在跑的工具做完）。
 //   · interruptStep()（interruptible 时才有）：只中止正在等的这一次回答，然后把排着的插话送进去、接着调模型（lead 的 step-interrupt.ts）。
+//     回答已经说了一段、在等下一段时也能中止（2026-11-10）：说出的那段作为一条正常结束的回答留下（stopReason=stop，
+//     interruptedBy="steer"），和 step-interrupt.ts 一样。
 // script 决定每一次调模型的回答。回答可以先说一段、等一个 Promise（测试在这时发消息）、再接着说。
 
 export interface FakeCall {
@@ -76,9 +78,10 @@ export interface FakePiLeadOptions {
   // 中断怎样结束（2026-11-03）：error 时发 stopReason=error、errorMessage「This operation was aborted」，和 pi-ai 的
   // lazyStream 在准备请求时被中断一样；throws 时再让这次 prompt 以这个错误失败。不给时是 stopReason=aborted。
   abortedAs?: "error" | "throws";
-  // 会话支持打断式插话（lead 的 step-interrupt.ts，2026-11-09）：interruptStep() 在模型还在想（脚本的回答还没定）时
+  // 会话支持打断式插话（lead 的 step-interrupt.ts）：interruptStep() 在模型还在想（脚本的回答还没定）时
   // 中止这一次调模型，发 stopReason=aborted 的 message_end，然后和 pi 一样把排着的插话送进去、再调一次模型（同一次运行）。
-  // 开始说话以后、跑工具时不中止，返回 false。
+  // 回答说了一段、在等下一段时（2026-11-10）：这一次以说出的那段结束（stopReason=stop，interruptedBy="steer"），
+  // 然后同样送插话、再调模型。跑工具时不中止，返回 false。
   interruptible?: boolean;
   // 和真的调度器 extension 一样叫 daemon 给的钩子（lead-scheduler spec P2，scheduler/extension.ts）：顶层工具的开始和结束报给
   // schedulerHooks.work；第二步起每次调模型前叫 schedulerHooks.yieldPoint（让出点）；一批工具做完时，把
@@ -105,6 +108,8 @@ export function fakePiLead(script: FakeScript, options: FakePiLeadOptions = {}) 
   let aborts = 0;
   // 正在等脚本回答的这一次调模型（还能被打断式插话中止），和被中止的次数。
   let thinking: { stop: () => void } | null = null;
+  // 正在说的这一次回答（说了一段、在等下一段）：也能被打断式插话中止。
+  let writing: { stop: () => void } | null = null;
   let interrupts = 0;
   let deps: any = {};
   const emit = (event: unknown) => { for (const listener of [...listeners]) listener(event); };
@@ -183,14 +188,35 @@ export function fakePiLead(script: FakeScript, options: FakePiLeadOptions = {}) 
       }
       const parts = reply.say === undefined ? [] : typeof reply.say === "string" ? [reply.say] : reply.say;
       let said = "";
+      let cut = false;
       for (const part of parts) {
         if (typeof part === "string") {
           said += part;
           emit({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: part } });
-        } else if (await waitOrAbort(part, aborted) === "aborted") {
+          continue;
+        }
+        let stopWriting!: () => void;
+        const stoppedWriting = new Promise<"cut">((resolve) => { stopWriting = () => resolve("cut"); });
+        writing = { stop: stopWriting };
+        const outcome = await Promise.race([waitOrAbort(part, aborted), stoppedWriting]);
+        writing = null;
+        if (outcome === "aborted") {
           endAborted();
           return;
         }
+        if (outcome === "cut") { cut = true; break; }
+      }
+      if (cut) {
+        // 和 step-interrupt.ts 一样：说出的字留下，作为一条正常结束的回答（没说字时按 aborted）；然后取插话，再调一次模型。
+        emit({
+          type: "message_end",
+          message: said
+            ? { role: "assistant", stopReason: "stop", interruptedBy: "steer", content: [{ type: "text", text: said }] }
+            : { role: "assistant", stopReason: "aborted", content: [] },
+        });
+        const steered = takeSteering();
+        if (steered.length) { deliver(steered); continue; }
+        return;
       }
       const tools = (reply.tools ?? []).map((tool): FakeTool => (typeof tool === "string" ? { name: tool } : tool));
       emit({
@@ -245,9 +271,10 @@ export function fakePiLead(script: FakeScript, options: FakePiLeadOptions = {}) 
       reportsInputDelivery: true,
       ...(options.interruptible ? {
         interruptStep: () => {
-          if (!thinking) return false;
-          const current = thinking;
+          const current = thinking ?? writing;
+          if (!current) return false;
           thinking = null;
+          writing = null;
           interrupts += 1;
           current.stop();
           return true;

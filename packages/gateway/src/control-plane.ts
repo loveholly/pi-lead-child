@@ -42,7 +42,7 @@ import type {
   TicketUsage,
   TimelineResponse,
 } from "@pi-lead-child/protocol";
-import { foldTurnSurfaces, foldTurnToolCalls, isSystemTurnOrigin, LEAD_ACTIVITY_DISPOSITIONS, ticketNeedsUser, ticketTurn, type InboxView, type LeadActivityItem, type LeadActivityView, type LeadInterrupt, type ProjectOverview, type TicketTurn, type TurnPlacement } from "@pi-lead-child/protocol";
+import { CONVERSATION_TURN_INTERRUPTED_BY_STEER, foldTurnSurfaces, foldTurnToolCalls, isSystemTurnOrigin, LEAD_ACTIVITY_DISPOSITIONS, ticketNeedsUser, ticketTurn, type InboxView, type LeadActivityItem, type LeadActivityView, type LeadInterrupt, type ProjectOverview, type TicketTurn, type TurnPlacement } from "@pi-lead-child/protocol";
 import { toWireAttemptPurpose, toWireAttemptState } from "@pi-lead-child/core";
 import { createCoordinator } from "@pi-lead-child/engine";
 import { createWorkspaceActionService } from "@pi-lead-child/engine";
@@ -83,7 +83,7 @@ import { buildTimeline } from "./timeline.js";
 import { inboxSeenAt, latestBlockedReason, listLeadHandled } from "@pi-lead-child/store";
 import { getCheckpoint, listCheckpoints } from "@pi-lead-child/store";
 import { listConversationCardPage } from "@pi-lead-child/store";
-import { acknowledgeInterruptEvent, getTurn, latestTurnAnswerStarts, latestTurnStartedPayloads, listTurns, listTurnSurfaceEvents, listTurnToolEvents, userMessageOutcomes, type ChannelTurnRow, type PublishGatewayEventInput } from "@pi-lead-child/store";
+import { acknowledgeInterruptEvent, getTurn, latestTurnAnswerStarts, latestTurnEventPayloads, latestTurnStartedPayloads, listTurns, listTurnSurfaceEvents, listTurnToolEvents, userMessageOutcomes, type ChannelTurnRow, type PublishGatewayEventInput } from "@pi-lead-child/store";
 import { buildLeadActivityView, createLeadActivityPublisher, leadInterruptOf } from "./lead-activity.js";
 import { listChildren, listDependencies } from "@pi-lead-child/store";
 import { listInbox } from "@pi-lead-child/store";
@@ -1574,6 +1574,8 @@ type ConversationTurnQuery = {
   images?: boolean;
   // 用户的轮次带上开始回答的时刻（protocol 的 CONVERSATION_ANSWER_STARTED_INCLUDE，2026-11-09）。
   answerStarted?: boolean;
+  // 回答写到一半被插话打断的轮次带上 interrupted（protocol 的 CONVERSATION_INTERRUPTED_INCLUDE，2026-11-10）。
+  interrupted?: boolean;
 };
 
 // 快照里的一轮：按客户端要的 include 带上工具调用、卡片、放置方式、回复的动作和图片。
@@ -1607,6 +1609,13 @@ function conversationTurnsOf(db: Db, turns: ChannelTurnRow[], opts?: Conversatio
   const answerStarts = opts?.answerStarted
     ? latestTurnAnswerStarts(db, turns.filter((turn) => !isSystemTurnOrigin(turn.origin_kind)).map((turn) => turn.id))
     : null;
+  // 回答写到一半被插话打断（2026-11-10）：daemon 收口时发的 lead.message.completed 带 interrupted，已经落在账本里。
+  // 只看收口了的轮次（completed）：还在写、失败了的轮次没有这个结局。
+  const completions = opts?.interrupted
+    ? latestTurnEventPayloads(db, turns.filter((turn) => turn.state === "completed").map((turn) => turn.id), "lead.message.completed")
+    : null;
+  const interruptedOf = (turn: (typeof turns)[number]): { interrupted?: "steer" } =>
+    completions?.get(turn.id)?.interrupted === CONVERSATION_TURN_INTERRUPTED_BY_STEER ? { interrupted: "steer" } : {};
   const toolEvents = opts?.toolCallScopes
     ? listTurnToolEvents(db, turns.map((turn) => turn.id), { scopes: opts.toolCallScopes })
     : null;
@@ -1630,5 +1639,6 @@ function conversationTurnsOf(db: Db, turns: ChannelTurnRow[], opts?: Conversatio
     ...(replyActions?.has(turn.id) ? { replyActions: replyActions.get(turn.id)! } : {}),
     ...(imageRefs?.has(turn.id) ? { images: imageRefs.get(turn.id)! } : {}),
     ...(answerStarts?.has(turn.id) ? { answerStartedAt: answerStarts.get(turn.id)! } : {}),
+    ...interruptedOf(turn),
   }));
 }

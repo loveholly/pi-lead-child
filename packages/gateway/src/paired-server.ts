@@ -34,6 +34,7 @@ import {
   CHAT_IMAGES_CAPABILITY,
   CHAT_IMAGES_INCLUDE,
   CONVERSATION_ANSWER_STARTED_INCLUDE,
+  CONVERSATION_INTERRUPTED_INCLUDE,
   LEAD_AVATAR_CAPABILITY,
   CHAT_SEND_MAX_BYTES,
   ChatPlacementSchema,
@@ -2584,8 +2585,10 @@ export async function startPairedServer(
         const include = url.searchParams.getAll("include").flatMap((value) => value.split(",")).filter(Boolean);
         // ?include=images：用户的轮次带上发的图片（protocol 的 chat-images.ts）。
         // ?include=answer_started：用户的轮次带上 Lead 开始回答的时刻（2026-11-09，会话按它排 Lead 的回答）。
+        // ?include=interrupted：回答写到一半被插话打断的轮次带上 interrupted（2026-11-10）。
         const known = new Set([
           "tool_calls", "surfaces", "placement", TICKET_REPLY_ACTIONS_INCLUDE, CHAT_IMAGES_INCLUDE, CONVERSATION_ANSWER_STARTED_INCLUDE,
+          CONVERSATION_INTERRUPTED_INCLUDE,
         ]);
         if (include.some((value) => !known.has(value))) {
           throw new HttpError(400, "invalid_request", "invalid include");
@@ -2599,6 +2602,7 @@ export async function startPairedServer(
           ...(include.includes(TICKET_REPLY_ACTIONS_INCLUDE) ? { replyActions: true } : {}),
           ...(include.includes(CHAT_IMAGES_INCLUDE) ? { images: true } : {}),
           ...(include.includes(CONVERSATION_ANSWER_STARTED_INCLUDE) ? { answerStarted: true } : {}),
+          ...(include.includes(CONVERSATION_INTERRUPTED_INCLUDE) ? { interrupted: true } : {}),
         };
         // 会话打开时只取最近几轮，往上翻时取更早的，Lead 说完一句只取那一轮（2026-11-04）。旧客户端两个都不带，回答不变。
         // ?before=<一轮的 id>：排在它前面的最多 limit 轮，另带 hasMore。这一轮不存在时 404。

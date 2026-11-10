@@ -1,6 +1,6 @@
 import { Density } from '@pi-lead-child/components';
 import {
-  Box, Button, Card, ChatList, Column, ConversationColumn, Dot, Icon, IconButton, ImageThumbnail, KeyboardArea, LeadAvatar, MessageBubble, NoticeRow,
+  AbsenceTail, Box, Button, Card, ChatList, Column, ConversationColumn, Dot, Icon, IconButton, ImageThumbnail, KeyboardArea, LeadAvatar, MessageBubble, NoticeRow,
   Pressable, Row,
   Spacer,
   Text,
@@ -756,6 +756,11 @@ function ConversationMessage({
             taskVariant="inline"
           />
         </Column>
+      ) : null}
+      {/* 回答写到一半被你的插话打断（2026-11-10，设计规范 P10.2）：写出的字照原样留着，后面接一个琥珀虚线胶囊写原因。
+          你自己打断的，没有「重发」：Lead 在插话那一轮里接着做。 */}
+      {!user && hasContent && turn?.interrupted === 'steer' ? (
+        <AbsenceTail testID="interrupted-by-steer" text={m.steered.interruptedBySteer} />
       ) : null}
       {!user && activityIds?.length ? <TurnActivity ids={activityIds} /> : null}
       {!user && cardIds.map((cardId) => cardsById[cardId] ? (

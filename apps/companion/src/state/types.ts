@@ -179,6 +179,9 @@ export interface LeadTurnEntity {
   // 工单 agent 的这段回复在等你决定要不要做哪几个动作（2026-10-19，daemon 用 SmartModel 判断，快照里 include=reply_actions 才有）。
   // 没有判断过时没有这个字段。界面只显示其中工单现在确实能做的（TicketChatDock 的 replyActionButtons）。
   replyActions?: readonly TicketReplyActionId[];
+  // 这一轮的回答写到一半被你的插话打断了（2026-11-10，快照里 include=interrupted 才有）：已经写出的字照原样留着，
+  // 后面接「被你的插话打断」（设计规范 P10.2，主题 11.7 的接尾）。
+  interrupted?: ConversationTurn['interrupted'];
 }
 
 export interface MessageFailure {

@@ -28,8 +28,10 @@ export interface LeadEngineFactoryResult {
   // 会话把一条用户消息送进模型的上下文时发 message_start（role=user，内容是交给 steer、followUp 的原文），
   // 和 pi 一样（工单 04）。daemon 据此知道插话和排队消息什么时候送到。没有时 daemon 按 Lead 开口的时刻推断。
   reportsInputDelivery?: boolean;
-  // 打断式插话（step-interrupt.ts，2026-11-09）：这一步的模型还在想、没写字也没调工具时，中止这一步的模型请求，返回 true；
-  // 会话接着把排着的插话送进去再调一次模型，还在同一次 prompt 里。正在跑的工具和压缩不打断。没有时 daemon 只在一步的边界插话。
+  // 打断式插话（step-interrupt.ts，2026-11-09）：这一步的模型还在想（没写字也没调工具）时，中止这一步的模型请求，返回 true；
+  // 已经写出了字、还没调工具时（2026-11-10）也中止，写出的字作为一条正常结束、带 interruptedBy="steer" 的回答留下。
+  // 会话接着把排着的插话送进去再调一次模型，还在同一次 prompt 里。正在跑的工具、在流的工具参数和压缩不打断。
+  // 没有时 daemon 只在一步的边界插话。
   interruptStep?: () => boolean;
   // 这个会话的 SmartModel（smart-model.ts：Jev 优先，LLM 兜底；带决策日志和 decision_model.called 事件）。
   // daemon 也用它做别的快速判断：工单 agent 的回复在问你要不要做哪几个动作（ticket-reply-actions.ts），

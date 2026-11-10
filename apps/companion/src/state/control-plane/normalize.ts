@@ -416,6 +416,8 @@ function projectTurn(previous: ConversationProjection, sessionId: string, item: 
     ...(item.answeredWith === undefined ? {} : { answeredWith: item.answeredWith }),
     // 工单回复在问你要不要做的动作（2026-10-19，快照里 include=reply_actions 才有）。
     ...(item.replyActions === undefined ? {} : { replyActions: item.replyActions }),
+    // 回答写到一半被你的插话打断了（2026-11-10，快照里 include=interrupted 才有）。
+    ...(item.interrupted === undefined ? {} : { interrupted: item.interrupted }),
   };
   const userMessage: MessageEntity = {
     id: userMessageId,

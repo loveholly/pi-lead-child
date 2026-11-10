@@ -68,6 +68,8 @@ export const conversationMessages = defineMessages({
       queued: (name: string) => `In queue · ${name} answers it after this turn`,
       steeredIn: 'Steered in',
       nextTurnShort: 'Next turn',
+      // Lead 的回答写到一半被你的插话打断：接在已经写出的字后面（主题 11.7 的接尾，2026-11-10）。
+      interruptedBySteer: 'Interrupted by your message',
     },
     interrupt: {
       more: (count: number) => (count === 1 ? '1 more' : `${count} more`),
@@ -143,6 +145,7 @@ export const conversationMessages = defineMessages({
       queued: (name) => `排队中 · ${name} 答完这一轮后回答`,
       steeredIn: '已插入',
       nextTurnShort: '下一轮回答',
+      interruptedBySteer: '被你的插话打断',
     },
     interrupt: {
       more: (count) => `还有 ${count} 条`,
