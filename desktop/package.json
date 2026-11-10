@@ -17,5 +17,9 @@
     "electron-builder": "26.18.0",
     "esbuild": "0.28.2",
     "typescript": "7.0.2"
+  },
+  "overrides": {
+    "minimatch@^9": "^11.0.3",
+    "minimatch@^10": "^11.0.3"
   }
 }

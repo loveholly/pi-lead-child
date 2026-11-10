@@ -1,0 +1,14 @@
+diff --git a/node_modules/query-string/index.js b/node_modules/query-string/index.js
+index d45e67d..3268ba0 100644
+--- a/node_modules/query-string/index.js
++++ b/node_modules/query-string/index.js
+@@ -1,6 +1,8 @@
+ 'use strict';
+ const strictUriEncode = require('strict-uri-encode');
+-const decodeComponent = require('decode-uri-component');
++// decode-uri-component 0.5 is ESM-only: require() returns its namespace, so take the default export.
++const decodeUriComponentModule = require('decode-uri-component');
++const decodeComponent = typeof decodeUriComponentModule === 'function' ? decodeUriComponentModule : decodeUriComponentModule.default;
+ const splitOnFirst = require('split-on-first');
+ const filterObject = require('filter-obj');
+ 
