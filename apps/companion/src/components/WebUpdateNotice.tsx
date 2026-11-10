@@ -13,6 +13,7 @@ import { componentsMessages } from './components.messages';
 // compact：手机宽度的顶栏放不下整句，只写「有新版本」。
 // 桌面 App 有新版时（2026-11-04，state/shellUpdate.ts）同一个位置写新版本号和「更新」，盖过网页的提示：
 // 新版 App 带着新的网页。点了以后这里写下载进度、正在安装；失败时写原因和「重试」。
+// 原因带上 App 给的报错原文（例如 HTTP 404、stalled），用户能照着说出是哪种网络错误。
 export function WebUpdateNotice({ compact = false }: { compact?: boolean }) {
   const update = useWebUpdate();
   const app = useShellUpdate();
@@ -49,7 +50,7 @@ function AppUpdateNotice({ status, compact, onUpdate, onLater }: {
   }
   if (status.state === 'installing') return <NoticePill testID="app-update-notice" text={compact ? m.installingShort : m.installing} />;
   return (
-    <NoticePill testID="app-update-notice" text={m.failed[status.code]}>
+    <NoticePill testID="app-update-notice" text={status.detail ? m.failedWithReason(m.failed[status.code], status.detail) : m.failed[status.code]}>
       <Button label={m.retry} onPress={onUpdate} variant="link" tone="accent" size="xs" />
       {later}
     </NoticePill>

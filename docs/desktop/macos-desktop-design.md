@@ -335,6 +335,14 @@ App 菜单「卸载 Bytezard Lead…」（P1）调用 `ops.mjs desktop-uninstall
    - 2026-11-05 补充：macOS 按 bundle id 找 App 的图标（通知、Dock）。换好 App 以后，把它的修改时间改成现在，再用 `lsregister -f` 重新登记它（ditto 保留打包时的时间，IconServices 会当它没变）。新 App 删暂存目录以前，先用 `lsregister -u` 去掉旧 App 的登记。起因：换了 App 图标以后通知还是 Electron 的图标，LaunchServices 里记着 17 份同一个 bundle id 的 App（删掉的暂存副本、别的工作区打出的 App、挂着的旧 dmg）。
 5. App 菜单的「检查更新…」（用户 2026-11-05）：马上查一次，用对话框说结果。有新版时对话框给「更新」和「以后」，「更新」和网页里的是同一个动作；点过「明天再提醒」的版本也再提示。已经是最新版、查不了（没网）、不知道从哪里取更新时，各写一句。
 6. 本机验证时用 `BYTEZARD_UPDATE_URL` 换掉 manifest 和 dmg 的地址（只收 https，或者 127.0.0.1、localhost 上的 http）。
+7. 2026-11-10 补充：下载和替换出错后的处理。
+   - 起因：一台 1.1.3 的 App 在 1.1.6 是最新版时查过一次，记下了 1.1.6。1.2.0 发布以后点「更新」，它请求 `releases/latest/download/bytezard-lead-1.1.6-arm64.dmg`。GitHub 把这个地址转到 v1.2.0 的 release，那里没有这个文件，所以回 404。重试不重新检查，所以每次都 404。
+   - 下载地址固定到这个版本自己的 release：`releases/download/v<版本>/<文件>`。manifest 照旧从 `releases/latest/download/manifest.json` 取，旧 App 读的也是这个地址。
+   - 点「更新」时，如果上次检查已经过了 10 分钟，先重新查一次 manifest，直接装最新的版本。下载回 404 时，也重新查一次。
+   - 下载先写到 `<dmg>.partial`。断了以后带 `Range` 接着下；服务器不按 Range 回时，从头下。网络出错、卡住或者 5xx 时自动重试 3 次，间隔 2 s、5 s、15 s。下完以后再算整份文件的 SHA-256。App 重开时，还要装的版本的 `.partial` 留着。
+   - 60 s 没收到数据就算卡住：中止这次请求，原因写 `stalled`。
+   - 网页顶栏的失败提示后面接上原因的原文，例如 `HTTP 404`。
+   - 每次更新先删掉以前留下的 `.bytezard-lead-update-*` 暂存目录，再用一个带随机后缀的新目录。删不掉的旧目录只记日志，不挡更新。删除时遇到 `ENOTEMPTY` 这类偶发错误会重试。
 
 代码在 `desktop/src/updater.ts`；网页那一侧在 `apps/companion/src/state/shellUpdate.ts`。这个按钮调的是 App 壳，不是 daemon，所以 Lead 现在不能替用户点它（第 7.3 节的「检查更新」「更新」操作还没做）。
 

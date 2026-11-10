@@ -16,6 +16,8 @@ export const componentsMessages = defineMessages({
       installing: 'Installing the update. The app opens again when it is done.',
       installingShort: 'Installing the update',
       retry: 'Try Again',
+      // 失败的那句话后面接上 App 给的原因（报错原文，例如 HTTP 404）。
+      failedWithReason: (message: string, reason: string) => `${message} Reason: ${reason}`,
       failed: {
         download_failed: 'The update did not download.',
         checksum_mismatch: 'The downloaded update is damaged.',
@@ -39,6 +41,7 @@ export const componentsMessages = defineMessages({
       installing: '正在安装更新，装好以后 App 会重新打开。',
       installingShort: '正在安装更新',
       retry: '重试',
+      failedWithReason: (message, reason) => `${message}原因：${reason}`,
       failed: {
         download_failed: '更新没有下载下来。',
         checksum_mismatch: '下载的更新文件损坏了。',

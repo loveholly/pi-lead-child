@@ -167,9 +167,13 @@ describe('the desktop app update', () => {
     shell.push({ state: 'installing', version: '1.4.0' });
     expect(screen.getByTestId('app-update-notice').textContent).toContain('Installing the update');
     shell.push({ state: 'failed', version: '1.4.0', code: 'checksum_mismatch', detail: 'got 3 bytes' });
-    expect(screen.getByTestId('app-update-notice').textContent).toContain('The downloaded update is damaged.');
+    expect(screen.getByTestId('app-update-notice').textContent).toContain('The downloaded update is damaged. Reason: got 3 bytes');
     fireEvent.click(screen.getByRole('button', { name: 'Try Again' }));
     expect(shell.value.apply).toHaveBeenCalledTimes(1);
+    // 下载卡住、404：提示里写出 App 给的原因。
+    shell.push({ state: 'failed', version: '1.4.0', code: 'download_failed', detail: 'stalled: no data for 60 s' });
+    expect(screen.getByTestId('app-update-notice').textContent).toContain('The update did not download. Reason: stalled: no data for 60 s');
+    expect(screen.getByRole('button', { name: 'Try Again' })).toBeTruthy();
   });
 
   it('leaves the web notice alone when the app has no update, and ignores a status it does not know', async () => {
