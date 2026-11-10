@@ -163,7 +163,9 @@ export type SchedulerEvent =
   // P2：Lead 用 hand_off 交出去了（packageId 是交接包）。
   | { type: "handoff.made"; packageId: string; ticketId: number; entry: string }
   // P3：用户本人的消息（by 是那一轮）要抢占正在跑的单元。stage 是这一步现在的阶段（只为日志）。
-  | { type: "preempt.request"; by: string; stage: string | null };
+  | { type: "preempt.request"; by: string; stage: string | null }
+  // 排着等抢占的用户消息都被取消了（P3 收尾）：不用再让，撤回等着的抢占。by 是最后取消的那一条。
+  | { type: "preempt.withdraw"; by: string };
 
 /** 要写进 events 表和会话文件的调度记录（D12）。payload 里只有编号、数字和种类。 */
 export type SchedulerRecordKind = "unit_started" | "unit_ended" | "decided" | "aborted" | "lane_changed" | "stage_slow"
@@ -671,6 +673,15 @@ export function schedulerStep(state: SchedulerState, event: SchedulerEvent, now:
         };
       }
       return preemptNow(state, event.by, now, "model");
+    }
+    case "preempt.withdraw": {
+      if (!unit?.preemptPending) return { state, effects: [] };
+      return {
+        state: withUnit(state, { ...unit, preemptPending: null }),
+        effects: [{ type: "log", line: schedulerLine("decide", {
+          ...unitFields(unit), decision: "preempt_withdrawn", by: event.by, waitedMs: now - unit.preemptPending.at,
+        }) }],
+      };
     }
   }
 }

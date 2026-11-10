@@ -102,6 +102,25 @@ describe("preempting a unit for the user's own message (D4, D10)", () => {
     expect(twice.of("unit.suspend")).toHaveLength(1);
   });
 
+  // P3 收尾：排着等抢占的用户消息都取消了，撤回等着的抢占；让出点照常往下做。
+  it("withdraws a pending preemption, and the yield point then lets the unit go on", () => {
+    const m = machine();
+    open(m, "system", "system:blocker");
+    m.send({ type: "tool.start", id: "w1", name: "bash", write: true, top: true, facts: facts() });
+    m.send({ type: "preempt.request", by: "turn_user", stage: "tool" });
+    m.advance(4_000);
+    m.send({ type: "preempt.withdraw", by: "turn_user" });
+    expect(m.logs().find((line) => line.includes("decision=preempt_withdrawn"))).toMatch(/by=turn_user waitedMs=4000/u);
+    m.send({ type: "tool.end", id: "w1" });
+    m.send({ type: "yield.check", facts: facts(), stepP90Ms: 19_000 });
+    expect(m.of("abort")).toEqual([]);
+    expect(m.of("unit.suspend")).toEqual([]);
+    // 没有等着的抢占时，撤回什么也不做。
+    const before = m.logs().length;
+    m.send({ type: "preempt.withdraw", by: "turn_user" });
+    expect(m.logs()).toHaveLength(before);
+  });
+
   it("closes a preempted unit as suspended", () => {
     const m = machine();
     open(m, "system", "system:blocker");

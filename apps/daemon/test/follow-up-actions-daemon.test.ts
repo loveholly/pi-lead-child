@@ -44,8 +44,8 @@ afterEach(async () => {
   vi.unstubAllEnvs();
 });
 
-async function start(lead: ReturnType<typeof fakePiLead>) {
-  daemon = await startDaemon({ dataDir: dir, dbPath, sessionFactory: lead.factory as never, log: () => {}, notifyDesktop: () => {} });
+async function start(lead: ReturnType<typeof fakePiLead>, logs: string[] = []) {
+  daemon = await startDaemon({ dataDir: dir, dbPath, sessionFactory: lead.factory as never, log: (line: string) => { logs.push(line); }, notifyDesktop: () => {} });
   const issued = redeemPairing(db, createPairing(db, { name: "app", kind: "companion", scopes: ["chat", "tickets:view"] }).code);
   const socket = new WebSocket(`ws://127.0.0.1:${daemon.pairedPort}/v1/paired/events?token=${issued.accessToken}&protocol=2&after_seq=-1`);
   sockets.push(socket);
@@ -210,6 +210,9 @@ describe("images of a queued follow-up", () => {
 describe("a follow-up held for a turn of its own", () => {
   // 2026-11-03 起（user-placement.ts）：用户本人开的一轮只读了连接、对话的结果时，追问照常排进 pi 的队列。
   // 要单独开一轮的是别的来历的一轮，所以这一轮由到点的跟进叫醒（和 user-message-external-turn-daemon.test.ts 一样）。
+  // P3（lead-scheduler spec D4、D5）起，用户本人的消息抢占这种不是 L0 的一轮：Lead 在等模型时马上开始，不再排着；
+  // 有命令在跑时（写操作不打断），消息排着等下一个让出点。排着的这段时间，状态栏照样列出它：插不进这一轮，能取消
+  // （AGENTS.md「UI Actions」：界面能点的，Lead 也能做，入口不能消失）。所以这一轮在跑一条命令。
   it("cannot be steered into a round that read external content, and can still be cancelled", async () => {
     const holdA = deferred();
     let read = false;
@@ -217,11 +220,12 @@ describe("a follow-up held for a turn of its own", () => {
       const input = call.inputs.join("\n");
       // 第一次调模型读了一个外部对话：这一轮算读过外部内容。
       if (input.includes("到点看一下 Slack 的 thread")) { read = true; return { tools: ["read_channel_conversation"] }; }
-      if (read && call.index === 1) { await holdA.promise; return { say: "A 的回答。" }; }
+      // 第二步跑一条命令，一直跑到 holdA。
+      if (read && call.index === 1) return { tools: [{ name: "bash", args: { command: "./sync-thread.sh" }, until: holdA.promise }] };
       if (input.includes("追问 B")) return { say: "不该回答 B。" };
       if (input.includes("追问 D")) return { say: "D 的回答。" };
       return { say: "收到。" };
-    });
+    }, { hooks: true });
     // 说明按用户选的语言写：这里选中文。
     updateDesignPreferences(db, { request: { locale: "zh" }, caller: { kind: "user" } });
     const { send, act, http } = await start(lead);
@@ -248,5 +252,37 @@ describe("a follow-up held for a turn of its own", () => {
     expect(callWith(lead.calls, "追问 B")).toBe(-1);
     expect(turn(b.turnId)).toMatchObject({ state: "steered", error: null, assistant_text: "" });
     expect(userMessageOutcome(b.turnId)).toMatchObject({ outcome: "cancelled" });
+  });
+
+  // 回归（P3 收尾，2026-11-10）：用户取消了排着等抢占的唯一一条消息，这一轮就不用让了。以前取消只拿掉了消息，
+  // 调度器照样在下一个让出点抢占：这一轮被挂起，之后还要叫醒 Lead 处理一个白白挂起的单元。
+  it("withdraws the preemption when the user cancels the only message that asked for it", async () => {
+    const holdA = deferred();
+    let read = false;
+    const lead = fakePiLead(async (call) => {
+      const input = call.inputs.join("\n");
+      if (input.includes("到点看一下 Slack 的 thread")) { read = true; return { tools: ["read_channel_conversation"] }; }
+      if (read && call.index === 1) return { tools: [{ name: "bash", args: { command: "./sync-thread.sh" }, until: holdA.promise }] };
+      if (read && call.index === 2) return { say: "thread 同步好了。" };
+      if (input.includes("追问 B")) return { say: "不该回答 B。" };
+      return { say: "收到。" };
+    }, { hooks: true });
+    const logs: string[] = [];
+    const { send, act } = await start(lead, logs);
+
+    addLeadFollowUp(db, { at: new Date(Date.now() - 1_000), note: "到点看一下 Slack 的 thread" });
+    await vi.waitFor(() => expect(lead.calls).toHaveLength(2), { timeout: 10_000 });
+    const b = await send("追问 B", { mode: "followUp" });
+    await vi.waitFor(() => expect(logs.some((line) => line.includes("decision=preempt_wait"))).toBe(true));
+
+    expect(await act("cancel", b.turnId)).toEqual({ status: 200, body: { turnId: b.turnId, placement: "cancelled" } });
+    expect(logs.find((line) => line.includes("decision=preempt_withdrawn"))).toMatch(new RegExp(`by=${b.turnId} .*waitedMs=\\d+`, "u"));
+    holdA.resolve();
+    // 这一轮照常做完，没有被抢占、没有挂起。
+    await vi.waitFor(() => expect(lead.calls.some((call) => call.index === 2)).toBe(true), { timeout: 5_000 });
+    await vi.waitFor(() => expect(logs.some((line) => line.startsWith("[sched] unit.end") && line.includes("outcome=answered"))).toBe(true), { timeout: 5_000 });
+    expect(logs.some((line) => line.includes("decision=preempt "))).toBe(false);
+    expect(logs.some((line) => line.startsWith("[sched] suspend "))).toBe(false);
+    expect(callWith(lead.calls, "追问 B")).toBe(-1);
   });
 });

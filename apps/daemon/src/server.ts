@@ -980,7 +980,8 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
   // 插进正在跑的这一轮的系统事件（interrupt 级）：原文 → 事件序号。这一轮结束时还在 pi 队列里的，不算交给了 Lead。
   const steeredEvents = new Map<string, number[]>();
   // 下一轮先答的用户消息：上一轮成功结束时还在 pi 队列里没送到的（见 queuedInputs）。一次一条，按先后。
-  const carryOverTurns: Array<{ prompt: string; entry: ActiveChannelTurn }> = [];
+  // preempts：这条消息排着是为了抢占正在跑的单元（P3），取消到一条不剩时撤回抢占。
+  const carryOverTurns: Array<{ prompt: string; entry: ActiveChannelTurn; preempts?: boolean }> = [];
   // 系统回合正在探网络（还没开始）时 sched.starting 为真：别的唤醒不再同时开一轮。
   // lead 自己发起的回合（blocker、即时通知、心跳、整理笔记）还没落成一轮时的来源。
   // 它在 lead 第一次开口或调工具时才落成一轮（materializeSystemTurn）：lead 一言不发就收尾时，
@@ -2194,9 +2195,11 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
   // 正在跑的这一轮带着外部内容（不是用户本人开的，或者插进了外部消息的原文）时，用户的消息等它结束后单独开一轮
   // （lead-tools-and-routing spec D16，user-placement.ts）：存进 carryOverTurns，这一轮结束时 dispatchLeadWork 先开它。
   // 界面显示「排队」。
-  function holdForOwnTurn(prompt: string, entry: ActiveChannelTurn, why = "the running turn read external content"): void {
+  function holdForOwnTurn(
+    prompt: string, entry: ActiveChannelTurn, why = "the running turn read external content", options: { preempts?: boolean } = {},
+  ): void {
     publishTurnStarted(entry, "queued", { placement: "queued" });
-    carryOverTurns.push({ prompt, entry });
+    carryOverTurns.push({ prompt, entry, ...(options.preempts ? { preempts: true } : {}) });
     log(`user message ${entry.turn.id} waits for its own turn: ${why}`);
   }
 
@@ -2367,6 +2370,8 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     if (held >= 0) {
       const [carried] = carryOverTurns.splice(held, 1);
       settleCancelledFollowUp(carried!.entry, by);
+      // 排着等抢占的消息一条不剩：这一轮不用再让（P3）。
+      if (carried!.preempts && !carryOverTurns.some((other) => other.preempts)) sched.dispatch({ type: "preempt.withdraw", by: turnId });
       return { turnId, placement: "cancelled" };
     }
     const target = piQueuedFollowUp(turnId);
@@ -5860,7 +5865,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     // 不插进那一轮，也不排在它后面：调度器中止那一步（工具在跑时等到下一个让出点），单元挂起，这条消息马上开一轮只属于用户的。
     // L0 的单元（用户自己的事、交回给用户的结果）照旧按忙时的放置方式。
     if (sched.busy && sched.unit && sched.unit.lane > 0 && !sched.draining) {
-      holdForOwnTurn(prompt, { turn, assistantText: "", commandId: command.commandId }, `it preempts ${sched.unit.id}`);
+      holdForOwnTurn(prompt, { turn, assistantText: "", commandId: command.commandId }, `it preempts ${sched.unit.id}`, { preempts: true });
       sched.noteInput({ kind: "user", turnId: turn.id, placement: "preempt" });
       sched.dispatch({ type: "preempt.request", by: turn.id, stage: sched.stage?.stage ?? null });
       return { mode: "queued", turnId: turn.id };
