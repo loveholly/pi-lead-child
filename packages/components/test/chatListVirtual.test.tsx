@@ -1,10 +1,10 @@
 // 聊天列表（ChatList）在量得出行高的地方用 Legend List，只画看得见的块（2026-11-04）。jsdom 量不出行高，
 // 这里用一个替身代替 Legend List：记下列表拿到的参数，按它的接口报告「跟着底部」「在底部」和行高的变化。
 import { act, fireEvent, render, screen } from '@testing-library/react';
-import { forwardRef, useImperativeHandle, type ReactNode } from 'react';
+import { forwardRef, useEffect, useImperativeHandle, useState, type ReactNode } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { ChatList, Text, UIProvider } from '../src';
+import { ChatList, TaskCard, Text, UIProvider, useKeepChatBlockInPlace } from '../src';
 
 // rerender 也要在组件库的根下（renderUI 只包第一次）。
 const renderUI = (element: Parameters<typeof render>[0]) => render(element, { wrapper: UIProvider });
@@ -16,8 +16,11 @@ const legend = vi.hoisted(() => {
     props: null as Record<string, any> | null,
     // 列表的滚动节点（web 上是一个 div）。缺省没有，像原生上一样。
     node: null as HTMLElement | null,
-    state: { isFollowingEnd: true, isAtEnd: true },
+    state: { isFollowingEnd: true, isAtEnd: true, distanceFromEnd: 0 },
     scrollToEnd: vi.fn(async () => {}),
+    // Legend List 的 cancelScroll 会停下贴底跟随。
+    cancelScroll: vi.fn(function cancelScroll(this: void) { legend.state.isFollowingEnd = false; }),
+    anchorVisibleContent: vi.fn((_options?: { key?: string }) => undefined),
     listeners,
     emit(name: 'isFollowingEnd' | 'isAtEnd', value: boolean) {
       this.state[name] = value;
@@ -25,9 +28,11 @@ const legend = vi.hoisted(() => {
     },
     reset() {
       this.props = null;
-      this.state = { isFollowingEnd: true, isAtEnd: true };
+      this.state = { isFollowingEnd: true, isAtEnd: true, distanceFromEnd: 0 };
       this.scrollToEnd.mockReset();
       this.scrollToEnd.mockImplementation(async () => {});
+      this.cancelScroll.mockClear();
+      this.anchorVisibleContent.mockClear();
       this.node = null;
       listeners.clear();
     },
@@ -49,7 +54,8 @@ vi.mock('@legendapp/list/react-native', () => ({
       }),
       scrollToEnd: legend.scrollToEnd,
       getScrollableNode: () => legend.node,
-      anchorVisibleContent: () => undefined,
+      cancelScroll: legend.cancelScroll,
+      anchorVisibleContent: legend.anchorVisibleContent,
     }));
     const data = props.data as unknown[];
     return (
@@ -315,5 +321,113 @@ describe('sending a message while you are at the bottom', () => {
     expect(view.node.scrollTop).toBe(400);
     expect(legend.scrollToEnd).not.toHaveBeenCalled();
     expect(screen.getByTestId('chat-new')).toBeTruthy();
+  });
+});
+
+// 会话里点消息头上的「N tools · 43 s」展开、再收起（2026-11-10 用户：收起时整个消息列表闪一下）。
+// Legend List 贴底跟随时，按下不锁定位置：卡片收起、内容变矮以后，它把列表重新贴底，而且比卡片晚几帧，
+// 先是卡片收起、底下空一截，接着整个列表往下跳。现在块在展开、收起之前告诉列表「这一块原地不动」。
+describe('opening and closing a tool card in a block', () => {
+  const mounts = new Map<string, number>();
+  const steps = [
+    { kind: 'tool' as const, id: 't1', name: 'bash', state: 'done' as const, args: '{"command":"ls"}', result: 'ok', error: null },
+    { kind: 'tool' as const, id: 't2', name: 'bash', state: 'done' as const, args: '{"command":"pwd"}', result: 'ok', error: null },
+  ];
+
+  // 和 AssistantTurnView 一样：消息头上的工具摘要，点它之前先让这一块原地不动。
+  function CardBlock({ id }: { id: string }) {
+    const [open, setOpen] = useState(false);
+    const keepInPlace = useKeepChatBlockInPlace();
+    useEffect(() => { mounts.set(id, (mounts.get(id) ?? 0) + 1); }, [id]);
+    return (
+      <TaskCard
+        testID={`card-${id}`}
+        variant="inline"
+        leading="Fairy · 17:04"
+        status="done"
+        steps={steps}
+        durationMs={43_000}
+        expanded={open}
+        onExpandedChange={() => { keepInPlace(); setOpen((value) => !value); }}
+      />
+    );
+  }
+
+  function CardList({ data }: { data: Block[] }) {
+    return (
+      <ChatList
+        testID="chat"
+        data={data}
+        keyExtractor={(item) => item.id}
+        renderItem={(item) => <CardBlock id={item.id} />}
+        bottomAligned={false}
+      />
+    );
+  }
+
+  let frames: FrameRequestCallback[] = [];
+  const nextFrame = () => { for (const callback of frames.splice(0)) act(() => callback(0)); };
+  beforeEach(() => {
+    mounts.clear();
+    frames = [];
+    vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => frames.push(callback));
+  });
+
+  it('keeps the block in place while following the bottom, and follows again once the list is back at the bottom', () => {
+    renderUI(<CardList data={[block('a'), block('b'), block('c')]} />);
+    const others = [screen.getByTestId('card-a-inline'), screen.getByTestId('card-c-inline')];
+    const toggle = screen.getByTestId('card-b-toggle');
+
+    // 展开：先停下贴底跟随，再锁住这一块，然后才展开。
+    fireEvent.click(toggle);
+    expect(legend.cancelScroll).toHaveBeenCalledTimes(1);
+    expect(legend.anchorVisibleContent).toHaveBeenCalledWith({ key: 'b' });
+    expect(legend.cancelScroll.mock.invocationCallOrder[0]!).toBeLessThan(legend.anchorVisibleContent.mock.invocationCallOrder[0]!);
+    expect(toggle.getAttribute('aria-expanded')).toBe('true');
+    // 展开以后内容比屏幕长了一截：不贴底，也不滚。
+    legend.state.distanceFromEnd = 38;
+    act(() => legend.props!.onItemSizeChanged({ size: 138, previous: 100, itemKey: 'b', index: 1 }));
+    nextFrame();
+    expect(legend.scrollToEnd).not.toHaveBeenCalled();
+
+    // 收起：已经不在跟随，只锁住这一块。
+    fireEvent.click(toggle);
+    expect(legend.cancelScroll).toHaveBeenCalledTimes(1);
+    expect(legend.anchorVisibleContent).toHaveBeenCalledTimes(2);
+    expect(legend.anchorVisibleContent).toHaveBeenLastCalledWith({ key: 'b' });
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+    // 收起以后又在底部：回到跟随（直接到底，不滚动）。
+    legend.state.distanceFromEnd = 0;
+    act(() => legend.props!.onItemSizeChanged({ size: 100, previous: 138, itemKey: 'b', index: 1 }));
+    nextFrame();
+    expect(legend.scrollToEnd).toHaveBeenCalledTimes(1);
+    expect(legend.scrollToEnd).toHaveBeenCalledWith({ animated: false });
+
+    // 其他块没有重新挂载：还是原来的节点，只挂载过一次。
+    expect([screen.getByTestId('card-a-inline'), screen.getByTestId('card-c-inline')]).toEqual(others);
+    expect(screen.getByTestId('card-a-inline')).toBe(others[0]);
+    expect(screen.getByTestId('card-c-inline')).toBe(others[1]);
+    expect(Object.fromEntries(mounts)).toEqual({ a: 1, b: 1, c: 1 });
+  });
+
+  it('only keeps the block in place while you read further up, and does not pull you to the bottom', () => {
+    legend.state = { isFollowingEnd: false, isAtEnd: false, distanceFromEnd: 400 };
+    renderUI(<CardList data={[block('a'), block('b'), block('c')]} />);
+    fireEvent.click(screen.getByTestId('card-a-toggle'));
+    expect(legend.cancelScroll).not.toHaveBeenCalled();
+    expect(legend.anchorVisibleContent).toHaveBeenCalledWith({ key: 'a' });
+    act(() => legend.props!.onItemSizeChanged({ size: 138, previous: 100, itemKey: 'a', index: 0 }));
+    nextFrame();
+    expect(legend.scrollToEnd).not.toHaveBeenCalled();
+  });
+
+  it('still opens and closes the card outside a chat list', () => {
+    renderUI(<CardBlock id="alone" />);
+    const toggle = screen.getByTestId('card-alone-toggle');
+    fireEvent.click(toggle);
+    expect(toggle.getAttribute('aria-expanded')).toBe('true');
+    fireEvent.click(toggle);
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+    expect(legend.anchorVisibleContent).not.toHaveBeenCalled();
   });
 });

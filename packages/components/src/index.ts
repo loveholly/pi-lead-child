@@ -38,7 +38,7 @@ export { KeyboardArea, Screen } from './primitives/Screen';
 export type { KeyboardAreaProps, ScreenProps } from './primitives/Screen';
 
 // 展示
-export { ChatList } from './display/ChatList';
+export { ChatList, useKeepChatBlockInPlace } from './display/ChatList';
 export type { ChatListProps } from './display/ChatList';
 export { Avatar } from './display/Avatar';
 export type { AvatarProps, AvatarTone } from './display/Avatar';

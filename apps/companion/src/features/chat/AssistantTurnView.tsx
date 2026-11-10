@@ -1,4 +1,4 @@
-import { Row, TaskCard, Text } from '@pi-lead-child/components';
+import { Row, TaskCard, Text, useKeepChatBlockInPlace } from '@pi-lead-child/components';
 import { Fragment, useMemo, type ReactNode } from 'react';
 import { useShallow } from 'zustand/react/shallow';
 
@@ -71,6 +71,12 @@ export function AssistantTurnView({
     .filter((key) => key.startsWith(stepPrefix))
     .map((key) => key.slice(stepPrefix.length))));
   const toggle = useWorkspaceStore((state) => state.toggleMessagePart);
+  // 展开、收起工具卡片时，这条消息在会话流里原地不动：上面的消息和滚动位置不变，只有卡片和它下面的内容变（ChatList）。
+  const keepInPlace = useKeepChatBlockInPlace();
+  const toggleInPlace = (key: string) => {
+    keepInPlace();
+    toggle(key);
+  };
 
   const inline = taskVariant === 'inline';
   return (
@@ -94,9 +100,9 @@ export function AssistantTurnView({
           steps={turn.card.steps}
           durationMs={turn.card.durationMs}
           expanded={expanded}
-          onExpandedChange={() => toggle(cardKey)}
+          onExpandedChange={() => toggleInPlace(cardKey)}
           expandedStepIds={expandedStepIds}
-          onStepExpandedChange={(stepId) => toggle(`${stepPrefix}${stepId}`)}
+          onStepExpandedChange={(stepId) => toggleInPlace(`${stepPrefix}${stepId}`)}
         />
       ) : null}
       {/* 回复和卡片按出现的先后排（buildAssistantTurn 的 body）。没有文字时也调一次 renderReply('')，和以前一样。 */}

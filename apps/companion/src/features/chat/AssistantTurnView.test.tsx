@@ -1,10 +1,11 @@
 // @vitest-environment jsdom
 // 会话里的一轮助手回复：任务卡在上，最后的回复在下；工具之间说的话在卡片里面。
 // 卡片展开以后，同一个页面上重新渲染还是展开的（展开状态记在 workspace store）。
-import { Text } from '@pi-lead-child/components';
+import { ChatList, Text } from '@pi-lead-child/components';
 import { foldTurnToolCalls, PROTOCOL_VERSION, type GatewayEvent } from '@pi-lead-child/protocol';
 import { act, fireEvent, screen } from '@testing-library/react';
-import { describe, expect, it, vi } from 'vitest';
+import { useEffect, type ReactNode } from 'react';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { renderUI } from '../../../test/render';
 import { CompanionRuntimeProvider } from '../../state/CompanionStateProvider';
@@ -18,6 +19,26 @@ import { AssistantTurnView } from './AssistantTurnView';
 vi.mock('expo-crypto', () => ({ getRandomBytesAsync: vi.fn(), digest: vi.fn(), CryptoDigestAlgorithm: {} }));
 // 消息里的工单卡片用 useOpenTicket 打开工单，它引入 expo-router。expo-router 在 jsdom 里也加载不了。
 vi.mock('expo-router', () => ({ useRouter: () => ({ push: vi.fn() }) }));
+
+// 会话流（ChatList）在浏览器里用 Legend List。jsdom 量不出行高，这里用替身：记下列表被要求停下跟随、锁住哪一块。
+const legend = vi.hoisted(() => ({
+  state: { isFollowingEnd: true, isAtEnd: true, distanceFromEnd: 0 },
+  cancelScroll: vi.fn(() => { legend.state.isFollowingEnd = false; }),
+  anchorVisibleContent: vi.fn((_options?: { key?: string }) => undefined),
+}));
+vi.mock('@legendapp/list/react-native', async () => {
+  const { forwardRef, useImperativeHandle } = await import('react');
+  return { LegendList: forwardRef(function FakeLegendList(props: Record<string, any>, ref) {
+    useImperativeHandle(ref, () => ({
+      getState: () => ({ ...legend.state, listen: () => () => {} }),
+      scrollToEnd: async () => {},
+      getScrollableNode: () => null,
+      cancelScroll: legend.cancelScroll,
+      anchorVisibleContent: legend.anchorVisibleContent,
+    }));
+    return <>{(props.data as unknown[]).map((item, index) => <div key={props.keyExtractor(item)}>{props.renderItem({ item, index }) as ReactNode}</div>)}</>;
+  }) };
+});
 
 const SESSION = 'lead-session';
 const TURN = 'turn-1';
@@ -314,5 +335,60 @@ describe('the time in the turn header', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+// 2026-11-10 用户：点「N tools · 43 s」展开、再收起，整个会话消息列表闪一下。应该只有这张卡片自己折叠，其他消息不动。
+// 会话流贴底跟随时，卡片收起、内容变矮以后，列表晚几帧才重新贴底：先是卡片收起，接着整个列表往下跳。
+// 现在展开、收起之前，这条消息让会话流把它留在原地（ChatList 的 useKeepChatBlockInPlace）。
+describe('opening and closing the tools in the conversation', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    legend.state = { isFollowingEnd: true, isAtEnd: true, distanceFromEnd: 0 };
+    legend.cancelScroll.mockClear();
+    legend.anchorVisibleContent.mockClear();
+  });
+
+  it('keeps the message in place and leaves the other messages mounted', () => {
+    vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} });
+    const mounts: string[] = [];
+    function Earlier() {
+      useEffect(() => { mounts.push('earlier'); }, []);
+      return <Text testID="earlier">更早的一条消息</Text>;
+    }
+    renderUI(
+      <CompanionRuntimeProvider runtime={runtimeWithTurn()}>
+        <ChatList
+          data={['earlier', ASSISTANT]}
+          keyExtractor={(key) => key}
+          renderItem={(key) => key === 'earlier' ? <Earlier /> : (
+            <AssistantTurnView messageId={ASSISTANT} messageState="completed" header="Fairy · 17:04" taskVariant="inline"
+              renderReply={(reply) => <Text testID="reply">{reply}</Text>} />
+          )}
+        />
+      </CompanionRuntimeProvider>,
+    );
+    const earlier = screen.getByTestId('earlier');
+    const toggle = screen.getByRole('button', { name: /1 tool/ });
+
+    fireEvent.click(toggle);
+    expect(toggle.getAttribute('aria-expanded')).toBe('true');
+    expect(legend.cancelScroll).toHaveBeenCalledTimes(1);
+    expect(legend.anchorVisibleContent).toHaveBeenLastCalledWith({ key: ASSISTANT });
+
+    // 卡片里一步的展开、收起也一样。
+    const step = screen.getAllByRole('button').find((button) => button !== toggle && button.getAttribute('aria-expanded') === 'false')!;
+    fireEvent.click(step);
+    expect(step.getAttribute('aria-expanded')).toBe('true');
+    expect(legend.anchorVisibleContent).toHaveBeenCalledTimes(2);
+
+    fireEvent.click(toggle);
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+    expect(legend.anchorVisibleContent).toHaveBeenCalledTimes(3);
+    expect(legend.anchorVisibleContent).toHaveBeenLastCalledWith({ key: ASSISTANT });
+    expect(screen.getByText('没有待验收的工单。', { exact: false })).toBeTruthy();
+
+    expect(screen.getByTestId('earlier')).toBe(earlier);
+    expect(mounts).toEqual(['earlier']);
   });
 });

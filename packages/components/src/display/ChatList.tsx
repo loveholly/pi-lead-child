@@ -1,5 +1,5 @@
 import { LegendList, type LegendListRef } from '@legendapp/list/react-native';
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { Platform, View, type ViewProps } from 'react-native';
 
 import { Pressable } from '../primitives/Pressable';
@@ -49,6 +49,22 @@ const ALWAYS_RENDER_LAST = 3;
 const ESTIMATED_ITEM_SIZE = 160;
 // 不用 flex 简写：react-native-web 把 flex: 1 展开成 flex-basis 0%，Legend List 的 web 实现直接写 DOM 样式（见 ScrollArea）。
 const LIST_STYLE = { flexGrow: 1, flexShrink: 1, flexBasis: 0, minHeight: 0, minWidth: 0 } as const;
+
+// 一块里的东西要因为你点了它而变高、变矮时（展开、收起工具卡片），块先调这个函数。
+// 列表把这一块的顶部留在屏幕上原来的位置，上面的块和滚动位置都不动，只有这一块和它下面的内容变。
+// 列表贴底跟随时也一样：不跟随，收起时整个列表就不会晚几帧再往下跳一次。卡片变完后列表还在底部，就接着跟随。
+// 不在 ChatList 里（例如单独画的卡片）时是空函数。
+const ChatListBlockContext = createContext<(() => void) | null>(null);
+const noop = () => {};
+
+export function useKeepChatBlockInPlace(): () => void {
+  return useContext(ChatListBlockContext) ?? noop;
+}
+
+function ChatBlockScope({ blockKey, keep, children }: { blockKey: string; keep: (key: string) => void; children: ReactNode }) {
+  const keepThis = useCallback(() => keep(blockKey), [keep, blockKey]);
+  return <ChatListBlockContext.Provider value={keepThis}>{children}</ChatListBlockContext.Provider>;
+}
 
 // 聊天列表：主会话和工单对话共用（2026-10-16，2026-11-04 换成 Legend List，只画看得见的块）。
 // · 打开时落在最底下（initialScrollAtEnd）。内容不满一屏时贴底还是从上往下排，由 bottomAligned 定。
@@ -114,9 +130,31 @@ function VirtualChatList<T>({
     if (previous !== null && lastKey !== null && lastKey !== previous && !following()) setNewBelow(true);
   }, [following, lastKey]);
 
+  // 你点开、收起一块（useKeepChatBlockInPlace）：锁住这一块的顶部。Legend List 贴底跟随时 anchorVisibleContent 不锁，
+  // 内容变矮以后它把列表重新贴底，而且比卡片晚几帧：卡片先收起、底下空一截，接着整个列表往下跳。所以先停下跟随再锁。
+  // 停下的跟随记在 resumeFollow 里：块的高度变完以后列表还在底部，就回到跟随（见 onItemSizeChanged）。
+  const resumeFollow = useRef(false);
+  const keepBlockInPlace = useCallback((key: string) => {
+    const list = listRef.current;
+    const state = list?.getState();
+    if (!list || !state) return;
+    if (state.isFollowingEnd) {
+      list.cancelScroll();
+      resumeFollow.current = true;
+    }
+    list.anchorVisibleContent({ key });
+  }, []);
+
   // 最后一块变长（流式输出、卡片画完）：你不在底部时同样说一声。
   const onItemSizeChanged = useCallback((info: { size: number; previous: number; itemKey: string }) => {
     if (info.itemKey === previousLastKey.current && info.size > info.previous + 1 && !following()) setNewBelow(true);
+    if (!resumeFollow.current) return;
+    requestAnimationFrame(() => {
+      const state = listRef.current?.getState();
+      if (!resumeFollow.current || !state || state.distanceFromEnd > 1) return;
+      resumeFollow.current = false;
+      void listRef.current?.scrollToEnd({ animated: false });
+    });
   }, [following]);
 
   // web：最后一次 scroll 事件时列表停在哪里。浏览器自己把列表往回拉（见下面发消息）时还没发 scroll 事件，这里还是原来的位置。
@@ -178,9 +216,14 @@ function VirtualChatList<T>({
     void listRef.current?.scrollToEnd({ animated: true });
   }, []);
 
-  const renderBlock = useCallback(({ item, index }: { item: T; index: number }) => (
-    <View {...blockKeyProps(keyExtractor(item))}>{renderItem(item, index)}</View>
-  ), [keyExtractor, renderItem]);
+  const renderBlock = useCallback(({ item, index }: { item: T; index: number }) => {
+    const key = keyExtractor(item);
+    return (
+      <View {...blockKeyProps(key)}>
+        <ChatBlockScope blockKey={key} keep={keepBlockInPlace}>{renderItem(item, index)}</ChatBlockScope>
+      </View>
+    );
+  }, [keepBlockInPlace, keyExtractor, renderItem]);
 
   return (
     <Column testID={testID} flex={1} minH={0} position="relative">
