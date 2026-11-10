@@ -2431,7 +2431,8 @@ export async function startPairedServer(
             locale: getLocale(bridge.db),
             bindingId: auth.binding.id,
             log: bridge.log,
-            perform: async ({ target, action, input }) => {
+            // 账本的原因写明这次是在会话卡片的表单里提交的（不写缺省的「在设置页……」）。
+            perform: async ({ target, action, input, reason }) => {
               if (target.type === "ticket") {
                 requireUserActions();
                 const definition = ticketActionDefinition(action);
@@ -2439,12 +2440,12 @@ export async function startPairedServer(
                   throw new TicketActionError("forbidden", `${definition.label}要 ${definition.scope} 权限，这个凭证没有`);
                 }
                 await performUserTicketAction(ticketActionContext(), {
-                  itemId: Number(target.id), action, input, binding: auth.binding, source,
+                  itemId: Number(target.id), action, input, reason, binding: auth.binding, source,
                 });
                 return { message: formResultMessage(null, definition?.label ?? action) };
               }
               const outcome = await performUserUiAction(uiActionContext(), {
-                target: { type: target.type, id: String(target.id) }, action, input, binding: auth.binding, scopes: auth.scopes, source,
+                target: { type: target.type, id: String(target.id) }, action, input, reason, binding: auth.binding, scopes: auth.scopes, source,
               });
               return { message: formResultMessage(outcome.forLead, uiActionDefinition(target.type, action)?.label ?? action) };
             },

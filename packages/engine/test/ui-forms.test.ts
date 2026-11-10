@@ -36,7 +36,9 @@ describe("submitting a form", () => {
       id: formId, values, locale: "zh", bindingId: 7,
       perform: async (submission) => { calls.push(submission); return { message: "添加了直觉 公司决策（decision.example.com）" }; },
     });
-    expect(calls).toEqual([{ target: { type: "model_settings", id: "models" }, action: "save_fast_model", input: values }]);
+    expect(calls).toEqual([{
+      target: { type: "model_settings", id: "models" }, action: "save_fast_model", input: values, reason: "在会话卡片的表单「添加一条直觉」里提交",
+    }]);
     expect(dto).toMatchObject({ id: formId, state: "done", result: { ok: true, message: "添加了直觉 公司决策（decision.example.com）" } });
     const wake = listInbox(db).map((row) => ({ ...row, payload: JSON.parse(row.payload) })).find((row) => row.payload.kind === "lead_form_submitted");
     expect(wake?.payload).toMatchObject({ formId, ok: true, wakeLead: true, values: { apiKey: { secret: "set" } } });

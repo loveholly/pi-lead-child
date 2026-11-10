@@ -94,7 +94,10 @@ export async function submitUiForm(db: Db, input: {
   values: Readonly<Record<string, unknown>>;
   locale: Locale;
   bindingId: number | null;
-  perform: (submission: { target: { type: string; id: string | number }; action: string; input: Record<string, unknown> }) => Promise<UiFormPerformResult>;
+  // reason：账本里这次操作的原因（「在会话卡片的表单「…」里提交」）。
+  perform: (submission: {
+    target: { type: string; id: string | number }; action: string; input: Record<string, unknown>; reason: string;
+  }) => Promise<UiFormPerformResult>;
   now?: () => Date;
   log?: (line: string) => void;
 }): Promise<UiFormDto> {
@@ -112,7 +115,10 @@ export async function submitUiForm(db: Db, input: {
   let ok: boolean;
   let message: string;
   try {
-    const result = await input.perform({ target: created.target, action: created.action, input: resolved.input });
+    const result = await input.perform({
+      target: created.target, action: created.action, input: resolved.input,
+      reason: `在会话卡片的表单「${created.title ?? created.label}」里提交`,
+    });
     ok = true;
     message = result.message;
   } catch (error) {

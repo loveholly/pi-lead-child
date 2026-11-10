@@ -168,7 +168,9 @@ describe("a form on a conversation card, end to end", () => {
     // 7. grep：key 的原值不在 Lead 拿得到的任何地方，也不在数据目录的任何文件里（保险库存的是密文）。
     const events = db.prepare("SELECT kind, payload FROM events").all() as Array<{ kind: string; payload: string }>;
     expect(events.some((event) => event.kind === "ui_form.submitted")).toBe(true);
-    expect(events.some((event) => event.kind === "ui_action.performed" && event.payload.includes("save_fast_model"))).toBe(true);
+    // 账本：用户本人做的（actor=user），原因写明是在会话卡片的表单里提交的。
+    const performed = events.find((event) => event.kind === "ui_action.performed" && event.payload.includes("save_fast_model"));
+    expect(JSON.parse(performed!.payload)).toMatchObject({ actor: "user", authority: "user", reason: "在会话卡片的表单「添加一条直觉」里提交" });
     expect(JSON.stringify(events)).not.toContain(SECRET);
     expect(JSON.stringify(db.prepare("SELECT * FROM inbox").all())).not.toContain(SECRET);
     expect(JSON.stringify(db.prepare("SELECT * FROM gateway_events").all())).not.toContain(SECRET);
