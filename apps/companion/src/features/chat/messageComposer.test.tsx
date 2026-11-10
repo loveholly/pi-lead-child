@@ -1,4 +1,4 @@
-// @vitest-environment jsdom
+// @vitest-environment happy-dom
 // 会话的输入框（2026-10-25，参考 Kimi）：一张卡片，上面是待发的图片，中间是多行文字，下面是「+」、模型名和发送按钮。
 // Enter 发送，Shift+Enter 换行，输入法组字时的 Enter 不发送；点「+」选图片，或者粘贴剪贴板里的图片；
 // 每张图片是一个 64×64 的小图，可以删掉单张；文字和图片一起发给 Lead。daemon 不收图片时没有「+」。
@@ -16,7 +16,7 @@ import { LeadConversation } from './LeadConversation';
 
 vi.mock('expo-crypto', () => ({ getRandomBytesAsync: vi.fn(), digest: vi.fn(), CryptoDigestAlgorithm: {} }));
 vi.mock('expo-router', () => ({ useRouter: () => ({ push: vi.fn() }) }));
-// 浏览器里的选图和缩小（canvas、createImageBitmap）jsdom 没有：换成按文件名给出一张图的替身。
+// 浏览器里的选图和缩小（canvas、createImageBitmap）happy-dom 没有：换成按文件名给出一张图的替身。
 vi.mock('@/data/chatImagePicker', async () => {
   const types = await vi.importActual<typeof import('@/data/chatImagePicker.types')>('@/data/chatImagePicker.types');
   return {
@@ -111,7 +111,7 @@ describe('the message composer', () => {
     const { sendChat } = setup();
     type('在吗');
     const send = screen.getByTestId('send-message');
-    // 浏览器在按下鼠标时把焦点给按钮（jsdom 的 click 不会）。
+    // 浏览器在按下鼠标时把焦点给按钮（happy-dom 的 click 不会）。
     send.focus();
     fireEvent.click(send);
     expect(sendChat).toHaveBeenCalledWith('在吗', undefined, undefined);

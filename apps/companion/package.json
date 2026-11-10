@@ -48,9 +48,9 @@
     "@types/react-dom": "~19.2.3",
     "eslint": "^9.39.5",
     "eslint-config-expo": "~57.0.0",
-    "jsdom": "^30.1.2",
+    "happy-dom": "^21.0.4",
     "typescript": "~6.0.3",
-    "vitest": "^4.1.10"
+    "vitest": "^5.1.0"
   },
   "scripts": {
     "start": "expo start",

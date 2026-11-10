@@ -1,4 +1,4 @@
-// @vitest-environment jsdom
+// @vitest-environment happy-dom
 // 「证据与记录」（方案 D）：进展、Run、生命周期、产物收在这里。看证据时工单对话不能被盖住——
 // 桌面上它占 Lead 会话栏，工单对话留在右边并展开；手机上它在工单面板里，对话坞还在底部。
 import { act, fireEvent, screen, within } from '@testing-library/react';

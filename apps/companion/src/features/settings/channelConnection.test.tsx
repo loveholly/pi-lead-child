@@ -1,4 +1,4 @@
-// @vitest-environment jsdom
+// @vitest-environment happy-dom
 // 设置 → 消息通道里 Slack 的连接方式（2026-11-02 视觉稿，.scratch/slack-session 工单 06）。client 是假的：
 // GET …/connection 给连接方式，改动都走 performUiAction('channel_connection', …)。
 //   - Slack 应用（现状）：两个选项，Slack 应用选中、推荐；下面是填令牌的表单；没有「代你发消息」开关。

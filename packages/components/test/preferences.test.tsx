@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 
 import { Card, Column, Density, DesignPreferencesProvider, Row, Text, designColorOverrides } from '../src';
 import { contrastRatio } from '../src/theme/preferences';
-import { renderUI } from './render';
+import { cssVar, renderUI } from './render';
 
 // 外观偏好（2026-10-22）：密度按区域取、字号和行高按档位调、圆角按档位乘系数、颜色按同色系推导。
 describe('design preferences', () => {
@@ -16,7 +16,7 @@ describe('design preferences', () => {
       </DesignPreferencesProvider>,
     );
     expect(getComputedStyle(screen.getByTestId('workspace')).gap).toBe('12px');
-    expect(getComputedStyle(screen.getByTestId('ticket')).gap).toBe('var(--t-space-card-row)');
+    expect(getComputedStyle(screen.getByTestId('ticket')).gap).toBe(cssVar('--t-space-card-row'));
     expect(getComputedStyle(screen.getByTestId('settings')).gap).toBe('6px');
   });
 
@@ -39,7 +39,7 @@ describe('design preferences', () => {
     expect(meta.fontSize).toBe('11px');
     expect(meta.lineHeight).toBe('18px');
     // 会话正文不跟档位走。
-    expect(getComputedStyle(screen.getByTestId('fixed')).fontSize).toBe('var(--f-size-message-body)');
+    expect(getComputedStyle(screen.getByTestId('fixed')).fontSize).toBe(cssVar('--f-size-message-body', screen.getByTestId('fixed')));
   });
 
   it('multiplies radius tokens by the radius level', () => {
@@ -51,7 +51,7 @@ describe('design preferences', () => {
     );
     // xl 是 12：大圆角 ×1.5 = 18。full 不变。
     expect(getComputedStyle(screen.getByTestId('card')).borderRadius).toBe('18px');
-    expect(getComputedStyle(screen.getByTestId('pill')).borderRadius).toBe('var(--t-radius-full)');
+    expect(getComputedStyle(screen.getByTestId('pill')).borderRadius).toBe(cssVar('--t-radius-full'));
   });
 
   it('derives the family of a changed color and keeps text variants readable', () => {

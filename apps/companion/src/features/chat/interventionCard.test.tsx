@@ -1,4 +1,4 @@
-// @vitest-environment jsdom
+// @vitest-environment happy-dom
 import type { KernelIntervention } from '@pi-lead-child/protocol';
 import { fireEvent, screen } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';

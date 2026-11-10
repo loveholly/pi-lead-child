@@ -61,7 +61,7 @@ export function setViewportWidth(width: number) {
 }
 
 /**
- * 在给定宽度下渲染整个工作台，选中这张工单并打开它的详情。只能在 jsdom 环境的测试里用。
+ * 在给定宽度下渲染整个工作台，选中这张工单并打开它的详情。只能在 happy-dom 环境的测试里用。
  * 测试文件自己 mock expo-crypto 和 expo-router（vi.mock 只在测试文件里提升）。
  */
 export function renderWorkbenchWithTicket(

@@ -1,4 +1,4 @@
-// @vitest-environment jsdom
+// @vitest-environment happy-dom
 // 设置 → Lead 的名字 → 常设指令（工单 10）：清单、等你批准的提议、每条的版本历史和最近的执行记录、回滚。
 // 系统写的标题、说明和 findings 里的「Lead」显示成 Lead 的名字（缺省 Paimon）；Lead 或用户写的原因原样显示。
 // 契约在 packages/protocol/src/standing-orders-wire.ts；客户端方法是假的，断言的是界面发出的请求。

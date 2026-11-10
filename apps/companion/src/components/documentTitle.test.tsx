@@ -1,4 +1,4 @@
-// @vitest-environment jsdom
+// @vitest-environment happy-dom
 // 网页标题是 Lead 的名字：桌面版的窗口标题跟着它走（docs/desktop/macos-desktop-design.md 第 4.1 节，P0-4）。
 import { act } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';

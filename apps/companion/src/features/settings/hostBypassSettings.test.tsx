@@ -1,4 +1,4 @@
-// @vitest-environment jsdom
+// @vitest-environment happy-dom
 // 设置 → 免沙箱（工单 #246 实施单 A；用户 2026-11-10：「把 bypass 的时间限制去掉，也做成和 steer 一样的开关就好」）。
 // 和「Lead 忙时你发的消息」（主题 11.19）同一种写法：关着（缺省）和开着二选一，是一组单选卡，每个选项里一句说明。
 // 点了马上保存：开着走 host_bypass.enable（不带时长），关着走 host_bypass.disable。没有时长、没有倒计时，开着以后一直开着。

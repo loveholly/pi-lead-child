@@ -3,7 +3,7 @@ import { fireEvent, screen } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 
 import { ChoiceGroup } from '../src';
-import { renderUI } from './render';
+import { cssVar, renderUI } from './render';
 
 const options = [
   { id: 'merge', label: '合并到原分支', description: '在本机合并到 aishx/task-model-routing，工单完成。' },
@@ -47,8 +47,8 @@ describe('ChoiceGroup as radio cards', () => {
     const pr = screen.getByRole('radio', { name: '开草稿 PR' });
     expect(merge.getAttribute('aria-checked')).toBe('true');
     expect(pr.getAttribute('aria-checked')).toBe('false');
-    expect(getComputedStyle(merge).backgroundColor).toBe('var(--c-accent-wash)');
-    expect(getComputedStyle(pr).backgroundColor).toBe('var(--c-surface)');
+    expect(getComputedStyle(merge).backgroundColor).toBe(cssVar('--c-accent-wash'));
+    expect(getComputedStyle(pr).backgroundColor).toBe(cssVar('--c-surface'));
     fireEvent.click(pr);
     expect(onSelect).toHaveBeenCalledWith('pr');
     // 调用方没换 value，选中的还是原来那项。

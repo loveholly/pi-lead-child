@@ -1,4 +1,4 @@
-// @vitest-environment jsdom
+// @vitest-environment happy-dom
 // 视图面板（2026-10-30，.scratch/custom-views/spec.md D2，patterns P16、主题 11.14 第 7 项）：
 //   顶栏最右边的按钮打开、收起面板；面板和工单详情共用右侧的位置；
 //   面板列出控件（会话里同一个 SurfaceView 画），「⋯」里上移、下移、移到别的视图、删掉，删掉就地确认一次；

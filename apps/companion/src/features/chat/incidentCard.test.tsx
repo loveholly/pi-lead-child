@@ -1,4 +1,4 @@
-// @vitest-environment jsdom
+// @vitest-environment happy-dom
 // 一次停摆，一张卡片（2026-10-16）。用户问：这两张卡片都像系统消息，为什么不一样？
 //   · 「系统通知 · 19:19」：Lead 不能工作时系统发的兜底通知，正文是 Lead 写给自己的跟进，原样转给了用户
 //     （"跟进：看 #66 reviewer Run #87 … 用 notify_user（batchable）推送 …"）；

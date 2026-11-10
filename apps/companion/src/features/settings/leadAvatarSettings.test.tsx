@@ -1,4 +1,4 @@
-// @vitest-environment jsdom
+// @vitest-environment happy-dom
 // 设置 → 身份与风格 → 形象（主题 11.15，用户 2026-10-28）：四种状态的图，和 Slack 署名的 emoji。
 // 契约在 packages/protocol/src/lead-avatar.ts。
 import { LEAD_AVATAR_CAPABILITY, type LeadAvatarDto, type SlackEmojiPreview } from '@pi-lead-child/protocol';

@@ -1,4 +1,4 @@
-// @vitest-environment jsdom
+// @vitest-environment happy-dom
 // 会话里的常设指令确认卡（工单 10）：Paimon 提了更放开的修改后发一张 StandingOrderChangeConfirm，卡片只带审批号，
 // 内容和状态从 /v1/standing-order-proposals/:id 实时读取；批准只来自你按的按钮。
 import { ControlPlaneClientError } from '@pi-lead-child/client';

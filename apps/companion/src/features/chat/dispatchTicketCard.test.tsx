@@ -1,4 +1,4 @@
-// @vitest-environment jsdom
+// @vitest-environment happy-dom
 // 一件事，一张卡（2026-10-17，会话方案第五版）。用 10-16 #77 那一段的数据：派活的工单卡、child #88 的完成汇报、
 // Lead 在一个安静回合里写的批注。以前会话里出三块；现在只剩一张合一卡片，点开浮层看 child 的汇报。
 import type { KernelCheckpoint, KernelConversationCard, TicketSummary } from '@pi-lead-child/protocol';

@@ -1,4 +1,4 @@
-// @vitest-environment jsdom
+// @vitest-environment happy-dom
 // 首次启动引导的第二步：选执行器（docs/desktop/macos-desktop-design.md 第 5.3 节，P0-6）走一遍。
 // 第一步接好大脑以后出现；数据来自设置 → 执行器的同一个接口（getRuntimeSettings），已安装的和 pi 缺省开着；
 // 「保存并继续」只拨变了的开关，用设置页同一个操作（updateRuntimeSettings）；「跳过」什么都不改；只出现一次；

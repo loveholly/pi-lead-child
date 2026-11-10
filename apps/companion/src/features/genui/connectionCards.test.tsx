@@ -1,4 +1,4 @@
-// @vitest-environment jsdom
+// @vitest-environment happy-dom
 // 会话里的两张连接卡（issue 08，方案 C）：Lead 请你连接一个账号，以及一次写入的确认。
 // 卡片只带 key 或确认号，状态从 /v1/connections 和 /v1/connections/confirmations/:id 实时读取。
 import type { ConnectionConfirmationDto, UiSurface } from '@pi-lead-child/protocol';
@@ -10,7 +10,7 @@ import { SurfaceView } from './SurfaceView';
 
 vi.mock('expo-crypto', () => ({ getRandomBytesAsync: vi.fn(), digest: vi.fn(), CryptoDigestAlgorithm: {} }));
 vi.mock('expo-router', () => ({ useRouter: () => ({ push: vi.fn() }) }));
-// 见 settings/connectFlow.test.tsx：卸载中的 Spinner 在 jsdom 里会让 Reanimated 抛错。
+// 见 settings/connectFlow.test.tsx：卸载中的 Spinner 在 happy-dom 里会让 Reanimated 抛错。
 vi.mock('@pi-lead-child/components', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@pi-lead-child/components')>()),
   Spinner: () => null,

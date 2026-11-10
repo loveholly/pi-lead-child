@@ -7,12 +7,13 @@ import { renderUI } from './render';
 
 // 设置里「连接」的服务标志。品牌色只在组件里，应用只传服务名。
 describe('ServiceMark', () => {
+  // happy-dom 的 getComputedStyle 照写法给出颜色（#1868DB），不像浏览器那样换成 rgb(24, 104, 219)。
   const cases: [ServiceMarkService, string, string][] = [
-    ['atlassian', 'J', 'rgb(24, 104, 219)'],
-    ['github', 'GH', 'rgb(31, 35, 40)'],
-    ['notion', 'N', 'rgb(255, 255, 255)'],
-    ['slack', 'S', 'rgb(74, 21, 75)'],
-    ['google', 'G', 'rgb(255, 255, 255)'],
+    ['atlassian', 'J', '#1868DB'],
+    ['github', 'GH', '#1F2328'],
+    ['notion', 'N', '#FFFFFF'],
+    ['slack', 'S', '#4A154B'],
+    ['google', 'G', '#FFFFFF'],
   ];
 
   for (const [service, letter, background] of cases) {

@@ -1,4 +1,4 @@
-// @vitest-environment jsdom
+// @vitest-environment happy-dom
 // 用户的一轮因为断网失败：daemon 等网络恢复后自动再试一次（2026-10-16）。等待期间它不是失败：
 // 会话里写「在等」，不给「重发」（再发一次会多出一轮）。再试成功，就是一条普通的回答；再试也失败，才是失败卡片。
 import { PROTOCOL_VERSION, type ConversationTurn, type GatewayEvent, type LeadStatus, type Overview } from '@pi-lead-child/protocol';
@@ -15,7 +15,7 @@ import { LeadConversation } from './LeadConversation';
 
 vi.mock('expo-crypto', () => ({ getRandomBytesAsync: vi.fn(), digest: vi.fn(), CryptoDigestAlgorithm: {} }));
 vi.mock('expo-router', () => ({ useRouter: () => ({ push: vi.fn() }) }));
-// 「正在回复」的转圈是 Reanimated 的循环动画，jsdom 里卸载以后还在按帧更新。这些测试不看动画。
+// 「正在回复」的转圈是 Reanimated 的循环动画，happy-dom 里卸载以后还在按帧更新。这些测试不看动画。
 vi.hoisted(() => {
   window.requestAnimationFrame = () => 0;
   window.cancelAnimationFrame = () => {};

@@ -1,4 +1,4 @@
-// @vitest-environment jsdom
+// @vitest-environment happy-dom
 // 设置 → 执行 → 执行器（2026-10-19）：每个 runtime 一个开关，拨了马上发请求，界面换成 daemon 回的设置；
 // 能做只读核查的执行器都停用时，写明自动核查派不出去。契约在 packages/protocol/src/runtime-settings.ts。
 import type { RuntimeSettingsDto } from '@pi-lead-child/protocol';

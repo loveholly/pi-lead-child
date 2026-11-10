@@ -1,4 +1,4 @@
-// @vitest-environment jsdom
+// @vitest-environment happy-dom
 // Lead 的名字（设置 → 身份与风格，2026-10-22）：会话里称呼 Lead 的地方都用它，缺省是 Paimon。
 // 改名以后 Lead 的回复照样是 Lead 的回复：「是不是系统通知」看这一轮的来源，不看发送者标签的文字。
 // 以前的判断是 sender !== 'Lead'：名字一改，Lead 的每一条回复都会铺上系统通知的底色。
@@ -6,7 +6,7 @@ import type { ConversationTurn, LeadProfileDto } from '@pi-lead-child/protocol';
 import { screen } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 
-import { renderUI } from '../../../test/render';
+import { cssVar, renderUI } from '../../../test/render';
 import { CompanionRuntimeProvider } from '../../state/CompanionStateProvider';
 import { createCompanionStateRuntime, type CompanionRuntimeDependencies } from '../../state/runtime';
 import { formatConversationTime, LeadConversation } from './LeadConversation';
@@ -55,7 +55,7 @@ function render(leadProfile: LeadProfileDto | null) {
 // 系统通知铺一层 accent-wash 的底色（LeadConversation 的 systemNotice）。Lead 的回复直接排在白底上。
 function onNoticeSurface(element: Element): boolean {
   for (let node: Element | null = element; node; node = node.parentElement) {
-    if (getComputedStyle(node).backgroundColor === 'var(--c-accent-wash)') return true;
+    if (getComputedStyle(node).backgroundColor === cssVar('--c-accent-wash')) return true;
   }
   return false;
 }

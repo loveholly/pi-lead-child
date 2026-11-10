@@ -1,4 +1,4 @@
-// @vitest-environment jsdom
+// @vitest-environment happy-dom
 // 会话里没有原始错误。实例上的样子：
 //   · 每次心跳巡检多一个红框，框里是 503 的整段 JSON；
 //   · 「Run crashed」卡片是一张键值表（Failure category / scope / Needs / Error code）加英文的下一步；
@@ -11,7 +11,7 @@ import {
 import { act, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 
-import { renderUI } from '../../../test/render';
+import { cssVar, renderUI } from '../../../test/render';
 import { CompanionRuntimeProvider } from '../../state/CompanionStateProvider';
 import { applyControlPlaneMutation } from '../../state/control-plane/actions';
 import { reduceGatewayEvent } from '../../state/control-plane/eventReducer';
@@ -144,7 +144,7 @@ describe('the width of the Lead side', () => {
       const column = columns.find((candidate) => candidate.contains(block));
       expect(column).toBeTruthy();
       if (!column) continue;
-      expect(getComputedStyle(block).maxWidth).not.toBe('var(--t-size-prose)');
+      expect(getComputedStyle(block).maxWidth).not.toBe(cssVar('--t-size-prose'));
       const shrinking: string[] = [];
       for (let node: HTMLElement | null = block; node && node !== column; node = node.parentElement) {
         if (getComputedStyle(node).alignSelf === 'flex-start') shrinking.push(node.getAttribute('data-testid') ?? node.tagName);

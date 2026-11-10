@@ -3,9 +3,9 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { Box, measure, Row, ScrollArea, Text } from '../src';
 import { tokens } from '../src/theme/config';
-import { renderUI } from './render';
+import { cssVar, renderUI } from './render';
 
-// Tamagui 在 web 上用字体类（font_<token>）选字体，具体的 font-family 放在 CSS 变量里，jsdom 不解析变量，所以断言类名。
+// Tamagui 在 web 上用字体类（font_<token>）选字体，具体的 font-family 放在这个类定义的 CSS 变量里，所以断言类名。
 const fontClass = (testID: string) => [...screen.getByTestId(testID).classList].find((name) => name.startsWith('font_'));
 
 describe('Text', () => {
@@ -58,8 +58,8 @@ describe('prose measure', () => {
     expect(measure.prose).toBe(560);
     expect(tokens.size.prose.val).toBe(measure.prose);
     renderUI(<Box w="100%" maxW="prose" testID="reply" />);
-    // jsdom 不解析 CSS 变量：断言 maxW 落在 prose 这个 size token 上。
-    expect(getComputedStyle(screen.getByTestId('reply')).maxWidth).toBe('var(--t-size-prose)');
+    // 断言 maxW 落在 prose 这个 size token 上。
+    expect(getComputedStyle(screen.getByTestId('reply')).maxWidth).toBe(cssVar('--t-size-prose'));
   });
 });
 
@@ -73,7 +73,7 @@ describe('the conversation column', () => {
     expect(tokens.size.conversation.val).toBe(measure.conversation);
     renderUI(<ConversationColumn testID="column"><Text>回复</Text></ConversationColumn>);
     const style = getComputedStyle(screen.getByTestId('column'));
-    expect(style.maxWidth).toBe('var(--t-size-conversation)');
+    expect(style.maxWidth).toBe(cssVar('--t-size-conversation'));
     expect(style.width).toBe('100%');
     expect(style.alignSelf).toBe('center');
   });

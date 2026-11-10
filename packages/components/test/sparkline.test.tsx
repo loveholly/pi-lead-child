@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { DesignPreferencesProvider, Sparkline, designColorOverrides, palette } from '../src';
 import { renderUI } from './render';
 
-// jsdom 没有布局：让每个元素量出来都是 300 宽，Tamagui 的 onLayout 才会报宽度。
+// happy-dom 没有布局：让每个元素量出来都是 300 宽，Tamagui 的 onLayout 才会报宽度。
 function withWidth(width: number) {
   return vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue({
     x: 0, y: 0, top: 0, left: 0, right: width, bottom: 48, width, height: 48, toJSON: () => ({}),

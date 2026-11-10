@@ -2,7 +2,7 @@ import { screen } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';
 
 import { Column, Density, Row, Text } from '../src';
-import { renderUI } from './render';
+import { cssVar, renderUI } from './render';
 
 // 密度区域（2026-10-22）：同一个语义名在 <Density name="compact"> 之内取紧凑值，之外取标准值。
 // 组件只写名字，不知道自己在哪个区域。
@@ -20,9 +20,9 @@ describe('density zones', () => {
         </Density>
       </Column>,
     );
-    // jsdom 不解析 CSS 变量：标准值是 token，保持 var(--t-space-…) 的形式；换过值的是具体像素。
-    expect(getComputedStyle(screen.getByTestId('standard')).gap).toBe('var(--t-space-card-row)');
-    expect(getComputedStyle(screen.getByTestId('standard')).paddingTop).toBe('var(--t-space-card)');
+    // 区域外是 token 的标准值；区域里换成这个区域的值。
+    expect(getComputedStyle(screen.getByTestId('standard')).gap).toBe(cssVar('--t-space-card-row'));
+    expect(getComputedStyle(screen.getByTestId('standard')).paddingTop).toBe(cssVar('--t-space-card'));
     expect(getComputedStyle(screen.getByTestId('compact')).gap).toBe('6px');
     expect(getComputedStyle(screen.getByTestId('compact')).paddingTop).toBe('8px');
     expect(getComputedStyle(screen.getByTestId('compact-column')).gap).toBe('16px');
@@ -41,15 +41,15 @@ describe('density zones', () => {
       </Column>,
     );
     const standard = getComputedStyle(screen.getByTestId('standard'));
-    expect(standard.fontSize).toBe('var(--f-size-card-title)');
-    expect(standard.lineHeight).toBe('var(--f-lineHeight-card-title)');
+    expect(standard.fontSize).toBe(cssVar('--f-size-card-title', screen.getByTestId('standard')));
+    expect(standard.lineHeight).toBe(cssVar('--f-lineHeight-card-title', screen.getByTestId('standard')));
     const compact = getComputedStyle(screen.getByTestId('compact'));
     expect(compact.fontSize).toBe('13px');
     expect(compact.lineHeight).toBe('18px');
     // 会话正文不随密度变，行高固定 24。
-    expect(getComputedStyle(screen.getByTestId('fixed')).fontSize).toBe('var(--f-size-message-body)');
-    expect(getComputedStyle(screen.getByTestId('compact-fixed')).fontSize).toBe('var(--f-size-message-body)');
-    expect(getComputedStyle(screen.getByTestId('compact-fixed')).lineHeight).toBe('var(--f-lineHeight-message-body)');
+    expect(getComputedStyle(screen.getByTestId('fixed')).fontSize).toBe(cssVar('--f-size-message-body', screen.getByTestId('fixed')));
+    expect(getComputedStyle(screen.getByTestId('compact-fixed')).fontSize).toBe(cssVar('--f-size-message-body', screen.getByTestId('compact-fixed')));
+    expect(getComputedStyle(screen.getByTestId('compact-fixed')).lineHeight).toBe(cssVar('--f-lineHeight-message-body', screen.getByTestId('compact-fixed')));
   });
 
   it('lets a standard island sit inside a compact zone', () => {
@@ -62,7 +62,7 @@ describe('density zones', () => {
       </Density>,
     );
     expect(getComputedStyle(screen.getByTestId('outer')).gap).toBe('6px');
-    expect(getComputedStyle(screen.getByTestId('inner')).gap).toBe('var(--t-space-card-row)');
+    expect(getComputedStyle(screen.getByTestId('inner')).gap).toBe(cssVar('--t-space-card-row'));
   });
 
   it('leaves pixel values and non-density names alone', () => {
@@ -73,6 +73,6 @@ describe('density zones', () => {
       </Density>,
     );
     expect(getComputedStyle(screen.getByTestId('px')).gap).toBe('8px');
-    expect(getComputedStyle(screen.getByTestId('fixed')).gap).toBe('var(--t-space-conversation-block)');
+    expect(getComputedStyle(screen.getByTestId('fixed')).gap).toBe(cssVar('--t-space-conversation-block'));
   });
 });

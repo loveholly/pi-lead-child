@@ -1,4 +1,4 @@
-// @vitest-environment jsdom
+// @vitest-environment happy-dom
 // 项目 tab 不是死路。实例上（2026-10-15）项目行点了没有反应（role=listitem），「unknown 20 工单」直接显示英文，
 // 「17 工单 · 3 阻塞」和工单 tab 的数字对不上。点项目要打开这个项目的工单，数字和那里一样。
 // 阶段 2 起项目 tab 是项目卡片（GET /v1/projects/overview），数字由服务端按 ticketTurn 算。

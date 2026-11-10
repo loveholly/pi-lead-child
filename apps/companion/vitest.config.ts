@@ -31,7 +31,7 @@ const reanimatedWebStyles: Plugin = {
 };
 
 // 网页包（Metro）开着 React Compiler（app.json 的 experiments.reactCompiler），vitest 平时不开。编译器会把闭包里的
-// x!.prop 提到渲染时当依赖读，x 是 null 时整个组件在浏览器里崩掉，jsdom 的测试却是绿的（2026-10-23 工单 13；
+// x!.prop 提到渲染时当依赖读，x 是 null 时整个组件在浏览器里崩掉，DOM 环境里的测试却是绿的（2026-10-23 工单 13；
 // 2026-10-29 设置 → 模型的「接入服务商」「添加决策模型」点了就报错）。这里列出的文件在测试里也过一遍编译器，
 // 和浏览器里跑的是同一份代码。只编译组件本身，类型和 JSX 留给后面的转换。
 const COMPILED_IN_TESTS = [
@@ -62,20 +62,21 @@ const reactCompilerForListedFiles: Plugin = {
 };
 
 // 测试按运行环境分两组（2026-11-09，测试提速；vitest 指南「Test Environments」「Pool」两节）。
-// - 渲染界面的文件在文件头写 @vitest-environment jsdom。它们用 vmThreads：每个 worker 只建一次 jsdom，每个文件在新的
-//   VM 上下文里跑，模块和 window 照样每个文件一份。缺省的 forks 每个文件都要新建 jsdom、重新加载 react-dom 和 Tamagui，
+// - 渲染界面的文件在文件头写 @vitest-environment happy-dom。它们用 vmThreads：每个 worker 只建一次 DOM 环境，每个文件在新的
+//   VM 上下文里跑，模块和 window 照样每个文件一份。缺省的 forks 每个文件都要新建 DOM 环境、重新加载 react-dom 和 Tamagui，
 //   整套跑时这两步占了大部分时间。
+//   DOM 环境从 2026-11-10 起是 happy-dom（升级到 vitest 5 时换的）。它和以前的 DOM 实现不一样的地方，在 test/setup.ts 里补齐。
 // - 其余文件在 node 环境里跑，用 threads，每个文件仍然隔离。它们不用 vmThreads：VM 上下文里 node 自带的类（例如
 //   DOMException）不是这个上下文的 Error 的子类，产品代码里的 reason instanceof Error 会判断错（runtime.test.ts 取消下载那条）。
 // 两组都不关隔离（isolate: false）：一半以上的文件用 vi.mock，关掉以后，前一个文件加载过的模块不会再被 mock 替换。
 // 分组看文件头，不看路径，所以新文件只要照旧写环境注释就进对的组。
 const SRC = fileURLToPath(new URL('./src', import.meta.url));
-const JSDOM_FILES = readdirSync(SRC, { recursive: true, encoding: 'utf8' })
+const DOM_FILES = readdirSync(SRC, { recursive: true, encoding: 'utf8' })
   .filter((file) => /\.test\.tsx?$/.test(file))
-  .filter((file) => /@vitest-environment\s+jsdom/.test(readFileSync(`${SRC}/${file}`, 'utf8')))
+  .filter((file) => /@vitest-environment\s+happy-dom/.test(readFileSync(`${SRC}/${file}`, 'utf8')))
   .map((file) => `src/${file.split('\\').join('/')}`);
 
-// apps/companion 的单元测试。没有这个文件时，vitest 会向上找到仓库根的配置，而根配置只跑后端各包的测试。
+// apps/companion 的单元测试。没有这个文件时，vitest 不带配置跑：vitest 5 起不再向上一级级目录找配置文件。
 // 界面模块经过 @pi-lead-child/components 引入 react-native。这里和组件库的测试一样，
 // 把 react-native 换成 react-native-web，Tamagui 以 web 为目标，渲染路径和浏览器里的 web 包相同。
 export default defineConfig({
@@ -107,8 +108,8 @@ export default defineConfig({
     // react-native 系的包要经过 Vite 转换，react-native 别名才对它们生效。
     server: { deps: { inline: [/@tamagui\//, /react-native-web/, /react-native-safe-area-context/, /react-native-svg/, /react-native-reanimated/, /react-native-worklets/, /expo-/, /@expo\//] } },
     projects: [
-      { extends: true, test: { name: 'dom', include: JSDOM_FILES, pool: 'vmThreads' } },
-      { extends: true, test: { name: 'node', include: ['src/**/*.test.{ts,tsx}'], exclude: JSDOM_FILES, pool: 'threads' } },
+      { extends: true, test: { name: 'dom', include: DOM_FILES, pool: 'vmThreads' } },
+      { extends: true, test: { name: 'node', include: ['src/**/*.test.{ts,tsx}'], exclude: DOM_FILES, pool: 'threads' } },
     ],
   },
 });

@@ -1,4 +1,4 @@
-// @vitest-environment jsdom
+// @vitest-environment happy-dom
 // 设置 → 消息通道 → 代回复风格（2026-10-28）：框里写的保存走 reply_style.update（mode=replace）；提炼只读，结果在卡里预览、能改，
 // 点「追加」才以 mode=append 写进框里，带上结果里的小标题。超过上限、框里有没保存的修改时不让追加。
 // 契约在 packages/protocol/src/reply-style.ts。

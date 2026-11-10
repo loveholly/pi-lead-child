@@ -1,4 +1,4 @@
-// @vitest-environment jsdom
+// @vitest-environment happy-dom
 // 会话顶栏（方案 C，2026-10-28，主题 11.14、F-7）：左栏开着时顶栏不放 Fairy（Fairy 在左栏头部）；
 // 手机上和左栏收起时 Fairy 回到顶栏。顶栏写「执行中 N」；输入框上方原来那一行「执行中 · 需要处理 + 工单标签 + 查看全部」去掉。
 import type { ConversationTurn, LeadQueue } from '@pi-lead-child/protocol';

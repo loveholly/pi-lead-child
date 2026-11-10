@@ -1,4 +1,4 @@
-// @vitest-environment jsdom
+// @vitest-environment happy-dom
 // 首次启动页（2026-10-30，.scratch/onboarding/spec.md，画布 A1）走一遍：大脑不能用时整页挡住会话；
 // 第一步按预设接入服务商（save_provider），读到目录后第二步出现，推荐的模型排第一；点「让 Paimon 上线」发 set_brain_chain，
 // 设置状态说大脑能用了，这一页换成会话。「先进去看看」这次打开 App 时不再挡。

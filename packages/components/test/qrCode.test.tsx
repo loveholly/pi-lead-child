@@ -3,7 +3,7 @@ import { screen } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';
 
 import { QrCode, qrDarkRuns } from '../src';
-import { renderUI } from './render';
+import { cssVar, renderUI } from './render';
 
 // 21×21 是最小的二维码（版本 1）。这里只要形状对，不要求是能扫的码。
 const rows = Array.from({ length: 21 }, (_, y) => {
@@ -34,7 +34,7 @@ describe('QrCode', () => {
     // (21 + 2 × 4) × 4 = 116。
     expect(style.width).toBe('116px');
     expect(style.height).toBe('116px');
-    expect(style.backgroundColor).toBe('var(--c-white)');
+    expect(style.backgroundColor).toBe(cssVar('--c-white'));
 
     const modules = [...qr.children] as HTMLElement[];
     expect(modules).toHaveLength(4);
@@ -45,6 +45,6 @@ describe('QrCode', () => {
     expect(last.left).toBe(`${(18 + 4) * 4}px`);
     expect(last.width).toBe('12px');
     expect(last.height).toBe('4px');
-    expect(last.backgroundColor).toBe('var(--c-black)');
+    expect(last.backgroundColor).toBe(cssVar('--c-black'));
   });
 });

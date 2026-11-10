@@ -1,4 +1,4 @@
-// @vitest-environment jsdom
+// @vitest-environment happy-dom
 // 会话里的一轮助手回复：任务卡在上，最后的回复在下；工具之间说的话在卡片里面。
 // 卡片展开以后，同一个页面上重新渲染还是展开的（展开状态记在 workspace store）。
 import { ChatList, Text } from '@pi-lead-child/components';
@@ -15,12 +15,12 @@ import { adaptGatewayEvent } from '../../state/control-plane/protocolAdapter';
 import { createCompanionStateRuntime, type CompanionRuntimeDependencies } from '../../state/runtime';
 import { AssistantTurnView } from './AssistantTurnView';
 
-// CompanionStateProvider 引入 expo-crypto，它在 jsdom 里加载不了。这里只用到 store，不用加密。
+// CompanionStateProvider 引入 expo-crypto，它在测试里加载不了。这里只用到 store，不用加密。
 vi.mock('expo-crypto', () => ({ getRandomBytesAsync: vi.fn(), digest: vi.fn(), CryptoDigestAlgorithm: {} }));
-// 消息里的工单卡片用 useOpenTicket 打开工单，它引入 expo-router。expo-router 在 jsdom 里也加载不了。
+// 消息里的工单卡片用 useOpenTicket 打开工单，它引入 expo-router。expo-router 在测试里也加载不了。
 vi.mock('expo-router', () => ({ useRouter: () => ({ push: vi.fn() }) }));
 
-// 会话流（ChatList）在浏览器里用 Legend List。jsdom 量不出行高，这里用替身：记下列表被要求停下跟随、锁住哪一块。
+// 会话流（ChatList）在浏览器里用 Legend List。happy-dom 量不出行高，这里用替身：记下列表被要求停下跟随、锁住哪一块。
 const legend = vi.hoisted(() => ({
   state: { isFollowingEnd: true, isAtEnd: true, distanceFromEnd: 0 },
   cancelScroll: vi.fn(() => { legend.state.isFollowingEnd = false; }),

@@ -1,4 +1,4 @@
-// @vitest-environment jsdom
+// @vitest-environment happy-dom
 // 等待中的提醒（工单 07）：会话里的提醒卡不重复出现，「待你」托盘里列出接下来的几条，带「重要」标记，到点前一直在。
 import { act, fireEvent, screen, within } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';

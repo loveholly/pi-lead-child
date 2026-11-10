@@ -3,7 +3,7 @@ import { fireEvent, screen } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 
 import { Checklist, type ChecklistItem } from '../src';
-import { renderUI } from './render';
+import { cssVar, renderUI } from './render';
 
 const items: ChecklistItem[] = [
   { id: 'c1', label: '输出详尽的 Token 膨胀排查分析与优化方案', verdicts: [{ label: '通过', tone: 'success' }], checked: true },
@@ -33,9 +33,9 @@ describe('Checklist', () => {
   it('marks a failed item red and puts its evidence under it', () => {
     renderUI(<Checklist testID="criteria" items={items} columns={[{ label: '核查员' }]} />);
     const failed = screen.getByTestId('criteria-item-c2');
-    expect(getComputedStyle(failed).backgroundColor).toBe('var(--c-danger-surface)');
+    expect(getComputedStyle(failed).backgroundColor).toBe(cssVar('--c-danger-surface'));
     expect(failed.textContent).toContain('证据：只改了 SKILL.md 和 persona.md。');
-    expect(getComputedStyle(screen.getByTestId('criteria-item-c1')).backgroundColor).not.toBe('var(--c-danger-surface)');
+    expect(getComputedStyle(screen.getByTestId('criteria-item-c1')).backgroundColor).not.toBe(cssVar('--c-danger-surface'));
   });
 
   it('reports a tick to the caller and shows the state the caller gives', () => {

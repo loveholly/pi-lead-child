@@ -1,4 +1,4 @@
-// @vitest-environment jsdom
+// @vitest-environment happy-dom
 // 手机上的设置首页：最上面是 Lead 的名字（缺省 Paimon），下面是分组，Lead 分组排第一（2026-10-22）；
 // 每一行推进一个分组的页面；分组页左上角是「‹ 设置」。
 import type { LeadStatus, Overview } from '@pi-lead-child/protocol';

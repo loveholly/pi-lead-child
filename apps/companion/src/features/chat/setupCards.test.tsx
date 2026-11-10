@@ -1,4 +1,4 @@
-// @vitest-environment jsdom
+// @vitest-environment happy-dom
 // 首次启动引导的两种系统卡（2026-10-30，.scratch/onboarding/spec.md，画布 A2、A4）：
 //   · 准备清单：7 项，没配的带「去设置」，全部配好以后收成一行；
 //   · 建议卡：标题、配了有什么用、「去设置」，「⋯」里「以后再说」「不用再提」；处理过以后收成一行；

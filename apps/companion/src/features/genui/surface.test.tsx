@@ -1,4 +1,4 @@
-// @vitest-environment jsdom
+// @vitest-environment happy-dom
 // generative UI（2026-10-15 用户决定，.scratch/generative-ui/spec.md）：Lead 用 render_ui 画的富交互卡片在 App 里的样子。
 // 卡片来自 render_ui 的 lead.tool.updated（payload.surface），刷新时来自每一轮的 surfaces。
 // App 用自己的组件画（方案 A 的决定卡）：工单头、事实、「我的建议」、带后果说明的选项。
@@ -9,7 +9,7 @@ import {
 import { act, cleanup, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 
-import { renderUI } from '../../../test/render';
+import { cssVar, renderUI } from '../../../test/render';
 import { CompanionRuntimeProvider } from '../../state/CompanionStateProvider';
 import { applyControlPlaneMutation } from '../../state/control-plane/actions';
 import { reduceGatewayEvent } from '../../state/control-plane/eventReducer';
@@ -319,11 +319,11 @@ describe('a card built from the v3 blocks', () => {
     expect(screen.getByTestId('surface-tile-date-value').textContent).toBe('29');
     expect(screen.getByText('10月')).toBeTruthy();
     expect(screen.getByTestId('surface-media-row-perforation')).toBeTruthy();
-    expect(getComputedStyle(screen.getByTestId('surface-tile-date-eyebrow')).backgroundColor).toBe('var(--c-accent-soft)');
+    expect(getComputedStyle(screen.getByTestId('surface-tile-date-eyebrow')).backgroundColor).toBe(cssVar('--c-accent-soft'));
     expect(screen.getByText('彪哥 last day')).toBeTruthy();
   });
 
-  // 2026-10-27 用户定：照视觉稿，强调的图块（emphasis strong）小标题条用实色底、白字；普通的还是浅色底。边框颜色 jsdom 读不出来（只给 rgb(0, 0, 0)），在截图里核对。
+  // 2026-10-27 用户定：照视觉稿，强调的图块（emphasis strong）小标题条用实色底、白字；普通的还是浅色底。边框颜色不在这里断言，在截图里核对。
   it('draws a solid eyebrow with white text on a strong tile, and a light one otherwise', () => {
     renderSurface(card([
       { id: 's', type: 'Stack', props: { direction: 'row' }, children: ['gate', 'plain'] },
@@ -331,9 +331,9 @@ describe('a card built from the v3 blocks', () => {
       { id: 'plain', type: 'Tile', props: { eyebrow: '待审', value: 12, tone: 'warning' } },
     ]));
     const style = (id: string) => getComputedStyle(screen.getByTestId(id));
-    expect(style('surface-tile-gate-eyebrow').backgroundColor).toBe('var(--c-warning)');
-    expect(getComputedStyle(screen.getByText('登机口')).color).toBe('var(--c-surface)');
-    expect(style('surface-tile-plain-eyebrow').backgroundColor).toBe('var(--c-warning-soft)');
+    expect(style('surface-tile-gate-eyebrow').backgroundColor).toBe(cssVar('--c-warning'));
+    expect(getComputedStyle(screen.getByText('登机口')).color).toBe(cssVar('--c-surface'));
+    expect(style('surface-tile-plain-eyebrow').backgroundColor).toBe(cssVar('--c-warning-soft'));
   });
 
   // 2026-10-27 用户对照视觉稿：日历页应该是卡片左边的一栏，贴住卡片的边（票根），不是卡片里一个带边框的小方框。
@@ -343,7 +343,7 @@ describe('a card built from the v3 blocks', () => {
       { id: 'date', type: 'Tile', props: { eyebrow: '10月', value: 29 } },
       { id: 'body', type: 'Text', props: { text: '彪哥 last day', variant: 'title' } },
     ]));
-    // 日历页贴住卡片的边，竖向撑满整张卡（Tile 的 attached）。jsdom 读不出 token 的内边距，内边距在截图里核对。
+    // 日历页贴住卡片的边，竖向撑满整张卡（Tile 的 attached）。内边距不在这里断言，在截图里核对。
     expect(getComputedStyle(screen.getByTestId('surface-tile-date')).flexGrow).toBe('1');
     expect(screen.getByTestId('surface-media-row-perforation')).toBeTruthy();
     cleanup();
@@ -370,7 +370,7 @@ describe('a card built from the v3 blocks', () => {
     renderSurface(card([{ id: 'seg', type: 'Segments', props: {
       items: [{ label: '依据核实', tone: 'success' }, { label: '有依据', tone: 'warning' }], summary: '信心 0.71',
     } }]));
-    expect(getComputedStyle(screen.getByTestId('surface-segments-seg-square-0')).backgroundColor).toBe('var(--c-success)');
+    expect(getComputedStyle(screen.getByTestId('surface-segments-seg-square-0')).backgroundColor).toBe(cssVar('--c-success'));
     expect(screen.getByText('信心 0.71')).toBeTruthy();
   });
 
@@ -381,7 +381,7 @@ describe('a card built from the v3 blocks', () => {
     } }]));
     expect(screen.getByText('王小明')).toBeTruthy();
     expect(screen.getByTestId('surface-message-m-count').textContent).toBe('5 messages');
-    expect(getComputedStyle(screen.getByTestId('surface-message-m-bubble-0')).backgroundColor).toBe('var(--c-accent-soft)');
+    expect(getComputedStyle(screen.getByTestId('surface-message-m-bubble-0')).backgroundColor).toBe(cssVar('--c-accent-soft'));
     cleanup();
     renderSurface(card([{ id: 'm', type: 'Message', props: { ref: { type: 'channel_card', id: 3 }, mode: 'latest' } }]));
     expect(screen.queryByTestId('surface-message-m')).toBeNull();
@@ -433,7 +433,7 @@ describe('a reminder card built only from blocks', () => {
     renderReminder();
     expect(await screen.findByText('3 days 1 hour left')).toBeTruthy();
     expect(screen.queryByText('周四 14:00')).toBeNull();
-    expect(getComputedStyle(screen.getByTestId('surface-tile-date-eyebrow')).backgroundColor).toBe('var(--c-accent-soft)');
+    expect(getComputedStyle(screen.getByTestId('surface-tile-date-eyebrow')).backgroundColor).toBe(cssVar('--c-accent-soft'));
   });
 
   it('opens from the card into a panel, and moves the reminder to the time the user picked', async () => {
@@ -545,7 +545,7 @@ describe('a reminder card built only from blocks', () => {
     expect(await screen.findByText(/^[A-Z][a-z]{2} \d{2}-\d{2} \d{2}:\d{2}$/)).toBeTruthy();
     fireEvent.click(screen.getByTestId('surface-disclosure-box-summary'));
     expect(screen.queryByRole('radio', { name: '1 小时后' })).toBeNull();
-    expect(getComputedStyle(screen.getByTestId('surface-tile-date-eyebrow')).backgroundColor).toBe('var(--c-success-soft)');
+    expect(getComputedStyle(screen.getByTestId('surface-tile-date-eyebrow')).backgroundColor).toBe(cssVar('--c-success-soft'));
   });
 });
 
@@ -572,7 +572,7 @@ describe('the Item pattern', () => {
       { id: 'f', type: 'Item', props: { lead: { eyebrow: '登机口', value: 'B12', caption: '15:40 关闭', tone: 'warning', emphasis: 'strong' }, title: 'CA1501 北京 → 上海', meta: '16:10 起飞 · 18:25 到达 · 准点' }, children: ['pass'] },
       { id: 'pass', type: 'Action', props: { target: { type: 'ticket', id: 66 }, action: 'cancel', role: 'quiet', label: '登机牌' } },
     ]));
-    expect(getComputedStyle(screen.getByTestId('surface-tile-f-lead-eyebrow')).backgroundColor).toBe('var(--c-warning)');
+    expect(getComputedStyle(screen.getByTestId('surface-tile-f-lead-eyebrow')).backgroundColor).toBe(cssVar('--c-warning'));
     expect(screen.getByText('CA1501 北京 → 上海')).toBeTruthy();
     expect(screen.getByText('16:10 起飞 · 18:25 到达 · 准点')).toBeTruthy();
     expect(screen.getByRole('button', { name: '登机牌' })).toBeTruthy();

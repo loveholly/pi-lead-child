@@ -1,4 +1,4 @@
-// @vitest-environment jsdom
+// @vitest-environment happy-dom
 // 工单详情在复核以后（返工、验收、合并的先后和确认框），以及按操作清单放按钮。原来在 ticketDetailSkeleton.test.tsx 里，
 // 2026-11-09 拆出来：那个文件一个要跑 20 多秒，整套并发跑时它最后一个结束。共用的数据和渲染在 test/ticketDetail.tsx。
 import type { TicketSummary } from '@pi-lead-child/protocol';

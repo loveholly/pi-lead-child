@@ -1,4 +1,4 @@
-// @vitest-environment jsdom
+// @vitest-environment happy-dom
 // 收件箱是一个行动队列（阶段 1，方向 A）。以前它就是工单列表加一个筛选：每行都写「阻塞 · 需要介入」，
 // 不说原因、不说等了多久、没有动作；Lead 自己修好的事也看不到。
 // 这里按实例上的工单渲染真正的 Workbench，读用户看到和能点的东西。

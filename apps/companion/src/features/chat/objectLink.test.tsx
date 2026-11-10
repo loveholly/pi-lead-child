@@ -1,4 +1,4 @@
-// @vitest-environment jsdom
+// @vitest-environment happy-dom
 // 会话文字里指向对象的链接（设计规范 P14.6–P14.8，2026-11-02）。用户说 Lead 写的「Run #12」「卡 #13」是系统用语，看不懂；
 // 要的是人能懂的说法，再加一个能点过去的地方。Lead 写 [Ethan 的私信](plc:card/134)，用户看到一段可以点的文字。
 import type { ChannelCardDto, TicketSummary } from '@pi-lead-child/protocol';

@@ -1,4 +1,4 @@
-// @vitest-environment jsdom
+// @vitest-environment happy-dom
 // Lead 忙时的排队状态栏（统一消息事件 spec D6、D12，工单 10）。Lead 正在一轮里、有外部消息排着时，输入框上方「插话/排队」
 // 那一行的右边写「排队 N 条：谁、谁」；点开是锚定浮层，每个对话可以打开卡、排到下一个、移出队列。状态从 daemon 推来
 // （snapshot.required，resource 是 lead-queue，带着整份排队），操作经 runtime 发到网关（操作层的 lead_queue）。

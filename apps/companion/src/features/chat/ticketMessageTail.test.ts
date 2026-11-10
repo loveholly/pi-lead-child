@@ -1,4 +1,4 @@
-// @vitest-environment jsdom
+// @vitest-environment happy-dom
 // 2026-10-15 方案 A：发往工单的消息在主会话里只留一行「消息尾巴」，说清这条消息现在在哪：
 // 已排队（Run 不能中途接收消息）、已送达在回答、已回答、没送到交给了 Lead（写它的名字）、和下一条一起回答。
 import { describe, expect, it, vi } from 'vitest';

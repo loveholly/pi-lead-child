@@ -1,4 +1,4 @@
-// @vitest-environment jsdom
+// @vitest-environment happy-dom
 // 工单 12：工单详情的骨架（spec 第 3 节，4.0–4.4、4.6；第四轮画板 D4-running、D4-review-pass）。
 // - 每个阶段的块顺序、默认展开、出处标签都对；没有「这张工单」标题；入口叫「关联工单」。
 // - 按钮的可用状态和 GET /v1/tickets/:id/actions 一致（底部操作栏另见 ticketDecisionCard.test.tsx）。
@@ -10,6 +10,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { ticketSummaryToTicket } from '@/features/workspace/model';
 
+import { cssVar } from '../../../test/render';
 import { BRIEF, criteria, delivery, expanded, plan, renderThread, sectionOrder, summary } from '../../../test/ticketDetail';
 import { setViewportWidth, ticket66, ticketAction } from '../../../test/workbench';
 import type { TicketThreadProps } from './TicketThread';
@@ -245,8 +246,8 @@ describe('the ticket detail skeleton', () => {
     const label = within(workspace).getByText('Not merged');
 
     // 中性徽章：灰底、次要文字色（Badge 的 neutral）。
-    expect(getComputedStyle(label).color).toBe('var(--c-text-secondary)');
-    expect(getComputedStyle(label.parentElement!).backgroundColor).toBe('var(--c-surface-muted)');
+    expect(getComputedStyle(label).color).toBe(cssVar('--c-text-secondary'));
+    expect(getComputedStyle(label.parentElement!).backgroundColor).toBe(cssVar('--c-surface-muted'));
   });
 
   it('does not hang 还没合并 on the workspace while the ticket runs', () => {

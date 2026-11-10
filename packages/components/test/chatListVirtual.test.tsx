@@ -1,4 +1,4 @@
-// 聊天列表（ChatList）在量得出行高的地方用 Legend List，只画看得见的块（2026-11-04）。jsdom 量不出行高，
+// 聊天列表（ChatList）在量得出行高的地方用 Legend List，只画看得见的块（2026-11-04）。happy-dom 量不出行高，
 // 这里用一个替身代替 Legend List：记下列表拿到的参数，按它的接口报告「跟着底部」「在底部」和行高的变化。
 import { act, fireEvent, render, screen } from '@testing-library/react';
 import { forwardRef, useEffect, useImperativeHandle, useState, type ReactNode } from 'react';

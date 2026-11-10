@@ -1,4 +1,4 @@
-// @vitest-environment jsdom
+// @vitest-environment happy-dom
 // 外部来源的会话卡（工单 11，spec D10）：发信人、原文摘录、起草的回复，和「用草稿回复」「我自己回」「稍后」「不回」。
 // 每种状态的显示；按钮调到 runtime；卡的版本只升不降（spec D16）；网关推 channel-cards 时只重取卡；卡按时间插进对话。
 // 带代查的卡（Slack 代查与按信心代回 spec D9，工单 05）：代查轨和代回轨的每一种组合、过时提示、受众、review、读过的文件；
@@ -10,7 +10,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   askYouCard, autoRepliedCard, localAt, LOOKUP_NOW, lookupCard, lookupDto, notFoundCard,
 } from '../../../test/channelLookupCards';
-import { renderUI } from '../../../test/render';
+import { cssVar, renderUI } from '../../../test/render';
 import { CompanionRuntimeProvider } from '../../state/CompanionStateProvider';
 import { mergeChannelCardSnapshot, upsertChannelCard } from '../../state/control-plane/channelCards';
 import { reduceGatewayEvent } from '../../state/control-plane/eventReducer';
@@ -813,10 +813,10 @@ describe('channel cards that follow each other', () => {
     const run = screen.getByTestId('channel-card-run');
     expect(within(run).getByTestId('channel-card-1')).toBeTruthy();
     expect(within(run).getByTestId('channel-card-2')).toBeTruthy();
-    expect(getComputedStyle(run).gap).toBe('var(--t-space-list-row)');
+    expect(getComputedStyle(run).gap).toBe(cssVar('--t-space-list-row'));
     // 会话流里块和块之间（ChatList 的间隔，2026-11-04）。
     for (const gap of screen.getAllByTestId('lead-conversation-scroll-gap')) {
-      expect(getComputedStyle(gap).paddingTop).toBe('var(--t-space-conversation-block)');
+      expect(getComputedStyle(gap).paddingTop).toBe(cssVar('--t-space-conversation-block'));
     }
   });
 });

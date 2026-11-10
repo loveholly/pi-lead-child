@@ -1,4 +1,4 @@
-// @vitest-environment jsdom
+// @vitest-environment happy-dom
 // 设置的「本设备」和「已配对设备」（issue 06）。
 // 列出 binding 要 admin scope，普通的 companion 凭证没有它：网关回 403 时只列这台设备，并说明在 Mac 上怎样管理别的设备。
 import { ControlPlaneClientError } from '@pi-lead-child/client';

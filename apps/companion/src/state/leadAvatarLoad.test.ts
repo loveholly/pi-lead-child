@@ -1,4 +1,4 @@
-// @vitest-environment jsdom
+// @vitest-environment happy-dom
 // Lead 的形象（GET /v1/lead/avatar）要等 hello.v2 说 daemon 有 lead.avatar.v1 才能取：hydrate 在连上之前跑，
 // 那时还不知道。2026-10-28 预览时发现：直接打开设置页一直「正在读取形象…」，刷新以后 FairyEye 开着也画成素材。
 import { LEAD_AVATAR_CAPABILITY, type HelloV2, type LeadAvatarDto } from '@pi-lead-child/protocol';

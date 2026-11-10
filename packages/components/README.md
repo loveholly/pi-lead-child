@@ -171,4 +171,4 @@ Tamagui 组件（`Box`、`Row`、`Column`、`Text`、`Card`、`Pressable` 等）
 - `npm run typecheck` 做三遍类型检查：web（`tsconfig.test.json`）、iOS（`tsconfig.ios.json`）、Android（`tsconfig.android.json`）。
   后两遍用 `moduleSuffixes` 按 Metro 的规则解析平台文件。
 - `test/platform-contract.test.ts` 检查每个原生实现都有对应的 web 实现，导出同样的组件，并且从同一个 types 文件取 props。
-- `npm test` 在 jsdom 里渲染 web 实现，检查行为。
+- `npm test` 在 happy-dom 里渲染 web 实现，检查行为。

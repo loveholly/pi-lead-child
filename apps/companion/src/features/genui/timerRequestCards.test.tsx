@@ -1,4 +1,4 @@
-// @vitest-environment jsdom
+// @vitest-environment happy-dom
 // 外部的人要求设的定时器的确认卡（统一的消息事件 spec D16，工单 12）：代价不够低时，Lead 把系统给的 user_action（confirm_timer）
 // 原样放进 UserAction。卡片只带确认号，什么定时器、谁要求的、为什么问你都从 /v1/timer-requests/:id 读；
 // 「设定时器」「不设」走只有用户能按到的路由。样子是审批模式（docs/design P9.2、主题 11.4）。

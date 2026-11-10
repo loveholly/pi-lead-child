@@ -1,4 +1,4 @@
-// @vitest-environment jsdom
+// @vitest-environment happy-dom
 // 设置 → Lead → 身份与风格（2026-10-22）：名字、人格、互动风格。保存只发改了的字段，界面换成 daemon 回的值；
 // 名字改了以后，用名字的地方马上跟着换（useLeadName）。契约在 packages/protocol/src/lead-profile.ts。
 import type { LeadProfileDto } from '@pi-lead-child/protocol';

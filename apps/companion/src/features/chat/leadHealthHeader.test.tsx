@@ -1,4 +1,4 @@
-// @vitest-environment jsdom
+// @vitest-environment happy-dom
 // 会话顶栏的 Lead 状态点说真话：在线、降级（模型连不上，系统会自己重试，下一次几点）、离线。
 // 实例上每次 Lead 调模型都是 503，顶栏却一直亮着绿点：它只看 WebSocket 连没连上。
 import { PROTOCOL_VERSION, type GatewayEvent, type LeadStatus, type Overview } from '@pi-lead-child/protocol';

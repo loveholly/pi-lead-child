@@ -6,7 +6,7 @@ import { act, fireEvent, screen, waitFor } from '@testing-library/react';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import { CodeBlock, DataTable, TaskCheckbox, Text } from '../src';
-import { renderUI } from './render';
+import { cssVar, renderUI } from './render';
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -25,15 +25,15 @@ describe('CodeBlock', () => {
     renderUI(<CodeBlock testID="code" language="diff" code={'--- a/x.ts\n+++ b/x.ts\n@@ -1 +1 @@\n- const a = 1;\n+ const a = 2;\n  keep();'} />);
     expect(screen.getAllByTestId('code-diff-add')).toHaveLength(1);
     expect(screen.getAllByTestId('code-diff-del')).toHaveLength(1);
-    expect(getComputedStyle(screen.getByTestId('code-diff-add')).backgroundColor).toBe('var(--c-success-wash)');
-    expect(getComputedStyle(screen.getByTestId('code-diff-del')).backgroundColor).toBe('var(--c-danger-wash)');
+    expect(getComputedStyle(screen.getByTestId('code-diff-add')).backgroundColor).toBe(cssVar('--c-success-wash'));
+    expect(getComputedStyle(screen.getByTestId('code-diff-del')).backgroundColor).toBe(cssVar('--c-danger-wash'));
   });
 
   it('scrolls long lines sideways inside the block, not the page', () => {
     renderUI(<CodeBlock testID="code" code={'x'.repeat(400)} />);
     const scroller = screen.getByTestId('code-scroll');
     expect(getComputedStyle(scroller).overflowX).toBe('auto');
-    expect(getComputedStyle(screen.getByTestId('code')).backgroundColor).toBe('var(--c-surface-subtle)');
+    expect(getComputedStyle(screen.getByTestId('code')).backgroundColor).toBe(cssVar('--c-surface-subtle'));
   });
 });
 
@@ -49,10 +49,10 @@ describe('DataTable', () => {
       />,
     );
     expect(screen.getByText('用例')).toBeTruthy();
-    expect(getComputedStyle(screen.getByTestId('table-header')).backgroundColor).toBe('var(--c-surface-subtle)');
-    expect(getComputedStyle(screen.getByTestId('table-row-0')).backgroundColor).toBe('var(--c-surface)');
-    expect(getComputedStyle(screen.getByTestId('table-row-1')).backgroundColor).toBe('var(--c-surface)');
-    expect(getComputedStyle(screen.getByTestId('table-row-1')).borderTopColor).toBe('var(--c-border-soft)');
+    expect(getComputedStyle(screen.getByTestId('table-header')).backgroundColor).toBe(cssVar('--c-surface-subtle'));
+    expect(getComputedStyle(screen.getByTestId('table-row-0')).backgroundColor).toBe(cssVar('--c-surface'));
+    expect(getComputedStyle(screen.getByTestId('table-row-1')).backgroundColor).toBe(cssVar('--c-surface'));
+    expect(getComputedStyle(screen.getByTestId('table-row-1')).borderTopColor).toBe(cssVar('--c-border-soft'));
     expect(getComputedStyle(screen.getByTestId('table-scroll')).overflowX).toBe('auto');
   });
 });
@@ -82,7 +82,7 @@ describe('DataTable wider than its box', () => {
     const cells = columnWidths.map((_, index) => <Text key={index}>{`列 ${index + 1}`}</Text>);
     renderUI(<DataTable testID="table" columnWidths={columnWidths} header={cells} rows={[cells]} />);
     const scroll = screen.getByTestId('table-scroll');
-    // jsdom 不排版：几何量由测试给出。卡片里能给表格的宽度是 674。
+    // happy-dom 不排版：几何量由测试给出。卡片里能给表格的宽度是 674。
     const viewport = 674;
     const content = columnWidths.reduce((sum, width) => sum + width, 0) + 2;
     let left = 0;

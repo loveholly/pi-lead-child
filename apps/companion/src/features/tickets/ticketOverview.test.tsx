@@ -1,4 +1,4 @@
-// @vitest-environment jsdom
+// @vitest-environment happy-dom
 // 工单详情的头部（工单 12，spec 4.1）：编号、完整标题（可以换行，不截断）、状态、优先级、项目。
 // #66 的标题前面有「[E2E #51 T48-…]」：头部照原样写完整标题，不再拆进「详情」。
 import { screen, within } from '@testing-library/react';

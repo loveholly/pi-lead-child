@@ -1,4 +1,4 @@
-// @vitest-environment jsdom
+// @vitest-environment happy-dom
 // 工单 #231：工单详情的任务说明下面显示附件的缩略图，点开在面板里看大图；外部来源的附件写明来源。
 import type { TicketAttachment, TicketSummary } from '@pi-lead-child/protocol';
 import { act, cleanup, fireEvent, screen, waitFor, within } from '@testing-library/react';

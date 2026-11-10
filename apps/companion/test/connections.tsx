@@ -7,7 +7,7 @@ import { CompanionRuntimeProvider } from '../src/state/CompanionStateProvider';
 import { connectionAttention, createCompanionStateRuntime, type CompanionRuntimeDependencies } from '../src/state/runtime';
 import { renderUI } from './render';
 
-// 连接页和会话连接卡的测试数据。只能在 jsdom 环境的测试里用；测试文件自己 mock expo-crypto 和 expo-router。
+// 连接页和会话连接卡的测试数据。只能在 happy-dom 环境的测试里用；测试文件自己 mock expo-crypto 和 expo-router。
 
 export function connection(overrides: Partial<ConnectionDto> & Pick<ConnectionDto, 'key'>): ConnectionDto {
   return {

@@ -1,4 +1,4 @@
-// @vitest-environment jsdom
+// @vitest-environment happy-dom
 // 用户发的消息不能悄悄丢掉（2026-10-16：Mac 合盖睡眠时发的 3 条消息从来没到 daemon，重新加载以后就没了）。
 // 每条消息先进本地发件箱（web 是 localStorage，原生应用是文件），再上网络。断线时输入框照样能用，
 // 消息显示「待发送 · 连接恢复后发送」；连上以后按顺序发出，显示「已送达」。服务端拒收的显示「没有发出去」，
@@ -17,7 +17,7 @@ import { createCompanionStateRuntime, type CompanionTransport } from '../../stat
 import type { MessageEntity } from '../../state/types';
 import { LeadConversation, latestSentMessageKey } from './LeadConversation';
 
-// 顶栏的状态点、「正在回复」的转圈是 Reanimated 的循环动画。jsdom 里它们在组件卸载以后还在按帧更新，
+// 顶栏的状态点、「正在回复」的转圈是 Reanimated 的循环动画。happy-dom 里它们在组件卸载以后还在按帧更新，
 // 报未处理的错误。这些测试不看动画：在任何模块加载之前让动画帧不再触发。
 vi.hoisted(() => {
   window.requestAnimationFrame = () => 0;

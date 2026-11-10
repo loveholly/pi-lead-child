@@ -1,4 +1,4 @@
-// @vitest-environment jsdom
+// @vitest-environment happy-dom
 // 会话的底色和文字（方案 B）：会话栏是白底，是窗口里最亮的一层。Lead 的回复直接排在白底上，不加气泡；
 // 你的消息是浅灰气泡。主会话和工单对话用同一个气泡。正文和元信息（谁、几点）的对比度都到 WCAG AA。
 // @ts-ignore Vitest executes source checks in Node.

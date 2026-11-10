@@ -1,4 +1,4 @@
-// @vitest-environment jsdom
+// @vitest-environment happy-dom
 // 高风险的主人操作（工单 15 第一步）：有人用 CLI 凭证、回环网页或临时 admin 建的配对做了高风险操作时，
 // daemon 在会话里贴一张卡（轮次的来源是 system:owner-action），收件箱里也有一条通知。两处都有「不是我」：
 // 先在卡上再确认一次，再请网关撤销这次操作、作废发出它的凭证。别的设备上已经点过的，直接显示结果。

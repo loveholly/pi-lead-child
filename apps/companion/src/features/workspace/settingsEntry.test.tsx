@@ -1,4 +1,4 @@
-// @vitest-environment jsdom
+// @vitest-environment happy-dom
 // 桌面上设置的入口：侧栏头部「Paimon / N 个 Run 在跑」一行右边的齿轮（issue 06）。按真实的 Workbench 渲染。
 import { fireEvent, screen, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';

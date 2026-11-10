@@ -21,7 +21,8 @@ describe('ChatInput', () => {
     renderUI(<Controlled />);
     expect(textarea().tagName).toBe('TEXTAREA');
     expect(textarea().placeholder).toBe('给 Fairy 发消息');
-    expect(textarea().rows).toBe(1);
+    // happy-dom 的 rows 是字符串（浏览器里是数），读属性。
+    expect(textarea().getAttribute('rows')).toBe('1');
   });
 
   it('submits on Enter instead of inserting a newline', () => {

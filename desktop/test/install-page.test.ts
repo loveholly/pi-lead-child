@@ -1,6 +1,6 @@
 // 安装页（设计第 4.1、4.3 节）：按 desktop-install 的进度显示三行；失败时有「重试」「查看日志」「复制诊断信息」。
-import { JSDOM } from "jsdom";
-import { describe, expect, it, vi } from "vitest";
+import { Window } from "happy-dom";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { InstallProgress } from "../src/install.js";
 import { installView } from "../src/install-view.js";
 import { renderInstallView } from "../src/renderer/render.js";
@@ -18,11 +18,21 @@ function progress(extra: Partial<InstallProgress>): InstallProgress {
   };
 }
 
-// 根配置的 setup 文件不能在 jsdom 环境里跑，所以在 node 环境里自己建一个文档：渲染函数本来就收 document 参数。
+// 根配置的 setup 文件不能在 DOM 环境里跑，所以在 node 环境里自己建一个文档（happy-dom 的 Window）：
+// 渲染函数本来就收 document 参数。
+// 每画一次开一个新窗口；用例结束时全部关掉。
+const windows: Window[] = [];
 let document: Document;
 
+afterEach(async () => {
+  await Promise.all(windows.splice(0).map((window) => window.happyDOM.close()));
+});
+
 function draw(view: ReturnType<typeof installView>) {
-  document = new JSDOM("<!doctype html><html><head><title></title></head><body></body></html>").window.document;
+  const window = new Window();
+  windows.push(window);
+  window.document.write("<!doctype html><html><head><title></title></head><body></body></html>");
+  document = window.document as unknown as Document;
   const root = document.createElement("div");
   const act = vi.fn();
   renderInstallView(document, root, view, act);

@@ -1,4 +1,4 @@
-// @vitest-environment jsdom
+// @vitest-environment happy-dom
 // 连接流程（issue 07）：预览、浏览器授权（新窗口必须在点击里同步打开）、GitHub 设备码、完成，以及要先配置和自定义服务器。
 import { ControlPlaneClientError } from '@pi-lead-child/client';
 import type { StartConnectionResponse } from '@pi-lead-child/protocol';
@@ -10,7 +10,7 @@ import { FLOW_POLL_MS } from './ConnectFlow';
 import { ConnectionsSection } from './ConnectionsSection';
 
 vi.mock('expo-crypto', () => ({ getRandomBytesAsync: vi.fn(), digest: vi.fn(), CryptoDigestAlgorithm: {} }));
-// Spinner 的旋转是 Reanimated 的循环动画。它在测试中途被换掉（等授权 → 已连接）时，jsdom 里 Reanimated 还会给
+// Spinner 的旋转是 Reanimated 的循环动画。它在测试中途被换掉（等授权 → 已连接）时，happy-dom 里 Reanimated 还会给
 // 已经卸载的视图写一帧样式并抛错。这里换成一个不转的占位，别的组件照旧。
 vi.mock('@pi-lead-child/components', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@pi-lead-child/components')>()),

@@ -1,4 +1,4 @@
-// @vitest-environment jsdom
+// @vitest-environment happy-dom
 // 左栏头部的 Fairy（方案 C，2026-10-28，主题 F-4）：π 换成 FairyEye，Lead 在一轮里时在想，离线时灰色，
 // 离线和降级时下面一行写说明。
 import { screen, within } from '@testing-library/react';

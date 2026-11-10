@@ -1,4 +1,4 @@
-// @vitest-environment jsdom
+// @vitest-environment happy-dom
 // 「需要你」在每个界面上是同一个数。实例上曾经是会话底栏 3、收件箱 4，而 Lead 说 5：
 // 底栏漏了 #66（独立核查未派发），底栏和收件箱都漏了阻塞的子工单 #75。
 // 这里按实例上的工单渲染真正的 Workbench，读用户看得到的数字。
@@ -76,7 +76,7 @@ function runtimeWith(tickets: TicketSummary[]) {
   return runtime;
 }
 
-// react-native-web 的窗口宽度读 document.documentElement.clientWidth，jsdom 里它是 0。
+// react-native-web 的窗口宽度读 document.documentElement.clientWidth，happy-dom 里它是 0。
 function setWidth(width: number) {
   Object.defineProperty(document.documentElement, 'clientWidth', { configurable: true, value: width });
   Object.defineProperty(document.documentElement, 'clientHeight', { configurable: true, value: 800 });

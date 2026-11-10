@@ -1,5 +1,5 @@
-// @vitest-environment jsdom
-// 测试环境本身的约定：图标不在 jsdom 里加载字体，原因见 test/setup.ts 和 apps/companion/src/testFontLoading.test.tsx。
+// @vitest-environment happy-dom
+// 测试环境本身的约定：图标不在 happy-dom 里加载字体，原因见 test/setup.ts 和 apps/companion/src/testFontLoading.test.tsx。
 import { act } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';
 

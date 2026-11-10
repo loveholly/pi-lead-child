@@ -1,4 +1,4 @@
-// @vitest-environment jsdom
+// @vitest-environment happy-dom
 // 工单 07（Lead 事件主干 spec D10、D11）：提醒在会话里的样子。
 //   · 到点卡：daemon 推来一张提醒卡（resource=lead-activity，带 reminder），会话里马上出现，不等 Lead：
 //     时间、事情、「重要」标记、推送的情况，「知道了」「10 分钟后再提醒」。

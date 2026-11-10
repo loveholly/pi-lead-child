@@ -1,4 +1,4 @@
-// @vitest-environment jsdom
+// @vitest-environment happy-dom
 // 请你做一件事的通用卡（2026-10-19，protocol 的 user-actions.ts）：Lead 把系统给的「需要用户做什么」原样放进 UserAction。
 // 客户端按 kind 画控件，不按服务写特例：重新授权就是连接卡，走和设置页一样的连接流程；验收打开工单。
 import { userActionRequest, type UiSurface, type UserActionRequest } from '@pi-lead-child/protocol';

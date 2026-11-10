@@ -1,4 +1,4 @@
-// @vitest-environment jsdom
+// @vitest-environment happy-dom
 // 改规则被拦下以后的确认卡（统一的消息事件 spec D10 的「放行」，工单 09）：Lead 把系统给的 user_action（confirm_rule_change）
 // 原样放进 UserAction。卡片只带确认号，要改什么、参数、为什么改、为什么被拦都从 /v1/rule-changes/:id 读；
 // 「确认这一次」「不改」走只有用户能按到的路由。样子是审批模式（docs/design P9.2、主题 11.4）。

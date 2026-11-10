@@ -74,7 +74,7 @@ function ChatBlockScope({ blockKey, keep, children }: { blockKey: string; keep: 
 // · 你发了消息（followKey 变了）：回到底部，继续跟随。
 // · 会话栏变宽、变窄时，你刚点的那一块留在原来的高度（web，anchorVisibleContent）。
 // · 不开 recycleItems：消息里有局部状态（展开的工具详情、genui 表单），复用别的块的实例会串。
-// 量不出行高的地方（jsdom 测试、没有 ResizeObserver 的浏览器）不虚拟化，每一块都画出来（ChatListAll）。
+// 量不出行高的地方（测试的 DOM 环境里没有 ResizeObserver；没有它的浏览器也一样）不虚拟化，每一块都画出来（ChatListAll）。
 export function ChatList<T>(props: ChatListProps<T>) {
   const measurable = Platform.OS !== 'web' || typeof ResizeObserver !== 'undefined';
   return measurable ? <VirtualChatList {...props} /> : <ChatListAll {...props} />;
@@ -255,7 +255,7 @@ function VirtualChatList<T>({
   );
 }
 
-// 不虚拟化：每一块都画在普通的滚动区里（jsdom 测试里量不出行高，虚拟化以后一块也不画）。跟随底部、「新消息 ↓」都没有。
+// 不虚拟化：每一块都画在普通的滚动区里（测试的 DOM 环境里量不出行高，虚拟化以后一块也不画）。跟随底部、「新消息 ↓」都没有。
 function ChatListAll<T>({
   data, keyExtractor, renderItem, testID, bottomAligned = true, gap = 'conversation-block', header, footer, empty,
 }: ChatListProps<T>) {

@@ -2,7 +2,7 @@ import { fireEvent, screen } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 
 import { Avatar, Badge, EmptyState, Link, List, ListItem, MessageBubble, ProgressBar, safeLink, Text } from '../src';
-import { renderUI } from './render';
+import { cssVar, renderUI } from './render';
 
 describe('Badge', () => {
   it('shows its label and detail', () => {
@@ -34,8 +34,8 @@ describe('MessageBubble', () => {
     const bubble = screen.getByTestId('bubble');
     const style = getComputedStyle(bubble);
     expect(bubble.textContent).toBe('把 #71 发布一下');
-    // jsdom 不解析 CSS 变量：断言底色落在 surface-muted 上，不是深色的 text。
-    expect(style.backgroundColor).toBe('var(--c-surface-muted)');
+    // 断言底色落在 surface-muted 上，不是深色的 text。
+    expect(style.backgroundColor).toBe(cssVar('--c-surface-muted'));
     expect(style.borderTopLeftRadius).toBe('16px');
     expect(style.borderBottomLeftRadius).toBe('16px');
     expect(style.borderBottomRightRadius).toBe('4px');
@@ -86,7 +86,7 @@ describe('List', () => {
         <ListItem title="两行" subtitle={subtitle} subtitleLines={2} testID="two" />
       </List>,
     );
-    // Tamagui 在 web 上把 1 行渲染成不换行加省略号，多行用 -webkit-line-clamp（jsdom 读不到它，所以看是否换行）。
+    // Tamagui 在 web 上把 1 行渲染成不换行加省略号，多行用 -webkit-line-clamp（这里不读它，看是否换行）。
     const style = (testID: string) => {
       const element = [...screen.getByTestId(testID).querySelectorAll('*')].find((node) => node.textContent === subtitle)!;
       return getComputedStyle(element);

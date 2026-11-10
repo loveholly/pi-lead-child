@@ -6,7 +6,7 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   Badge, BarChart, FactList, Progress, Stats, Steps, Timeline, estimatedTextWidth, formatNumber, isNumericColumn, tableColumnWidth,
 } from '../src';
-import { renderUI } from './render';
+import { cssVar, renderUI } from './render';
 
 describe('Steps', () => {
   const items = [
@@ -26,8 +26,8 @@ describe('Steps', () => {
 
   it('colours a blocked step amber, apart from a failed one', () => {
     renderUI(<Steps items={items} />);
-    expect(getComputedStyle(screen.getByLabelText('Blocked')).backgroundColor).toBe('var(--c-warning)');
-    expect(getComputedStyle(screen.getByLabelText('Failed')).backgroundColor).toBe('var(--c-danger)');
+    expect(getComputedStyle(screen.getByLabelText('Blocked')).backgroundColor).toBe(cssVar('--c-warning'));
+    expect(getComputedStyle(screen.getByLabelText('Failed')).backgroundColor).toBe(cssVar('--c-danger'));
   });
 
   it('draws the plan in the ticket detail with small light marks and no connecting line', () => {
@@ -40,8 +40,8 @@ describe('Steps', () => {
     const compact = screen.getByTestId('compact');
     const done = compact.querySelector('[aria-label="Done"]')!;
     expect(getComputedStyle(done).width).toBe('18px');
-    expect(getComputedStyle(done).backgroundColor).toBe('var(--c-success-soft)');
-    expect(getComputedStyle(compact.querySelector('[aria-label="Blocked"]')!).backgroundColor).toBe('var(--c-warning-soft)');
+    expect(getComputedStyle(done).backgroundColor).toBe(cssVar('--c-success-soft'));
+    expect(getComputedStyle(compact.querySelector('[aria-label="Blocked"]')!).backgroundColor).toBe(cssVar('--c-warning-soft'));
     expect(compact.textContent).toContain('跳过：宿主架构层已经分好层。');
     // 聊天卡片的步骤之间有一条连线，执行计划没有。
     const line = (root: HTMLElement) => [...root.querySelectorAll('div')].filter((node) => getComputedStyle(node).width === '2px').length;
@@ -57,7 +57,7 @@ describe('Stats', () => {
     expect(stats.textContent).toContain('5,981,433');
     expect(stats.textContent).toContain('token');
     expect(stats.textContent).toContain('$2.58');
-    expect(getComputedStyle(screen.getByText('缓存读取 94%')).color).toBe('var(--c-accent)');
+    expect(getComputedStyle(screen.getByText('缓存读取 94%')).color).toBe(cssVar('--c-accent'));
   });
 
   it('shares one row between the tiles in the compact usage view', () => {
@@ -91,7 +91,7 @@ describe('Timeline', () => {
     const row = screen.getByText('15:18').parentElement!;
     expect(getComputedStyle(row).flexDirection).toBe('row');
     expect(row.textContent).toBe('15:18第 1 次交付，进入核查。');
-    expect(getComputedStyle(screen.getByText('核查员从 Codex 自动换成 Pi。')).color).toBe('var(--c-warning-dark)');
+    expect(getComputedStyle(screen.getByText('核查员从 Codex 自动换成 Pi。')).color).toBe(cssVar('--c-warning-dark'));
   });
 });
 
@@ -141,7 +141,7 @@ describe('Badge', () => {
     renderUI(<Badge testID="verdict" label="通过" tone="success" size="xs" />);
     const style = getComputedStyle(screen.getByTestId('verdict'));
     expect(style.height).toBe('20px');
-    expect(style.backgroundColor).toBe('var(--c-success-soft)');
+    expect(style.backgroundColor).toBe(cssVar('--c-success-soft'));
   });
 });
 

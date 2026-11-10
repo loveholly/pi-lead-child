@@ -3,7 +3,7 @@ import { fireEvent, screen } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 
 import { RecordRow, Text } from '../src';
-import { renderUI } from './render';
+import { cssVar, renderUI } from './render';
 
 describe('RecordRow', () => {
   it('shows the id, the title, the meta, the detail and the status of a run', () => {
@@ -81,6 +81,6 @@ describe('RecordRow', () => {
     expect(getComputedStyle(screen.getByTestId('first')).borderTopWidth).toBe('0px');
     const second = getComputedStyle(screen.getByTestId('second'));
     expect(second.borderTopWidth).toBe('1px');
-    expect(second.borderTopColor).toBe('var(--c-border-soft)');
+    expect(second.borderTopColor).toBe(cssVar('--c-border-soft'));
   });
 });

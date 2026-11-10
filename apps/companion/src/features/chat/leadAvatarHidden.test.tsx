@@ -1,4 +1,4 @@
-// @vitest-environment jsdom
+// @vitest-environment happy-dom
 // FairyEye 是隐藏模式（用户 2026-10-28 的底线：只有输入 /fairyeye on 才显示矢量组件）。
 // 缺省时左栏、顶栏和消息头都画素材；daemon 说 fairyEye 开着时才画 FairyEye。
 import type { ConversationTurn, LeadAvatarDto } from '@pi-lead-child/protocol';

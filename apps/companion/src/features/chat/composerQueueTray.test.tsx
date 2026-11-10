@@ -1,4 +1,4 @@
-// @vitest-environment jsdom
+// @vitest-environment happy-dom
 // 输入框上的状态栏（主题 11.13，2026-10-28 方案 C）：贴着输入框，默认收起，只露最新一条你的追问；
 // 展开时其余几条从这一行往上长出来。每条追问上有 Steer 和 ×；外部消息不给 Steer。
 // daemon 支持时，发送前不再选「插话/排队」，Lead 忙时发出的话一律先排队。

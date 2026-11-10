@@ -1,4 +1,4 @@
-// @vitest-environment jsdom
+// @vitest-environment happy-dom
 // 工单 #66 的 Run #71（2026-10-13）：工单对话这一轮失败了，agent 一个字也没说。
 // 卡片上是一个空的 agent 气泡，下面一条红色错误。normalize 给每一轮都建一个文本部分，
 // 回答为空时它也在，所以旧的判断把它当成内容。只显示错误就够了。

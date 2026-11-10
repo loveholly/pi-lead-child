@@ -1,4 +1,4 @@
-// @vitest-environment jsdom
+// @vitest-environment happy-dom
 // 原生应用本身就是手机：设置 → 设备里不显示「添加手机」。组件测试在 react-native-web 上渲染，
 // 这里把 isWeb 换成 false，模拟 iOS 和 Android 上的同一棵组件树。
 import { ControlPlaneClientError } from '@pi-lead-child/client';

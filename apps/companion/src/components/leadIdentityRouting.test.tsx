@@ -1,4 +1,4 @@
-// @vitest-environment jsdom
+// @vitest-environment happy-dom
 // 会话顶栏的 Lead 名字：已经配对时打开设置的「本设备」，还没配对时照旧打开配对页（issue 06）。
 // 手机上没有第五个 tab，这里就是设置的入口。
 import { fireEvent, screen } from '@testing-library/react';

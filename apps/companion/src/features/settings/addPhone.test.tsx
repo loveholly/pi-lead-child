@@ -1,4 +1,4 @@
-// @vitest-environment jsdom
+// @vitest-environment happy-dom
 // 设置 → 设备 → 添加手机（web）：生成配对二维码、倒计时、过期后重新生成、手机兑换后显示已配对。
 // 邀请 URI 是凭证：页面上只画二维码，不出现 URI 的文字。原生端不显示入口（见 addPhoneNative.test.tsx）。
 import { ControlPlaneClientError } from '@pi-lead-child/client';

@@ -1,4 +1,4 @@
-// @vitest-environment jsdom
+// @vitest-environment happy-dom
 // 审查发现（3688968）：失败行和提醒卡的单元测试只测了函数本身，没有锁住界面怎样把数据接进去。
 // 这里从界面渲染：去掉 LeadConversation 传给失败行的 tools，「重发」会回来，这里就失败；
 // 会话里提到提醒的另外两处（消息里的工单部件、Lead 画的卡片里的 TicketRef）也画成提醒、去日程。

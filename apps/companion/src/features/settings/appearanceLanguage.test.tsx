@@ -1,4 +1,4 @@
-// @vitest-environment jsdom
+// @vitest-environment happy-dom
 // 界面语言（2026-11-01）：缺省英文；在设置 → 外观里选「中文」立即保存，整个界面马上换成中文，不等表单的「保存」。
 // 语言存在外观偏好里（protocol 的 design-preferences.ts 的 locale），Lead 的 update_design_preferences 也能改。
 import { DEFAULT_DESIGN_PREFERENCES, type DesignPreferencesDto, type DesignPreferencesRequest } from '@pi-lead-child/protocol';

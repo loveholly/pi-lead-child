@@ -1,4 +1,4 @@
-// @vitest-environment jsdom
+// @vitest-environment happy-dom
 // 历史卡片写它那个时刻的状态。实例上一张 child 消息卡片写着「已提交复核」，旁边一行粗体「当前工单：完成」，
 // 看起来像这条消息自己在说"完成"。现在卡片只写事件当时的状态；工单后来变了，另起一个小标签「现在：…」。
 import type { KernelCheckpoint, TicketSummary } from '@pi-lead-child/protocol';

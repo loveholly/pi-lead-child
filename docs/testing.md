@@ -33,10 +33,16 @@ PLC_TEST_SERIAL=1 npm test
 
 ## companion 测试：按运行环境分两组
 
-- `dom`：文件头写了 `// @vitest-environment jsdom` 的文件。用 `vmThreads`：每个 worker 只建一次 jsdom，每个文件在新的 VM 上下文里跑。
+- `dom`：文件头写了 `// @vitest-environment happy-dom` 的文件。用 `vmThreads`：每个 worker 只建一次 DOM 环境，每个文件在新的 VM 上下文里跑。
 - `node`：其余文件。用 `threads`，每个文件隔离。
 
 两组都不关隔离：一半以上的文件用 `vi.mock`。
+
+## 界面测试的 DOM 环境：happy-dom
+
+companion 的 `dom` 组和 `packages/components` 的测试都在 happy-dom 里渲染。happy-dom 有几处和浏览器不一样，`test/domShims.ts` 在 setup 里补齐它们：媒体查询一律不匹配、去掉不会回调的 `ResizeObserver`、只让能聚焦的元素拿到焦点、补全 `flex` 的两值写法。两个包各有一份 `test/domShims.ts`，内容一样：包之间不能用相对路径互相引用。
+
+happy-dom 的 `getComputedStyle` 会解析 CSS 变量，颜色照写法给出（例如 `#1868DB`、`transparent`，不换成 `rgb(…)`）。断言某处用了某个 token 时，用 `test/render.tsx` 的 `cssVar('--c-surface')` 取这个 token 的值来比。
 
 ## 只在 macOS 上跑的测试
 

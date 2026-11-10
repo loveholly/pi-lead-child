@@ -1,4 +1,4 @@
-// @vitest-environment jsdom
+// @vitest-environment happy-dom
 // 设置 → Lead → 记忆：现状怎样说、待确认的切换、Hindsight 的摘要模型和写入、embedding 和重排的保存。模型页（大脑和直觉）在 modelSettings.test.tsx。
 // 契约在 packages/protocol/src/memory.ts 和 memory-hindsight.ts；客户端方法是假的，断言的是界面发出的请求和操作。
 import { ControlPlaneClientError } from '@pi-lead-child/client';

@@ -1,4 +1,4 @@
-// @vitest-environment jsdom
+// @vitest-environment happy-dom
 // 工单详情底部的对话坞（方案 D）：收起时露出最新一条、你刚做的动作和正在跑的 Run，输入框一直在。
 // #66：对话排在长页面的最后（第 3 到第 10 屏）；手机上没有输入框；点了「派发独立核查」对话里什么都没有，
 // 核查 Run #73 停在 starting 也没有任何地方说。

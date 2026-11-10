@@ -4,7 +4,7 @@ import { useState } from 'react';
 import { describe, expect, it, vi } from 'vitest';
 
 import { Section, Text } from '../src';
-import { renderUI } from './render';
+import { cssVar, renderUI } from './render';
 
 describe('Section', () => {
   it('shows its title, where it comes from, its summary and its content', () => {
@@ -77,9 +77,9 @@ describe('Section', () => {
     );
     const card = getComputedStyle(screen.getByTestId('card'));
     expect(card.borderTopWidth).toBe('1px');
-    expect(card.backgroundColor).toBe('var(--c-surface)');
+    expect(card.backgroundColor).toBe(cssVar('--c-surface'));
     const subtle = getComputedStyle(screen.getByTestId('subtle'));
-    expect(subtle.backgroundColor).toBe('var(--c-surface-subtle)');
+    expect(subtle.backgroundColor).toBe(cssVar('--c-surface-subtle'));
     expect(subtle.borderTopWidth).not.toBe('1px');
     expect(getComputedStyle(screen.getByTestId('group')).borderTopWidth).not.toBe('1px');
     const part = getComputedStyle(screen.getByTestId('part'));
@@ -94,7 +94,7 @@ describe('Section', () => {
         <Section testID="flush" title="改动的文件" inset={false}><Text>行</Text></Section>
       </>,
     );
-    // Tamagui 把 px 写成 padding-inline，jsdom 不把它换算成 padding-left，所以直接读这一项。
+    // Tamagui 把 px 写成 padding-inline，所以直接读这一项。
     const padded = getComputedStyle(screen.getByTestId('padded-body'));
     expect(padded.getPropertyValue('padding-inline')).toBe('14px');
     expect(padded.paddingBottom).toBe('12px');

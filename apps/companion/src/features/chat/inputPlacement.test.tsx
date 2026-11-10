@@ -1,4 +1,4 @@
-// @vitest-environment jsdom
+// @vitest-environment happy-dom
 // 用户的消息在 Lead 忙时怎么放（工单 04，spec D6、D10）。daemon 在 lead.turn.started 里说明放置方式（payload.placement），
 // 会话快照（include=placement）也带着它。用户的消息下面写「排队中」「已插入」「下一轮回答」；
 // 没有自己回答、和后面那一条一起答了的消息，写「和下一条一起回答」，不是失败卡片。Lead 正忙时，输入框上面可以选插话或排队。

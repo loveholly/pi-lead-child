@@ -1,10 +1,11 @@
-// @vitest-environment jsdom
+// @vitest-environment happy-dom
 // 设置 → 连接（issue 07）：三组、健康条、侧栏角标，以及一个连接的详情。
 import { ControlPlaneClientError } from '@pi-lead-child/client';
 import { fireEvent, screen, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { connection, connectionsRuntime, renderWithRuntime, setViewportWidth } from '../../../test/connections';
+import { cssVar } from '../../../test/render';
 import SettingsLayout from '../../app/settings/_layout';
 import { ConnectionDetail } from './ConnectionDetail';
 import { ConnectionsSection } from './ConnectionsSection';
@@ -150,7 +151,7 @@ describe('the settings sidebar', () => {
     renderWithRuntime(<SettingsLayout />, runtime);
     const badge = screen.getByTestId('settings-nav-connections-badge');
     expect(badge.textContent).toBe('2');
-    expect(getComputedStyle(badge.firstElementChild!).backgroundColor).toBe('var(--c-warning)');
+    expect(getComputedStyle(badge.firstElementChild!).backgroundColor).toBe(cssVar('--c-warning'));
   });
 
   it('shows the selected connection in a drawer next to the list on desktop', () => {

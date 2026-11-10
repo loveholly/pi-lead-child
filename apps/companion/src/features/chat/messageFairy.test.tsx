@@ -1,4 +1,4 @@
-// @vitest-environment jsdom
+// @vitest-environment happy-dom
 // 消息头的形象（方案 C，2026-10-28，主题 F-5、11.10）：桌面上 Lead 的消息头前面有 Lead 的形象。
 // 最新的一条用默认的图：回复时在想，答完了待机。更早的用淡彩、静止（P12.4）。daemon 写的系统通知不加。
 // 缺省画素材；FairyEye 是隐藏模式（/fairyeye on），那时最新的一条用彩色、更早的用淡彩。
@@ -79,7 +79,8 @@ describe('the Fairy in Lead message headers', () => {
     const marks = screen.getAllByTestId('message-fairy');
     // 两条 Lead 的回答各一个；系统通知没有。
     expect(marks).toHaveLength(2);
-    expect(marks.map(discColor)).toEqual(['rgb(123, 140, 232)', 'rgb(48, 69, 220)']);
+    // happy-dom 照动画写的样子给出颜色（rgba(…, 1.00)），浏览器会换成 rgb(123, 140, 232)。
+    expect(marks.map(discColor)).toEqual(['rgba(123, 140, 232, 1.00)', 'rgba(48, 69, 220, 1.00)']);
     expect(marks.map((mark) => mark.getAttribute('aria-label'))).toEqual(['Jarvis', 'Jarvis']);
   });
 

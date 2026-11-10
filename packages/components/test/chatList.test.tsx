@@ -1,10 +1,10 @@
-// 聊天列表（ChatList）：主会话和工单对话共用。jsdom 量不出行高（没有 ResizeObserver），列表不虚拟化，
+// 聊天列表（ChatList）：主会话和工单对话共用。happy-dom 量不出行高（test/domShims.ts 去掉了它的 ResizeObserver），列表不虚拟化，
 // 每一块都画出来：会话的测试照样看得到每一条消息。
 import { screen } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';
 
 import { ChatList, Text } from '../src';
-import { renderUI } from './render';
+import { cssVar, renderUI } from './render';
 
 type Block = { id: string; text: string };
 const blocks: Block[] = [{ id: 'a', text: '第一块' }, { id: 'b', text: '第二块' }, { id: 'c', text: '第三块' }];
@@ -25,7 +25,7 @@ describe('the chat list where rows cannot be measured', () => {
     expect(text).toBe('上面第一块第二块第三块下面');
     const gaps = screen.getAllByTestId('chat-gap');
     expect(gaps).toHaveLength(2);
-    for (const gap of gaps) expect(getComputedStyle(gap).paddingTop).toBe('var(--t-space-conversation-block)');
+    for (const gap of gaps) expect(getComputedStyle(gap).paddingTop).toBe(cssVar('--t-space-conversation-block'));
   });
 
   it('shows the empty state when there is no block', () => {

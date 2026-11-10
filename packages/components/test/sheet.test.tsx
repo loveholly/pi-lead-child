@@ -25,7 +25,7 @@ function sheet(open: boolean, onClose = vi.fn()) {
 describe('Sheet', () => {
   it('shows nothing while closed', () => {
     sheet(false);
-    // Reanimated 在 web 上先把入场的元素设为 visibility: hidden，jsdom 不运行动画，所以带上 hidden。
+    // Reanimated 在 web 上先把入场的元素设为 visibility: hidden，happy-dom 不运行动画，所以带上 hidden。
     expect(screen.queryByRole('dialog', { hidden: true })).toBeNull();
     expect(screen.queryByText('模型')).toBeNull();
   });

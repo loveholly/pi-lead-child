@@ -1,4 +1,4 @@
-// @vitest-environment jsdom
+// @vitest-environment happy-dom
 // 设置 → 消息通道 → 自动代你处理（交接说明，方案 B，2026-10-30，issue 07）。契约在 packages/protocol/src/channel-handbook.ts；后端是
 // 操作层的 channel_handbook，这里用假的 client。核对：句子按段落排，带下划线的短语点开选做法，选了马上把整份交接说明交给 daemon；
 // 对方的上限里客户不能放开；开关马上保存；预演只读，写明按哪一句、被什么压过、最后怎么做；加一句放在「你加的」；

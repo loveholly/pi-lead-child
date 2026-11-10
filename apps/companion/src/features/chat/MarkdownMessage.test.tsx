@@ -1,8 +1,8 @@
-// @vitest-environment jsdom
+// @vitest-environment happy-dom
 import { screen } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';
 
-import { fontClass, renderUI } from '../../../test/render';
+import { cssVar, fontClass, renderUI } from '../../../test/render';
 import { MarkdownMessage } from './MarkdownMessage';
 
 describe('MarkdownMessage', () => {
@@ -10,7 +10,7 @@ describe('MarkdownMessage', () => {
   it('takes the width of the column it sits in', () => {
     renderUI(<MarkdownMessage markdown="门都过了。验收时打开工单 #66。" />);
     const root = getComputedStyle(screen.getByTestId('markdown-message'));
-    expect(root.maxWidth).not.toBe('var(--t-size-prose)');
+    expect(root.maxWidth).not.toBe(cssVar('--t-size-prose'));
     expect(root.width).toBe('100%');
   });
 
@@ -107,16 +107,16 @@ describe('MarkdownMessage', () => {
     it('sets body text in the message-body size with the font line height, and reply-block between the blocks', () => {
       renderUI(<MarkdownMessage markdown={'**结论。**\n\n## 标题\n\n已在原工单派发。\n\n- 一项\n- 两项'} />);
       const roots = screen.getAllByTestId('markdown-inline-root');
-      expect(getComputedStyle(roots.at(-1)!).fontSize).toBe('var(--f-size-message-body)');
+      expect(getComputedStyle(roots.at(-1)!).fontSize).toBe(cssVar('--f-size-message-body', roots.at(-1)!));
       for (const root of roots) expect(getComputedStyle(root).lineHeight).toBe('normal');
-      expect(getComputedStyle(screen.getByTestId('markdown-message').firstElementChild!).gap).toBe('var(--t-space-reply-block)');
-      expect(getComputedStyle(screen.getByTestId('markdown-list')).gap).toBe('var(--t-space-list-row)');
+      expect(getComputedStyle(screen.getByTestId('markdown-message').firstElementChild!).gap).toBe(cssVar('--t-space-reply-block'));
+      expect(getComputedStyle(screen.getByTestId('markdown-list')).gap).toBe(cssVar('--t-space-list-row'));
     });
 
     it('shows a first all-bold paragraph as the lead sentence', () => {
       renderUI(<MarkdownMessage markdown={'**PR #9789 的 SSR 冒烟没通过。**\n\n没有水合错误。'} />);
       const lead = getComputedStyle(inlineRoot(screen.getByTestId('markdown-lead')));
-      expect(lead.fontSize).toBe('var(--f-size-message-lead)');
+      expect(lead.fontSize).toBe(cssVar('--f-size-message-lead', inlineRoot(screen.getByTestId('markdown-lead'))));
       expect(fontClass(inlineRoot(screen.getByTestId('markdown-lead')))).toBe('font_bold');
       expect(screen.getAllByTestId('markdown-lead')).toHaveLength(1);
     });
@@ -161,7 +161,7 @@ describe('MarkdownMessage', () => {
     it('mutes the text of a block quote', () => {
       renderUI(<MarkdownMessage markdown={'> 注意：核查还没派发。'} />);
       const quote = screen.getByTestId('markdown-quote');
-      expect(getComputedStyle(quote.querySelector('[data-testid="markdown-inline-root"]')!).color).toBe('var(--c-text-secondary)');
+      expect(getComputedStyle(quote.querySelector('[data-testid="markdown-inline-root"]')!).color).toBe(cssVar('--c-text-secondary'));
     });
   });
 });

@@ -1,4 +1,4 @@
-// @vitest-environment jsdom
+// @vitest-environment happy-dom
 // 设置 → 账号 → 消息通道（2026-10-20）。每个来源一张卡：状态、缺的权限、每个密钥来自哪里（不显示值）、
 // 不回显的输入框、「测试」「保存」（没过时逐项显示检查）、只对设置页存的密钥给「断开」、可展开可复制的应用清单。
 // 不是这台 Mac 的网页（editable=false）只显示状态。契约在 packages/protocol/src/channel-settings.ts；后端是 S1，这里用假的 client。

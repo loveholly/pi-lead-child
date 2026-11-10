@@ -7,7 +7,7 @@ import { renderUI } from './render';
 describe('SlidePanel', () => {
   it('exposes a modal panel as a dialog that covers its parent', () => {
     renderUI(<SlidePanel edge="right" modal><Text testID="body">工单</Text></SlidePanel>);
-    // Reanimated 在 web 上先把入场的元素设为 visibility: hidden，动画开始时再显示。jsdom 不运行动画，所以要带上 hidden。
+    // Reanimated 在 web 上先把入场的元素设为 visibility: hidden，动画开始时再显示。happy-dom 不运行动画，所以要带上 hidden。
     const dialog = screen.getByRole('dialog', { hidden: true });
     expect(dialog.contains(screen.getByTestId('body'))).toBe(true);
     expect(getComputedStyle(dialog).position).toBe('absolute');

@@ -1,4 +1,4 @@
-// @vitest-environment jsdom
+// @vitest-environment happy-dom
 // 会话里的记忆切换卡：Lead 收到要确认的 memory_switch 后发一张 MemorySwitchConfirm，卡片只带切换号，
 // 状态从 /v1/memory/switches/:id 实时读取；确认只来自你按的按钮。
 import { ControlPlaneClientError } from '@pi-lead-child/client';

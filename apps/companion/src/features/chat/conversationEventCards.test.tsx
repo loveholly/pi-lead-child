@@ -1,4 +1,4 @@
-// @vitest-environment jsdom
+// @vitest-environment happy-dom
 // 工单 06（Lead 事件主干 spec D10）：会话里的卡片和状态。
 //   · 「Lead 动态」里每种卡片的状态：摘要、自动处理、常设指令的修改、Lead 自己处理掉的事、Lead 的补充、别处已处理；
 //     每一行写明依据（常设指令的编号和版本）。

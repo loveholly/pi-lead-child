@@ -1,4 +1,4 @@
-// @vitest-environment jsdom
+// @vitest-environment happy-dom
 // 2026-10-20：daemon 重启时页面只重连 WebSocket，不重新加载 JS。01:27 打开的页面在部署组件目录 v2 以后一直跑旧代码，
 // 新组件的卡只剩纯文本，App 里没有任何「发现新版本」的机制。
 // 现在网页由 daemon 提供时，App 每次连上（hello.v2）、每次回到前台都读一次 daemon 现在提供的网页版本，和自己的比较。

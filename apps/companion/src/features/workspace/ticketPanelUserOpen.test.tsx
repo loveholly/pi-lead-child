@@ -1,4 +1,4 @@
-// @vitest-environment jsdom
+// @vitest-environment happy-dom
 // 工单详情只在用户自己打开时出现（2026-10-16 用户决定）：Lead 会话是主界面。
 // 以前桌面上没有选中的工单时，工作台自己选一张在做的工单并打开详情（Workbench.web 的 effect）：
 //   · 每次刷新页面都自己打开 #66（工作区的状态不落盘，刷新后没有选中）；

@@ -1,4 +1,4 @@
-// @vitest-environment jsdom
+// @vitest-environment happy-dom
 // 会话按事件时间排，日期变了插一条日期分隔线。
 // 实例上一条写着 20:28 的 Lead 回合排在 19:12 的系统通知上面：那条通知播报回合 19:07 开始，
 // 20:28 重试时又失败了。气泡上写的是最后一次（updatedAt），排序却用开始时间（createdAt）。气泡上的时间要和位置一致。

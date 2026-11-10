@@ -1,4 +1,4 @@
-// @vitest-environment jsdom
+// @vitest-environment happy-dom
 // 设置 → Lead → 模型（方案 B，2026-10-29，.scratch/model-settings/spec.md）：现在的分工（大脑和直觉各一个主用、最多 3 个备用）
 // 和模型库（按服务商分组、可以折叠、最新的在上面）。客户端是假的，断言的是界面发出的操作（model_settings）。
 import { ControlPlaneClientError } from '@pi-lead-child/client';

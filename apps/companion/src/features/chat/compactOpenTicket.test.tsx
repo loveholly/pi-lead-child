@@ -1,4 +1,4 @@
-// @vitest-environment jsdom
+// @vitest-environment happy-dom
 // 手机宽度下，在会话里点工单消息回执（「发给 #N 的工单消息」）或嵌入的工单卡片，要打开工单。
 // 以前它们只选中工单、把面板设成 thread，没有离开会话页；而会话页不画工单面板，
 // 用户看到的只是页眉变成「#N · 当前工单」。这里渲染真正的 Workbench，按用户看得到的结果断言。
@@ -73,7 +73,7 @@ function runtimeOnConversation() {
   return runtime;
 }
 
-// react-native-web 的窗口宽度读 document.documentElement.clientWidth，jsdom 里它是 0。
+// react-native-web 的窗口宽度读 document.documentElement.clientWidth，happy-dom 里它是 0。
 function setWidth(width: number) {
   Object.defineProperty(document.documentElement, 'clientWidth', { configurable: true, value: width });
   Object.defineProperty(document.documentElement, 'clientHeight', { configurable: true, value: 800 });

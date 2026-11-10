@@ -5,7 +5,7 @@ import { fireEvent, screen } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 
 import { NoticeRow } from '../src';
-import { renderUI } from './render';
+import { cssVar, renderUI } from './render';
 
 describe('NoticeRow', () => {
   it('is one row with the sentence and the count, and opens to show the details', () => {
@@ -41,6 +41,6 @@ describe('NoticeRow', () => {
     renderUI(<NoticeRow testID="notice" tone="danger" title="出错了" />);
     const style = getComputedStyle(screen.getByTestId('notice'));
     expect(style.borderLeftWidth).toBe('3px');
-    expect(style.backgroundColor).toBe('var(--c-surface)');
+    expect(style.backgroundColor).toBe(cssVar('--c-surface'));
   });
 });

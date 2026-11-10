@@ -1,4 +1,4 @@
-// @vitest-environment jsdom
+// @vitest-environment happy-dom
 // 会话输入框右下角的模型选择（2026-10-26）：写着 Lead 正在用的模型 id 和推理强度；点开是按来源分组的模型（as1、as4 各一组）
 // 和推理强度；上面一个搜索框，左栏是 provider（PR #11，2026-11-06）。选一个就换（和 Lead 的 switch_lead_model 是同一个操作）；马上换好时浮层关上，模型名跟着变。
 import type { LeadModelCatalog, LeadModelChoice, LeadModelOption, LeadStatus, Overview } from '@pi-lead-child/protocol';

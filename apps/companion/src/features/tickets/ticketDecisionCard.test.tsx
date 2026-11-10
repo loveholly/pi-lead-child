@@ -1,4 +1,4 @@
-// @vitest-environment jsdom
+// @vitest-environment happy-dom
 // 底部操作栏（工单 12，spec 4.1、5.11）：按钮能不能点只看操作清单（GET /v1/tickets/:id/actions），点的时候走工单操作。
 // 回归（复核 P1-9）：回复问「你要我现在就发起这次独立核查吗？」，回复下面的按钮和底部操作栏走同一个入口。
 // 回复在问哪几个动作由 daemon 的快模型判断，结果在这一轮的 replyActions 里（2026-10-19）。

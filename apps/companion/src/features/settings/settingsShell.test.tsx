@@ -1,11 +1,11 @@
-// @vitest-environment jsdom
+// @vitest-environment happy-dom
 // 设置页的外框（方案 A）：桌面上是分组侧栏加内容，手机上是一个栈。按真实的 app/settings/_layout.tsx 渲染。
 import { act, fireEvent, screen, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { ReactElement } from 'react';
 
-import { renderUI } from '../../../test/render';
+import { cssVar, renderUI } from '../../../test/render';
 import SettingsLayout from '../../app/settings/_layout';
 import { CompanionRuntimeProvider } from '../../state/CompanionStateProvider';
 import { createCompanionStateRuntime, type CompanionRuntimeDependencies } from '../../state/runtime';
@@ -26,7 +26,7 @@ vi.mock('expo-router', () => ({
   Stack: nav.stack,
 }));
 
-// react-native-web 读 documentElement.clientWidth，jsdom 里它是 0。
+// react-native-web 读 documentElement.clientWidth，happy-dom 里它是 0。
 function setViewportWidth(width: number) {
   Object.defineProperty(document.documentElement, 'clientWidth', { configurable: true, value: width });
   Object.defineProperty(document.documentElement, 'clientHeight', { configurable: true, value: 900 });
@@ -96,10 +96,10 @@ describe('settings on desktop', () => {
     const other = screen.getByTestId('settings-nav-device');
     expect(selected.getAttribute('aria-current')).toBe('page');
     expect(other.getAttribute('aria-current')).toBeNull();
-    // 选中的条目是浅蓝底、深蓝字。jsdom 不解析 CSS 变量，读到的是 token 的变量名。
-    expect(getComputedStyle(selected).backgroundColor).toBe('var(--c-accent-soft)');
-    expect(getComputedStyle(selected.firstElementChild!).color).toBe('var(--c-accent-strong)');
-    expect(getComputedStyle(other).backgroundColor).toBe('rgba(0, 0, 0, 0)');
+    // 选中的条目是浅蓝底、深蓝字，别的条目没有底色。happy-dom 照写法给出颜色：透明是 transparent，不是 rgba(0, 0, 0, 0)。
+    expect(getComputedStyle(selected).backgroundColor).toBe(cssVar('--c-accent-soft'));
+    expect(getComputedStyle(selected.firstElementChild!).color).toBe(cssVar('--c-accent-strong'));
+    expect(getComputedStyle(other).backgroundColor).toBe('transparent');
     expect(getComputedStyle(screen.getByTestId('settings-sidebar')).width).toBe('236px');
     unmount();
 

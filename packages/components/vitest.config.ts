@@ -15,7 +15,7 @@ const reanimatedWebStyles: Plugin = {
   },
 };
 
-// 组件测试在 jsdom 里渲染 web 实现，和浏览器里 Metro 打出的 web 包走同一条路径：
+// 组件测试在 happy-dom 里渲染 web 实现，和浏览器里 Metro 打出的 web 包走同一条路径：
 // react-native 换成 react-native-web，Tamagui 以 web 为目标。原生实现由 tsconfig.native.json 做类型检查。
 export default defineConfig({
   plugins: [reanimatedWebStyles],
@@ -34,7 +34,7 @@ export default defineConfig({
     __DEV__: 'false',
   },
   test: {
-    environment: 'jsdom',
+    environment: 'happy-dom',
     include: ['test/**/*.test.{ts,tsx}'],
     exclude: [...configDefaults.exclude],
     setupFiles: ['./test/setup.ts'],

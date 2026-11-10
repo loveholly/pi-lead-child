@@ -1,4 +1,4 @@
-// @vitest-environment jsdom
+// @vitest-environment happy-dom
 // 设置 → Lead → 身份与风格 →「Lead 忙时你发的消息」（主题 11.19，用户 2026-11-09）：排队（缺省）和插话二选一，
 // 是一组单选（用户 2026-11-09：「把 tab 换成 radio 吧」），每个选项里一句说明，说明里的名字是 Lead 的名字。点了马上保存（操作层的 busy_placement.set）；没保存成功时写原因，选中项退回。
 // 旧 daemon 不支持时不给选。契约在 packages/protocol/src/busy-placement.ts；客户端方法是假的。

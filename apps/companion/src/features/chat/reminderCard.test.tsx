@@ -1,4 +1,4 @@
-// @vitest-environment jsdom
+// @vitest-environment happy-dom
 // 2026-10-16 07:57：Lead 建了提醒 #83，会话里出现一张「#83 正在同步工单。」的卡片，一直不变。
 // 卡片在工单列表里找这条事项，可工单列表只装 task，提醒永远找不到。
 // 现在会话里的提醒画成提醒。数据按编号取这条事项的 TicketDetail（不论 kind），和别的界面一样读它的 TicketSummary。
@@ -8,7 +8,7 @@ import type { TicketDetail, TicketSummary } from '@pi-lead-child/protocol';
 import { act, cleanup, fireEvent, screen, within } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 
-import { renderUI } from '../../../test/render';
+import { cssVar, renderUI } from '../../../test/render';
 import { CompanionRuntimeProvider } from '../../state/CompanionStateProvider';
 import { createCompanionStateRuntime, type CompanionRuntimeDependencies } from '../../state/runtime';
 import type { ConversationCardEntity } from '../../state/types';
@@ -103,14 +103,14 @@ describe('a reminder Lead created in the conversation', () => {
   it('says an important reminder interrupts, in amber', async () => {
     render(async () => ({ ...detail(reminder()), reminder: { level: 'interrupt', earlyMs: null, repeat: null, ticketId: null, check: null } } as TicketDetail));
     expect(await screen.findByText('Important. It interrupts you when it is due.')).toBeTruthy();
-    expect(getComputedStyle(screen.getByTestId('reminder-page-eyebrow')).backgroundColor).toBe('var(--c-warning-soft)');
+    expect(getComputedStyle(screen.getByTestId('reminder-page-eyebrow')).backgroundColor).toBe(cssVar('--c-warning-soft'));
   });
 
   it('shows when it was confirmed, with a check on a green band, and no longer opens', async () => {
     const confirmed = new Date(2026, 9, 27, 14, 3).toISOString();
     render(async () => detail(reminder({ stage: 'acked', status: 'acked', stageChangedAt: confirmed })));
     expect(await screen.findByText('Acknowledged at 14:03')).toBeTruthy();
-    expect(getComputedStyle(screen.getByTestId('reminder-page-eyebrow')).backgroundColor).toBe('var(--c-success-soft)');
+    expect(getComputedStyle(screen.getByTestId('reminder-page-eyebrow')).backgroundColor).toBe(cssVar('--c-success-soft'));
     fireEvent.click(screen.getByTestId('surface-disclosure-reminder-83-summary'));
     expect(screen.queryByRole('radio', { name: 'In 1 hour' })).toBeNull();
   });

@@ -1,4 +1,4 @@
-// @vitest-environment jsdom
+// @vitest-environment happy-dom
 // 左栏改版阶段 2：项目卡片（Lead 的一句话、分布、最近的截止、花费；安静的和归档的收起，可以归档和恢复）、
 // 工单 tab 的搜索框、工单行右边的停留时间、E2E 标题换成 Lead 写的短标题。按实例上的数据渲染真正的 Workbench。
 import type { ProjectOverview, ProjectSummary, TicketSummary } from '@pi-lead-child/protocol';
