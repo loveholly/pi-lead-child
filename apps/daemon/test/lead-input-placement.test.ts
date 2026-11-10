@@ -323,7 +323,7 @@ describe("interrupting Lead's unfinished step for a steer", () => {
       if (input.includes("问题 B")) return { say: "短版。" };
       return { say: "收到。" };
     }, { interruptible: true });
-    const { events, send, turnsSnapshot } = await start(lead);
+    const { events, send, logs, turnsSnapshot } = await start(lead);
 
     const a = await send("问题 A");
     await vi.waitFor(() => expect(turn(a.turnId).assistant_text).toBe("A 的长文第一段。"));
@@ -332,6 +332,9 @@ describe("interrupting Lead's unfinished step for a steer", () => {
 
     await vi.waitFor(() => expect(turn(b.turnId)).toMatchObject({ state: "completed", assistant_text: "短版。" }));
     expect(lead.interrupts()).toBe(1);
+    // 调度器记下这个决定，和模型还在想时的打断一样（lead-scheduler spec D12 第 4 条）；daemon 另记一行写了多少字。
+    expect(logs.some((line) => new RegExp(`^\\[sched\\] decide unit=unit_\\w+ lane=L0 turn=${b.turnId} decision=steer_interrupt`, "u").test(line))).toBe(true);
+    expect(logs.some((line) => line.startsWith("lead step cut for a steer after 9 chars of text"))).toBe(true);
     expect(lead.calls).toHaveLength(2);
     expect(callWith(lead.calls, "问题 B")).toBe(1);
     // A 留着已经写出的字，按完成收口：不是失败，也不是「和下一条一起回答」。
