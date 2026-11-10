@@ -63,7 +63,7 @@
   - 运维：supervisor 用 `status` 探活，用 `shutdown` 停机。
   聊天、事项动作、授权和重检不在这里。`plc` 和 companion 一样走 paired 平面。配对管理（`plc pair new/list/revoke`）是 paired 平面上的管理路由，要 `admin` scope。
 - **Paired 平面**：`/v1/*` HTTP snapshot/control + `/v1/paired/events` WS，Bearer access_token。它总是启动：配置了 `PLC_GATEWAY_PORT` 时用那个端口，否则用 47130（被占用时改用随机端口）。网关总是监听回环。显式配置的 LAN/Tailscale 地址（必须同时配置 `PLC_GATEWAY_PORT`）另开一个监听，共用端口，绑不上时在后台退避重试（1 秒起，最多 60 秒一次），状态在 plc.sock 的 `status`（`gatewayExposure`）和 `plc doctor` 里。已经绑上的地址后来消失时不重新绑定；地址换了需要重启 daemon。通配地址（`0.0.0.0`、`::`）是唯一的监听，它包含回环（Linux 上它不能和 `127.0.0.1` 共用端口）；绑不上时只监听回环，并警告。客户端每次连接前都向 daemon 要当前地址（plc 走 `plc.sock` 的 `status`）。`after_seq=-1` 表示不回放历史，只收新事件。
-- **系统回合**（2026-10-13 起）：lead 自己发起的回合（`system:blocker`、`system:notification`、`system:heartbeat`、`system:precipitate`）和 daemon 自己发出的通知（`system:blocker-notice`、`system:fallback-notice`）都是 `channel_turns` 里的一轮。它们的 `origin_binding_id` 为空，`user_text` 为空，事件的 `audienceBindingId` 为 null，所以发给所有带 `chat` scope 的客户端。lead 第一次开口或调工具时，这一轮才落库；lead 一言不发就收尾时，不留空的一轮。用户发起的回合只发给发起的 binding：别的客户端没有那句提问，刷新会话流时照样看得到全部回合。"有人在听"只算活着的（网关定时 ping）、说自己有人在看的（`presence.set attended=true`）、binding 仍然有效并带 `chat` scope 的 v2 连接。companion 在应用处于前台并且 `PRESENCE_IDLE_MS`（5 分钟）内有过操作时上报，plc chat 运行中并且 5 分钟内有过输入时上报，旧版 v1 连接不算。一条通知只有 lead 在播报的那一轮里真的说了话、并且播完时仍然有人在听，才记为 lead 已送达；同一条通知的重试复用同一轮并退避，播了但没人在听的不再播第二遍。
+- **系统回合**（2026-10-13 起）：lead 自己发起的回合（`system:blocker`、`system:notification`、`system:heartbeat`、`system:precipitate`）和 daemon 自己发出的通知（`system:blocker-notice`、`system:fallback-notice`）都是 `channel_turns` 里的一轮。它们的 `origin_binding_id` 为空，`user_text` 为空，事件的 `audienceBindingId` 为 null，所以发给所有带 `chat` scope 的客户端。lead 第一次开口或调工具时，这一轮才落库；lead 一言不发就收尾时，不留空的一轮。用户发起的回合也发给所有带 `chat` scope 的客户端（2026-11-10 起）：用户同时开着几台设备，每一台都实时看到每一轮。别的客户端没有那句提问，所以 `lead.turn.started` 带上用户的话（`userText`）。以前只发给发起的 binding，别的设备要刷新会话流才看得到。"有人在听"只算活着的（网关定时 ping）、说自己有人在看的（`presence.set attended=true`）、binding 仍然有效并带 `chat` scope 的 v2 连接。companion 在应用处于前台并且 `PRESENCE_IDLE_MS`（5 分钟）内有过操作时上报，plc chat 运行中并且 5 分钟内有过输入时上报，旧版 v1 连接不算。一条通知只有 lead 在播报的那一轮里真的说了话、并且播完时仍然有人在听，才记为 lead 已送达；同一条通知的重试复用同一轮并退避，播了但没人在听的不再播第二遍。
 - **Web UI**：paired 平面在 `/v1` 之外的 GET 路径上提供 companion 的静态导出（`npm run build:web` 写到 `dist/web`）。用户打开网关地址即可，例如 `http://127.0.0.1:47130`（`plc web` 打印这个地址）。导出不内联网关地址：回环地址上的页面把自己的 origin 当作网关。loopback 自动配对开启时，网关信任自己的回环 origin（`127.0.0.1`、`localhost`、`[::1]` 加网关端口），远端地址仍然必须是回环地址。回环 TCP 不分系统用户，`Origin` 可以伪造，所以开启后同一台机器上的别的系统用户也能拿到一个带缺省 scope 的 binding：它越过了"信任边界是系统用户"，只适合单用户的开发机。局域网里的浏览器也能打开页面，但只能用配对码配对。
 
 ### 2.2 配对流程（三腿，照搬 AiSH-X）
@@ -110,7 +110,7 @@ WS v2 使用带身份和顺序的 envelope：`protocolVersion/eventId/seq/type/o
 
 路由纪律：
 
-- Lead delta/tool/message 仅发送给发起 paired binding。
+- 一轮的事件（Lead delta/tool/message、失败）发给所有带 `chat` scope 的 binding（2026-11-10 起）。`audienceBindingId` 只用于只该给一台设备的事件。
 - Child/ticket/approval 等领域事件按 required scope 广播。
 - gateway 事件先写 SQLite durable outbox，再由 paired server 的顺序 flusher 投递；事务内
   Coordinator 写入与进程内 `publish()` 走同一条 `seq` 顺序源。客户端以 `after_seq` 重连补发，

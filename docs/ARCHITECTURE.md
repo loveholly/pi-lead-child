@@ -95,7 +95,7 @@ loopback 自动配对（`PLC_ALLOW_LOOPBACK_AUTO_PAIR=1`，`PLC_DEV=1` 时缺省
 
 ### lead 自己发起的回合
 
-lead 自己发起的回合也在会话流里，例如处理 blocker、播报即时通知、心跳巡检和整理笔记。这些回合的 `originKind` 以 `system:` 开头，没有发起的 binding，所以所有带 `chat` scope 的客户端都收得到。daemon 自己发出的 blocker 提示和兜底通知也是这样的回合。`plc chat` 和 companion 用 protocol 里的同一个函数 `systemTurnLabel` 给它们贴标签。用户发起的回合只发给发起的 binding。
+lead 自己发起的回合也在会话流里，例如处理 blocker、播报即时通知、心跳巡检和整理笔记。这些回合的 `originKind` 以 `system:` 开头，没有发起的 binding，所以所有带 `chat` scope 的客户端都收得到。daemon 自己发出的 blocker 提示和兜底通知也是这样的回合。`plc chat` 和 companion 用 protocol 里的同一个函数 `systemTurnLabel` 给它们贴标签。用户发起的回合也发给所有带 `chat` scope 的客户端（2026-11-10 起），`lead.turn.started` 带着用户的话（`userText`）。
 
 "有人在听"只算同时满足下面三个条件的 v2 网关连接：
 

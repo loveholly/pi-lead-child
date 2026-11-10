@@ -328,9 +328,10 @@ describe("a user who steers into a turn the lead started itself", () => {
     expect(db.prepare("SELECT COUNT(*) AS n FROM channel_turns WHERE origin_kind=?").get(SYSTEM_TURN_ORIGINS.blocker))
       .toEqual({ n: 0 });
     expect(plc.events.some((event) => event.type === "lead.tool.started" && event.turnId === steeredTurn)).toBe(true);
-    // 插话那一轮的工具和回答只发给插话的人。
-    const leaked = companion.events.filter((event) => event.type.startsWith("lead.") && event.turnId === steeredTurn);
-    expect(leaked).toEqual([]);
+    // 用户的别的设备也看到插话那一轮的工具和回答（2026-11-10），都在插话那一轮里。
+    await vi.waitFor(() => expect(companion.events.some((event) => event.type === "lead.message.completed" && event.turnId === steeredTurn))
+      .toBe(true));
+    expect(companion.events.some((event) => event.type === "lead.tool.started" && event.turnId === steeredTurn)).toBe(true);
   });
 });
 
@@ -440,7 +441,8 @@ describe("a system turn that fails while a user's steer waits", () => {
 
   // 失败不落成系统回合，所以要落在插话那一轮上：插话的人看得到错误，那一轮也不会一直停在 steered。
   // 用一个不会自动重试的错误：断网和模型服务暂时连不上时，用户的插话会等一次自动重试（user-turn-retry.test.ts）。
-  it("fails the steer with the error, and tells the client that steered", async () => {
+  // 用户的别的设备也实时看到这一轮，所以也收到这一轮的失败（2026-11-10）。
+  it("fails the steer with the error, and tells the client that steered and the user's other devices", async () => {
     const lead = stubLead("hang");
     await start(lead);
     const plc = await v2Client("plc");
@@ -455,9 +457,10 @@ describe("a system turn that fails while a user's steer waits", () => {
     lead.release();
     await vi.waitFor(() => expect(db.prepare("SELECT state, error FROM channel_turns WHERE id=?").get(steerId))
       .toEqual({ state: "failed", error: expect.stringContaining("prompt is too long") }));
-    await vi.waitFor(() => expect(plc.events.filter((event) => event.type === "notice.created" && event.turnId === steerId))
-      .toEqual([expect.objectContaining({ audienceBindingId: plc.bindingId, payload: expect.objectContaining({ severity: "error" }) })]));
-    expect(other.events.filter((event) => event.type === "notice.created" && event.turnId === steerId)).toEqual([]);
+    for (const client of [plc, other]) {
+      await vi.waitFor(() => expect(client.events.filter((event) => event.type === "notice.created" && event.turnId === steerId))
+        .toEqual([expect.objectContaining({ audienceBindingId: null, payload: expect.objectContaining({ severity: "error" }) })]));
+    }
   });
 
   // steer 晚于失败返回时，不能把已经失败的插话改回 steered。
@@ -630,12 +633,14 @@ describe("a steer that does not land", () => {
 });
 
 describe("user-originated turns", () => {
-  it("stay with the binding that sent them", async () => {
+  // 2026-11-10 以前只发给发起的 binding：用户的别的设备要重新加载才看得到。multi-device-turns.test.ts 测得更全。
+  it("reach the user's other chat devices too, with the question", async () => {
     await start();
     const plc = await v2Client("plc");
     const companion = await v2Client("phone");
     plc.chat("你好");
     await vi.waitFor(() => expect(plc.events.some((event) => event.type === "lead.message.completed")).toBe(true));
-    expect(companion.events.filter((event) => event.type.startsWith("lead."))).toEqual([]);
+    await vi.waitFor(() => expect(companion.events.some((event) => event.type === "lead.message.completed")).toBe(true));
+    expect(companion.events.find((event) => event.type === "lead.turn.started")?.payload).toMatchObject({ userText: "你好" });
   });
 });

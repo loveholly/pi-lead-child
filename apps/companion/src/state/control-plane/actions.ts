@@ -1,4 +1,4 @@
-import { foldToolCall, surfaceShadowedByFinal, surfacesReplacedBy, type ChatImageInput } from '@pi-lead-child/protocol';
+import { foldToolCall, isSystemTurnOrigin, surfaceShadowedByFinal, surfacesReplacedBy, type ChatImageInput } from '@pi-lead-child/protocol';
 
 import type { ControlPlaneMutation } from './eventReducer';
 import type { ControlPlaneStore } from './store';
@@ -246,7 +246,7 @@ export function createOptimisticUserMessage(
 	  },
 ): string {
   const state = store.getState();
-	  const messageId = `optimistic:${input.commandId}:user`;
+	  const messageId = optimisticUserMessageId(input.commandId);
 	  const partId = `${messageId}:text`;
 	  const imageParts: MessagePart[] = (input.images ?? []).map((image, index) => ({
 	    kind: 'image', id: `${messageId}:image:${index}`, mimeType: image.mimeType, data: image.data,
@@ -447,6 +447,23 @@ function restartLeadTurn(store: ControlPlaneStore, sessionId: string, turn: Lead
     messagePartsById: { ...state.messagePartsById, [textPartId]: { kind: 'text', id: textPartId, text: '' } },
     partIdsByMessage: { ...state.partIdsByMessage, [turn.assistantMessageId]: [textPartId] },
   });
+}
+
+// 本机发出、还没对上轮次的消息（发件箱里的）。
+export function optimisticUserMessageId(commandId: string): string {
+  return `optimistic:${commandId}:user`;
+}
+
+// 这一轮还没有用户的那句提问（2026-11-10）：daemon 把一轮的事件发给用户的每一台设备，别的设备发起的一轮
+// 在这里只有事件流建的空壳（ensureLeadShell，用户消息没有文字，也不显示）。这台设备发的一轮有本机的消息：
+// 发件箱里还没送达的，或者送达以后换上的。Lead 自己发起的一轮没有提问。
+export function turnLacksQuestion(store: ControlPlaneStore, turnId: string, commandId: string | null): boolean {
+  const state = store.getState();
+  const turn = state.turnsById[turnId];
+  if (!turn || isSystemTurnOrigin(turn.originKind)) return false;
+  if (commandId !== null && state.messagesById[optimisticUserMessageId(commandId)]) return false;
+  const user = state.messagesById[turn.userMessageId];
+  return !user || (user.source === 'live' && user.clientCommandId === null);
 }
 
 function ensureLeadShell(

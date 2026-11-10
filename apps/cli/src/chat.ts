@@ -5,7 +5,7 @@ import { createInterface } from "node:readline";
 import type { Readable, Writable } from "node:stream";
 import { ChatOutbox, type ControlPlaneClient, type OutboxEntry, type OutboxStorage } from "@pi-lead-child/client";
 import {
-  DEFAULT_LEAD_NAME, isDaemonNoticeOrigin, leadTurnFailureSentence, leadTurnWaitingSentence, plainObjectLinks, PRESENCE_IDLE_MS, systemTurnLabel,
+  DEFAULT_LEAD_NAME, isDaemonNoticeOrigin, isSystemTurnOrigin, leadTurnFailureSentence, leadTurnWaitingSentence, plainObjectLinks, PRESENCE_IDLE_MS, systemTurnLabel,
   type GatewayEvent, type HelloV2,
 } from "@pi-lead-child/protocol";
 import { fileOutboxStorage } from "./chat-outbox-file.js";
@@ -35,9 +35,10 @@ export interface ChatOutput {
   prompt(): void;
 }
 
-// 把网关事件变成终端输出。渲染三类：发给这个 binding 的轮次（audienceBindingId 是自己），
-// 发给所有人的系统轮次（lead 自己发起的回合和 daemon 的系统通知，audienceBindingId 为 null），
-// 以及审批请求。别的客户端发起的轮次不渲染：这里没有那句提问。
+// 把网关事件变成终端输出。渲染主会话里的每一轮：这里发的、别的设备发的（2026-11-10 起 daemon 把一轮的事件
+// 发给所有带 chat scope 的设备），以及 Lead 自己发起的回合和 daemon 的系统通知。别的设备发的一轮先印出那句提问
+// （lead.turn.started 的 userText）。别的设备在工单对话里发的一轮不印：plc chat 只有主会话。
+// 写明发给另一台设备的事件（audienceBindingId 是别的 binding）不渲染。
 export class ChatRenderer {
   private state: "connecting" | "connected" | "reconnecting" | "disconnected" = "connecting";
   private reconnectNoticeShown = false;
@@ -45,8 +46,33 @@ export class ChatRenderer {
   leadName: string = DEFAULT_LEAD_NAME;
   // 流过来的回答里还没写完的链接。等它闭合，再把 App 里的对象链接（[Ethan 的私信](plc:card/134)，P14.7）换成文字。
   private heldText = "";
+  // 这个 plc chat 发出的命令 id（发件箱发出前记下，sent()）：这几轮的提问是在这里打的，不再印一遍。
+  private readonly ownCommands = new Set<string>();
+  // 看到过 lead.turn.started 的轮次：印不印，是不是 Lead 自己发起的。
+  private readonly turns = new Map<string, { shown: boolean; system: boolean }>();
 
   constructor(private readonly bindingId: number, private readonly out: ChatOutput) {}
+
+  sent(commandId: string): void {
+    this.ownCommands.add(commandId);
+  }
+
+  // 一轮开始了：记下它印不印。别的设备发的一轮只在第一次看到时印提问（排队的一轮开始回答时还会再来一条）。
+  private turnStarted(event: GatewayEvent, turnId: string): { shown: boolean; system: boolean } {
+    const origin = typeof event.payload.originKind === "string" ? event.payload.originKind : null;
+    const commandId = typeof event.payload.commandId === "string" ? event.payload.commandId : null;
+    const known = this.turns.get(turnId);
+    const system = isSystemTurnOrigin(origin);
+    const own = commandId !== null && this.ownCommands.has(commandId);
+    const shown = known?.shown ?? (system || own || event.ticketId === null);
+    const turn = { shown, system };
+    this.turns.set(turnId, turn);
+    if (!shown || known || system || own) return turn;
+    const userText = typeof event.payload.userText === "string" ? event.payload.userText.trim() : "";
+    const placed = event.payload.mode === "queued" ? "，排队中" : event.payload.mode === "steered" ? "，已插话" : "";
+    this.out.write(`\n${CYAN(`[另一台设备${placed}]`)} ${userText || DIM("（没有文字的消息）")}\n`);
+    return turn;
+  }
 
   // 连接状态。daemon 重启时只说一次"正在重连"，不在每次退避重试时打印错误。
   connection(state: "connecting" | "connected" | "reconnecting" | "disconnected"): void {
@@ -89,9 +115,15 @@ export class ChatRenderer {
   // 审批（approval.required）不会到这里：plc 的凭证做不了用户的决定，网关不给它发（store 的 bindingScopes）。
   event(event: GatewayEvent): void {
     if (event.audienceBindingId !== this.bindingId && event.audienceBindingId !== null) return;
+    const turnId = event.turnId;
+    if (event.type === "lead.turn.started") this.flushText();
+    // 没看到开始的一轮（连上之前就开始了）：主会话里的印，工单对话里的不印。
+    const turn = !turnId ? null
+      : event.type === "lead.turn.started" ? this.turnStarted(event, turnId)
+        : this.turns.get(turnId) ?? { shown: event.ticketId === null, system: false };
+    if (turn && !turn.shown) return;
     switch (event.type) {
       case "lead.turn.started": {
-        this.flushText();
         const origin = typeof event.payload.originKind === "string" ? event.payload.originKind : null;
         // Lead 自己发起的回合写 Lead 的名字；daemon 的系统通知照旧写「系统通知 …」。
         const label = isDaemonNoticeOrigin(origin) ? systemTurnLabel(origin, "zh") : systemTurnLabel(origin) ? this.leadName : null;
@@ -128,9 +160,11 @@ export class ChatRenderer {
           return;
         }
         // 和 companion 的失败卡片用同一套分类说成一句话：认证失败不叫人重试；原文放在下面一行。
-        // 发给所有人的（audienceBindingId 为 null）是 Lead 自己发起的一轮，没有人在等回答。
+        // Lead 自己发起的一轮（按 lead.turn.started 的 originKind）没有人在等回答。不属于哪一轮的通知照旧：
+        // 发给所有人的（audienceBindingId 为 null）是系统的。
         const raw = String(event.payload.message ?? "");
-        const sentence = leadTurnFailureSentence(raw, { system: event.audienceBindingId === null, name: this.leadName, locale: "zh" });
+        const system = turn ? turn.system : event.audienceBindingId === null;
+        const sentence = leadTurnFailureSentence(raw, { system, name: this.leadName, locale: "zh" });
         this.out.write(`\n${YELLOW(`[error] ${sentence ?? raw}`)}\n`);
         if (sentence && raw.trim() !== OLD_DAEMON_AUTH_ERROR) this.out.write(`${DIM(`技术详情：${raw.length > 300 ? `${raw.slice(0, 300)}…` : raw}`)}\n`);
         this.out.prompt();
@@ -158,19 +192,24 @@ export class ChatInput {
   private readonly waitingShown = new Set<string>();
   private readonly failedShown = new Set<string>();
 
+  // sending：每条命令发出前告诉调用方它的 id（ChatRenderer.sent）。这一轮的事件在发出以后才会到。
   constructor(
     client: Pick<ControlPlaneClient, "sendChatCommand">,
     storage: OutboxStorage,
     private readonly out: ChatOutput,
+    sending: (commandId: string) => void = () => {},
   ) {
     this.outbox = new ChatOutbox({
       storage,
       // 命令 id 就用 clientMessageId：重发时不变，daemon 按它去重。
-      send: (entry) => client.sendChatCommand({
-        id: entry.clientMessageId,
-        message: entry.message,
-        clientMessageId: entry.clientMessageId,
-      }),
+      send: (entry) => {
+        sending(entry.clientMessageId);
+        return client.sendChatCommand({
+          id: entry.clientMessageId,
+          message: entry.message,
+          clientMessageId: entry.clientMessageId,
+        });
+      },
       isConnected: () => this.connected,
       onChange: (entries) => this.changed(entries),
     });
@@ -329,11 +368,11 @@ export async function runChat(
     write: (text) => stdout.write(text),
     prompt: () => rl.prompt(),
   };
-  const input = new ChatInput(client, fileOutboxStorage(args.outboxPath), output);
+  const renderer = new ChatRenderer(args.bindingId, output);
+  const input = new ChatInput(client, fileOutboxStorage(args.outboxPath), output, (commandId) => renderer.sent(commandId));
   // 先读完发件箱，再接上输入：这期间打的字留在输入流里，不会丢。
   await input.restore();
   const rl = createInterface({ input: stdin, output: stdout, prompt: "you> " });
-  const renderer = new ChatRenderer(args.bindingId, output);
   let rejected: Error | null = null;
   // 每断一次加一。问网关地址是异步的：问到之前连接又断了，这次打招呼就不算连上。
   let connection = 0;

@@ -945,12 +945,17 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     void orchestrator.tick().catch((error: any) => log(`[orchestrator] tick error: ${error.message}`));
   };
 
+  // 一轮的事件（开始、文字、工具、完成、失败、在等重试）发给所有带 chat scope 的设备，不写 audienceBindingId
+  // （2026-11-10）。用户同时开着几台设备，每一台都要实时看到每一轮。以前只发给发起这一轮的设备，
+  // 别的设备要重新加载才看得到。会话快照本来就给所有带 chat scope 的设备，所以这不是隐私边界。
+  // 只给发命令的那台设备的是命令的回执（command.result），它不是网关事件。
+  // 别的设备没有那句提问：用户的一轮在 lead.turn.started 里带上用户的话（turnStartedPayload）。
+
   function publishTurnText(entry: ActiveChannelTurn, text: string): void {
     entry.assistantText += text;
     appendAssistantDelta(db, entry.turn.id, text);
     publishControlEvent({
       type: "lead.message.delta", requiredScope: "chat",
-      audienceBindingId: entry.turn.origin_binding_id ?? undefined,
       turnId: entry.turn.id,
       itemId: entry.turn.item_id ?? undefined,
       payload: { messageId: `msg_${entry.turn.id}`, delta: text },
@@ -1092,7 +1097,6 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     userTurnRetries.set(id, { at: kind === "network" ? null : Date.now() + userTurnRetryMs });
     publishControlEvent({
       type: "notice.created", requiredScope: "chat",
-      audienceBindingId: entry.turn.origin_binding_id ?? undefined,
       turnId: id,
       itemId: entry.turn.item_id ?? undefined,
       payload: { severity: "error", message: error, retry: "waiting", waitingFor: kind === "network" ? "network" : "model" },
@@ -1109,7 +1113,6 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     userTurnRetries.set(id, { at: null });
     publishControlEvent({
       type: "notice.created", requiredScope: "chat",
-      audienceBindingId: entry.turn.origin_binding_id ?? undefined,
       turnId: id,
       itemId: entry.turn.item_id ?? undefined,
       payload: { severity: "error", message: LEAD_RESTART_INTERRUPTED_ERROR, retry: "waiting", waitingFor: "model" },
@@ -1151,7 +1154,6 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     failTurn(db, entry.turn.id, error);
     publishControlEvent({
       type: "notice.created", requiredScope: "chat",
-      audienceBindingId: entry.turn.origin_binding_id ?? undefined,
       turnId: entry.turn.id,
       itemId: entry.turn.item_id ?? undefined,
       payload: { severity: "error", message: error },
@@ -1225,7 +1227,6 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     retriedUserTurns.delete(entry.turn.id);
     publishControlEvent({
       type: "lead.message.completed", requiredScope: "chat",
-      audienceBindingId: entry.turn.origin_binding_id ?? undefined,
       turnId: entry.turn.id,
       itemId: entry.turn.item_id ?? undefined,
       payload: { messageId: `msg_${entry.turn.id}`, text: entry.assistantText },
@@ -1245,18 +1246,29 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
   ): void {
     publishControlEvent({
       type: "lead.turn.started", requiredScope: "chat",
-      audienceBindingId: entry.turn.origin_binding_id ?? undefined,
       turnId: entry.turn.id,
       itemId: entry.turn.item_id ?? undefined,
-      payload: {
-        messageId: `msg_${entry.turn.id}`,
-        commandId: entry.commandId ?? null,
-        originKind: entry.turn.origin_kind,
-        mode,
+      payload: turnStartedPayload(entry.turn, entry.commandId ?? null, mode, {
         ...(extra.placement ? { placement: extra.placement } : {}),
         ...(extra.answeredWith ? { answeredWith: extra.answeredWith } : {}),
-      },
+      }),
     });
+  }
+
+  // lead.turn.started 的 payload。userText：用户的话的原文，给没有发这条消息的设备（只发了图片时没有这个字段）。
+  // Lead 自己发起的一轮没有用户的话。payload 的校验是开放的，旧客户端不认识 userText 也照常解析。
+  function turnStartedPayload(
+    turn: ChannelTurnRow, commandId: string | null, mode: "started" | "steered" | "queued",
+    extra: Record<string, unknown> = {},
+  ): Record<string, unknown> {
+    return {
+      messageId: `msg_${turn.id}`,
+      commandId,
+      originKind: turn.origin_kind,
+      mode,
+      ...(turn.user_text.trim() ? { userText: turn.user_text } : {}),
+      ...extra,
+    };
   }
 
   // /fairyeye on|off（Lead 的形象，用户 2026-10-28：「只有输入 /fairyeye on 才能让矢量 FairyEye 出现」）：daemon 自己答。
@@ -1424,15 +1436,9 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     publishControlEvent({
       type: "lead.turn.started",
       requiredScope: "chat",
-      audienceBindingId: turn.origin_binding_id ?? undefined,
       turnId: turn.id,
       itemId: turn.item_id ?? undefined,
-      payload: {
-        messageId: `msg_${turn.id}`,
-        commandId: command.commandId,
-        originKind: turn.origin_kind,
-        mode: "started",
-      },
+      payload: turnStartedPayload(turn, command.commandId, "started"),
     });
     publishTurnText(entry, assistantText);
     sealChannelTurn(entry);
@@ -1465,15 +1471,9 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     publishControlEvent({
       type: "lead.turn.started",
       requiredScope: "chat",
-      audienceBindingId: turn.origin_binding_id ?? undefined,
       turnId: turn.id,
       itemId: turn.item_id ?? undefined,
-      payload: {
-        messageId: `msg_${turn.id}`,
-        commandId: command.commandId,
-        originKind: turn.origin_kind,
-        mode: "started",
-      },
+      payload: turnStartedPayload(turn, command.commandId, "started"),
     });
     return entry;
   }
@@ -1489,15 +1489,9 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     publishControlEvent({
       type: "lead.turn.started",
       requiredScope: "chat",
-      audienceBindingId: entry.turn.origin_binding_id ?? undefined,
       turnId: entry.turn.id,
       itemId: entry.turn.item_id ?? undefined,
-      payload: {
-        messageId: `msg_${entry.turn.id}`,
-        commandId: entry.commandId ?? null,
-        originKind: entry.turn.origin_kind,
-        mode: "steered",
-      },
+      payload: turnStartedPayload(entry.turn, entry.commandId ?? null, "steered"),
     });
   }
 
@@ -1775,7 +1769,6 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     streamedSurfaces.set(block.id, { key, at: now });
     persistLeadToolConversationEvent(db, {
       type: "lead.tool.updated",
-      audienceBindingId: activeChannelTurn.turn.origin_binding_id ?? undefined,
       turnId: activeChannelTurn.turn.id,
       itemId: activeChannelTurn.turn.item_id ?? undefined,
       payload: {
@@ -1809,10 +1802,9 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     publishControlEvent({
       type: "lead.turn.started",
       requiredScope: "chat",
-      audienceBindingId: turn.origin_binding_id ?? undefined,
       turnId: turn.id,
       itemId: command.itemId,
-      payload: { messageId: `msg_${turn.id}`, commandId: command.commandId, originKind: turn.origin_kind, mode: "queued" },
+      payload: turnStartedPayload(turn, command.commandId, "queued"),
     });
     return turn;
   }
@@ -1842,10 +1834,9 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       publishControlEvent({
         type: "lead.turn.started",
         requiredScope: "chat",
-        audienceBindingId: turn.origin_binding_id ?? undefined,
         turnId: turn.id,
         itemId,
-        payload: { messageId: `msg_${turn.id}`, commandId: null, originKind: turn.origin_kind, mode: "started" },
+        payload: turnStartedPayload(turn, null, "started"),
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -1898,7 +1889,6 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       entry.drewSurface = true;
       persistLeadToolConversationEvent(db, {
         type: "lead.tool.updated",
-        audienceBindingId: entry.turn.origin_binding_id ?? undefined,
         turnId: entry.turn.id,
         itemId: entry.turn.item_id ?? undefined,
         payload: { toolCallId: event.toolCallId, toolName: event.toolName, textOffset, surface },
@@ -1906,7 +1896,6 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     }
     persistLeadToolConversationEvent(db, {
       type,
-      audienceBindingId: entry.turn.origin_binding_id ?? undefined,
       turnId: entry.turn.id,
       itemId: entry.turn.item_id ?? undefined,
       payload: { ...projectToolEvent(event), textOffset },

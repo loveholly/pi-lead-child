@@ -168,7 +168,7 @@ function scheduleEventSessionFactory() {
 }
 
 describe("daemon control-plane event bridge", () => {
-  it("projects Lead messages and tool lifecycle into one binding-scoped turn", async () => {
+  it("projects Lead messages and tool lifecycle into one turn that every chat device receives", async () => {
     const { code } = createPairing(db, {
       name: "phone", kind: "companion", scopes: ["chat", "tickets:view"],
     });
@@ -197,7 +197,9 @@ describe("daemon control-plane event bridge", () => {
       ]));
       const leadEvents = events.filter((event) => event.type.startsWith("lead."));
       expect(leadEvents.every((event) => event.turnId === turnId && event.ticketId === null)).toBe(true);
-      expect(leadEvents.every((event) => event.audienceBindingId === paired.binding.id)).toBe(true);
+      // 一轮的事件发给所有带 chat scope 的设备（2026-11-10），不只是发起它的那台。
+      expect(leadEvents.every((event) => event.audienceBindingId === null)).toBe(true);
+      expect(events.find((event) => event.type === "lead.turn.started").payload.userText).toBe("继续核对");
       expect(events.filter((event) => event.type === "ticket.updated")).toEqual([]);
       expect(events.find((event) => event.type === "lead.tool.started").payload.args.token).toBe("[REDACTED]");
       expect(events.find((event) => event.type === "lead.tool.started").payload.operationState).toBe("started");
@@ -365,7 +367,8 @@ describe("daemon control-plane event bridge", () => {
           payload: { snapshotRequired: true },
         }),
       ])));
-      expect(secondMessages.some((message) => message.type.startsWith?.("lead.tool."))).toBe(false);
+      // 另一台设备也实时看到这一轮（2026-11-10）：工具事件在 ticket.updated 之前发出。
+      expect(secondMessages.some((message) => message.type.startsWith?.("lead.tool."))).toBe(true);
     } finally {
       firstWs.close();
       secondWs.close();

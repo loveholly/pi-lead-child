@@ -1,4 +1,4 @@
-// plc chat 从网关事件里渲染回答：只渲染发给本 binding 的轮次，以及所有人都该看到的审批请求。
+// plc chat 从网关事件里渲染回答：主会话里的每一轮，这里发的和别的设备发的（2026-11-10），以及 Lead 自己发起的回合。
 // 打的每一行先写进发件箱文件，再发出去：断线、发送失败、重启都丢不了。
 import { existsSync, readFileSync } from "node:fs";
 import { PassThrough } from "node:stream";
@@ -20,11 +20,14 @@ const LIVE_AUTH = '503: {"message":"auth_unavailable: no auth available (provide
   + '\\"message\\": \\"invalid x-api-key\\"}}","type":"server_error"}';
 
 let seq = 0;
-function event(type: GatewayEvent["type"], payload: Record<string, unknown>, audienceBindingId: number | null = 9): GatewayEvent {
+function event(
+  type: GatewayEvent["type"], payload: Record<string, unknown>, audienceBindingId: number | null = 9,
+  where: { turnId?: string; ticketId?: number | null } = {},
+): GatewayEvent {
   seq += 1;
   return {
     protocolVersion: 2, eventId: `e${seq}`, seq, type, occurredAt: "2026-10-13T04:00:00.000Z",
-    requiredScope: "chat", audienceBindingId, turnId: "turn_1", ticketId: null, payload,
+    requiredScope: "chat", audienceBindingId, turnId: where.turnId ?? "turn_1", ticketId: where.ticketId ?? null, payload,
   };
 }
 
@@ -108,10 +111,13 @@ describe("ChatRenderer", () => {
     expect(r.text()).not.toMatch(/请重试|自动再试/);
   });
 
+  // 是不是 Lead 自己发起的一轮看 originKind：2026-11-10 起用户的一轮也发给所有设备（audienceBindingId 为 null）。
   it("says an unreachable model is retried only on turns the system retries", () => {
     const r = renderer();
-    r.chat.event(event("notice.created", { severity: "error", message: "503 Service Unavailable" }, null));
-    r.chat.event(event("notice.created", { severity: "error", message: "503 Service Unavailable" }));
+    r.chat.event(event("lead.turn.started", { originKind: "system:heartbeat", mode: "started", commandId: null }, null, { turnId: "turn_sys" }));
+    r.chat.event(event("notice.created", { severity: "error", message: "503 Service Unavailable" }, null, { turnId: "turn_sys" }));
+    r.chat.event(event("lead.turn.started", { originKind: "paired:cli", mode: "started", commandId: "cmd-1" }, null, { turnId: "turn_user" }));
+    r.chat.event(event("notice.created", { severity: "error", message: "503 Service Unavailable" }, null, { turnId: "turn_user" }));
     expect(r.text()).toContain("[error] Paimon 的模型服务暂时连不上；系统会自动再试，你不需要操作。");
     expect(r.text()).toContain("[error] Paimon 的模型服务暂时连不上，这条消息没有得到回答；系统不会自动重发，你可以再发一次。");
   });
@@ -132,10 +138,57 @@ describe("ChatRenderer", () => {
     expect(r.text()).not.toContain("技术详情");
   });
 
-  it("ignores turns that belong to another client", () => {
+  it("ignores events addressed to another device", () => {
     const r = renderer();
     r.chat.event(event("lead.message.delta", { delta: "companion 的回答" }, 3));
     r.chat.event(event("lead.message.completed", { text: "companion 的回答" }, 3));
+    expect(r.text()).toBe("");
+    expect(r.prompts()).toBe(0);
+  });
+
+  // 2026-11-10：手机上发的消息，开着的 plc chat 也实时看到，先印那句提问。
+  it("shows a turn sent from another device, with its question", () => {
+    const r = renderer();
+    r.chat.event(event("lead.turn.started", {
+      originKind: "paired:companion", mode: "started", commandId: "cmd-phone", userText: "今天有什么要处理的？",
+    }, null));
+    r.chat.event(event("lead.message.delta", { delta: "有 2 张工单在等你。" }, null));
+    r.chat.event(event("lead.message.completed", { text: "有 2 张工单在等你。" }, null));
+    expect(r.text()).toContain("[另一台设备]");
+    expect(r.text()).toContain("今天有什么要处理的？");
+    expect(r.text()).toContain("有 2 张工单在等你。");
+    expect(r.prompts()).toBe(1);
+  });
+
+  it("prints the question of a message queued on another device once", () => {
+    const r = renderer();
+    const queued = { originKind: "paired:companion", commandId: "cmd-phone", userText: "再看看邮件" };
+    r.chat.event(event("lead.turn.started", { ...queued, mode: "queued" }, null));
+    r.chat.event(event("lead.turn.started", { ...queued, mode: "started" }, null));
+    expect(r.text().match(/再看看邮件/g)).toHaveLength(1);
+    expect(r.text()).toContain("[另一台设备，排队中]");
+  });
+
+  it("does not repeat the question of a message sent from here", () => {
+    const r = renderer();
+    r.chat.sent("cmd-here");
+    r.chat.event(event("lead.turn.started", { originKind: "paired:cli", mode: "started", commandId: "cmd-here", userText: "继续核对" }, null));
+    r.chat.event(event("lead.message.delta", { delta: "正在核对" }, null));
+    expect(r.text()).not.toContain("另一台设备");
+    expect(r.text()).not.toContain("继续核对");
+    expect(r.text()).toContain("正在核对");
+  });
+
+  // plc chat 只有主会话：别的设备在工单对话里发的一轮不印。
+  it("skips a turn another device sent in a ticket conversation", () => {
+    const r = renderer();
+    const where = { turnId: "turn_ticket", ticketId: 12 };
+    r.chat.event(event("lead.turn.started", {
+      originKind: "paired:companion:ticket-agent", mode: "started", commandId: "cmd-phone", userText: "进度怎么样？",
+    }, null, where));
+    r.chat.event(event("lead.message.delta", { delta: "测试还在跑。" }, null, where));
+    r.chat.event(event("lead.message.completed", { text: "测试还在跑。" }, null, where));
+    r.chat.event(event("notice.created", { severity: "error", message: "boom" }, null, where));
     expect(r.text()).toBe("");
     expect(r.prompts()).toBe(0);
   });

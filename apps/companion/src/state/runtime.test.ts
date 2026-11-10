@@ -903,6 +903,9 @@ describe('CompanionStateRuntime', () => {
     client.emit(gatewayEvent(3, 'lead.tool.updated', { toolCallId: 'c1', toolName: 'render_ui', textOffset: 11, partial: true, surface: surface([]) }));
     await runtime.whenIdle();
     clock.runAll();
+    // 这一轮不是这台设备发的，这里没有那句提问：开始时先取一次（这个 transport 不能按轮次取，取最近一段）。
+    await vi.waitFor(() => expect(client.getConversationTurns).toHaveBeenCalledTimes(2));
+    await runtime.whenIdle();
 
     vi.mocked(client.getConversationTurns).mockResolvedValue([{
       id: 'turn-live', originBindingId: 7, originKind: 'companion', ticketId: 42, state: 'streaming',
@@ -913,7 +916,7 @@ describe('CompanionStateRuntime', () => {
     client.emit({ ...gatewayEvent(4, 'lead.message.completed', { messageId: 'message-old', text: '旧的一轮' }), turnId: 'turn-old' });
     await runtime.whenIdle();
     clock.runAll();
-    await vi.waitFor(() => expect(client.getConversationTurns).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(client.getConversationTurns).toHaveBeenCalledTimes(3));
     await runtime.whenIdle();
 
     const visible = () => {
@@ -1780,6 +1783,52 @@ describe('agent logs', () => {
 
       expect(getConversationTurns).toHaveBeenCalledTimes(1);
       expect(shownTurnIds(runtime)).toEqual(range(11, 41).map((turn) => turn.id));
+    });
+
+    // 2026-11-10：daemon 把一轮的事件发给用户的每一台设备。别的设备发起的一轮，事件流只建了空壳，这里没有那句提问：
+    // 一开始就单独取这一轮，提问在 Lead 回答的时候就出现，不等这一轮答完。
+    it('fetches a turn another device started, so its question shows while Lead answers', async () => {
+      const clock = scheduler();
+      const getConversationTurnsById = vi.fn(async () => [mainTurn(41, { state: 'streaming', userText: '手机上问的', assistantText: '' })]);
+      const client = transport({ getConversationTurns: vi.fn(async () => range(11, 40)), getConversationTurnsById });
+      const runtime = createCompanionStateRuntime({ client, credentials: credentialStore(), scheduler: clock });
+      await runtime.start();
+
+      client.emit({ ...event(1, 'lead.turn.started', 'turn-41', {
+        messageId: 'message-41', commandId: 'cmd-phone', originKind: 'paired:companion', mode: 'started', userText: '手机上问的',
+      }), audienceBindingId: null });
+      await runtime.whenIdle();
+      clock.runAll();
+      await vi.waitFor(() => expect(getConversationTurnsById).toHaveBeenCalledWith(['turn-41'], expect.anything()));
+      await runtime.whenIdle();
+
+      const state = runtime.control.getState();
+      const user = state.messagesById[state.turnsById['turn-41']!.userMessageId];
+      expect(user?.source).toBe('snapshot');
+      expect(state.messagePartsById[`${user!.id}:text`]).toMatchObject({ kind: 'text', text: '手机上问的' });
+      expect(shownTurnIds(runtime)).toEqual(range(11, 41).map((turn) => turn.id));
+    });
+
+    it('does not fetch the turn of a message this device sent, nor a turn Lead started itself', async () => {
+      const clock = scheduler();
+      const getConversationTurnsById = vi.fn(async () => []);
+      const sendChatCommand = vi.fn((_command: { id: string }) => new Promise<{ turnId: string }>(() => {}));
+      const client = transport({ getConversationTurns: vi.fn(async () => range(11, 40)), getConversationTurnsById, sendChatCommand });
+      const runtime = createCompanionStateRuntime({ client, credentials: credentialStore(), scheduler: clock });
+      await runtime.start();
+      void runtime.sendChat('这台设备发的');
+      await vi.waitFor(() => expect(sendChatCommand).toHaveBeenCalled());
+      const commandId = sendChatCommand.mock.calls[0]![0].id;
+
+      client.emit(event(1, 'lead.turn.started', 'turn-41', { messageId: 'message-41', commandId, originKind: 'paired:companion', mode: 'started' }));
+      client.emit({ ...event(2, 'lead.turn.started', 'turn-42', {
+        messageId: 'message-42', commandId: null, originKind: 'system:heartbeat', mode: 'started',
+      }), audienceBindingId: null });
+      await runtime.whenIdle();
+      clock.runAll();
+      await runtime.whenIdle();
+
+      expect(getConversationTurnsById).not.toHaveBeenCalled();
     });
 
     it('pages older turns before the oldest loaded one, one page at a time, until there are no more', async () => {

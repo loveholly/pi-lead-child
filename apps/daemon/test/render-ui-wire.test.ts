@@ -83,7 +83,7 @@ const card = (ticketId: number) => ({
   ],
 });
 
-// 同一个 binding 的两个连接：一个声明了 include=ui_surfaces，一个没有（旧客户端）。用户发起的回合的工具事件只发给发起的 binding。
+// 同一个 binding 的两个连接：一个声明了 include=ui_surfaces，一个没有（旧客户端）。
 async function connect(include: string, token?: string) {
   const accessToken = token ?? redeemPairing(db, createPairing(db, { name: "app", kind: "companion", scopes: ["chat", "tickets:view"] }).code).accessToken;
   const socket = new WebSocket(`ws://127.0.0.1:${daemon!.pairedPort}/v1/paired/events?token=${accessToken}&protocol=2&after_seq=-1${include}`);
