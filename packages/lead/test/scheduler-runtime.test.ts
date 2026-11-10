@@ -165,9 +165,10 @@ describe("LeadSchedulerRuntime", () => {
       budget: expect.objectContaining({ usedMs: 12_000, budgetMs: 150_000, toolCalls: 0 }),
       stage: { stage: "A", step: 2, sinceMs: 12_000 },
     }));
+    // Nina 等了 130 秒，其中 12 秒是用户的单元在跑：按 L1 的时限只算 118 秒，还没过时限（P1 报告的实施记录）。
     expect(snapshot.lanes[1]).toEqual({
       lane: "L1", deadlineMs: 120_000,
-      waiting: [{ who: "Nina", conversation: "Nina 的私信", count: 2, waitedMs: 130_000, overdue: true }],
+      waiting: [{ who: "Nina", conversation: "Nina 的私信", count: 2, waitedMs: 130_000, countedMs: 118_000, overdue: false }],
     });
     expect(snapshot.host).toBe("pool=ok");
   });

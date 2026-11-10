@@ -89,7 +89,8 @@ export interface SchedulerSnapshot {
     tools: Array<{ name: string; write: boolean }>;
     stage: { stage: string; step: number; sinceMs: number; tool?: string } | null;
   };
-  lanes: Array<{ lane: string; deadlineMs: number | null; waiting: Array<{ who: string; conversation: string; count: number; waitedMs: number; overdue: boolean }> }>;
+  // waitedMs 从到达时算；countedMs 是按时限算的部分（L1 不算用户的单元在跑的时间），overdue 按它判断。
+  lanes: Array<{ lane: string; deadlineMs: number | null; waiting: Array<{ who: string; conversation: string; count: number; waitedMs: number; countedMs: number; overdue: boolean }> }>;
   host: string | null;
   // 挂起的单元（P2，spec H10）：交接包编号、原来的车道、为什么挂起、挂起了多久。没有交接的 daemon 不给。
   suspended?: Array<{ id: string; unitId: string; lane: string; reason: string; sinceMs: number }>;

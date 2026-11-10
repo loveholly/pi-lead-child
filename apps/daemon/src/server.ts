@@ -24,7 +24,7 @@ import {
 } from "@pi-lead-child/lead";
 import {
   abortedByRedLine, abortedForPreempt, abortedForRestart, admitSystemUnit, budgetStatusLine, canInterruptForSteer, countedWaiting,
-  handoffGate, IdleLaneRuntime, idleLaneLimitsFromEnv, LeadHandoffs, LeadSchedulerRuntime, redLinePhase as schedRedLinePhase,
+  handoffGate, IdleLaneRuntime, idleLaneLimitsFromEnv, LANES, LeadHandoffs, LeadSchedulerRuntime, redLinePhase as schedRedLinePhase,
   schedulerLine, stepP90Ms, stoppedByUser, unitLane, yieldedToInput, type PrecipitationOutcome,
   type BudgetFacts, type Lane, type LeadBackgroundJobs, type SchedulerEffect, type SchedulerLimits, type UnitOutcome,
   type WaitingEntry,
@@ -5182,6 +5182,10 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
   // 要 Lead 处理的事单独开一轮（spec D6 的 tell 级）。交给 Lead 的事在 runTurnNow 开头才取：探网络的这段时间里
   // 又来的事一起交。
   function wakeForEvents(): void {
+    // 车道顺序（lead-scheduler spec D1、D2；P1 报告「发现的问题」第 3 条）：外部的人的消息（L1）先单独开一个 L1 单元，
+    // 然后才是到点的提醒、用户的跟进和别的系统事件（L2、L3）。以前按事件的种类排，同事的私信排在用户的跟进和 blocker
+    // 后面等了 98 秒。
+    if (wakeForPeople()) return;
     // 到点的提醒先处理，一条一轮（工单 07）：这一轮说的话挂在提醒卡下面，不和别的事混在一个气泡里。
     const reminder = leadInput.pendingMessages().find(isReminderFireEvent);
     if (reminder) {
@@ -5200,6 +5204,28 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       const ids = new Set(outcome.inboxIds);
       noteVoiced(blockerNotificationIds(listInbox(db).filter((row) => ids.has(row.id))));
     });
+  }
+
+  // 外部的人在等（L1）：为排在最前面的那个对话开一轮（一次一个对话，按排队的顺序，工单 10），这个单元一开始就是 L1。
+  // 日志写明等了多久、按 L1 的时限算了多久（用户的单元在跑的时间不算，laneClockMs）、后面还排着几件别的事。
+  // 没有时返回 false。
+  function wakeForPeople(): boolean {
+    const next = leadInput.queue()[0];
+    if (!next) return false;
+    const people = leadInput.queuedMessages(next.key);
+    if (!people.length) return false;
+    const pending = leadInput.pendingMessages();
+    const now = Date.now();
+    const arrived = Math.min(...people.map((event) => Date.parse(event.receivedAt)).filter(Number.isFinite));
+    const waitedMs = Number.isFinite(arrived) ? Math.max(0, now - arrived) : 0;
+    const countedMs = sched.laneClockMs(1, waitedMs);
+    const deadlineMs = LANES[1].firstResponseMs;
+    log(schedulerLine("dispatch", {
+      lane: "L1", events: people.length, waitedMs, countedMs, deadlineMs,
+      overdue: deadlineMs !== null && countedMs > deadlineMs, behind: pending.length - people.length,
+    }));
+    void runTurn(EVENT_WAKE_TEXT, { system: SYSTEM_TURN_ORIGINS.blocker, deliverEvents: true, only: people, lane: 1 });
+    return true;
   }
 
   // 挂起的单元（lead-scheduler spec H10）：Lead 空着、没有排着的事时，为挂起的单元叫醒它一次。由 Lead 决定：剩下不超过 2–3 步

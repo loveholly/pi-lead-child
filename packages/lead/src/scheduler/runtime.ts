@@ -13,7 +13,7 @@ import {
   type WaitingEntry,
 } from "./core.js";
 import type { SchedulerSnapshot } from "@pi-lead-child/protocol";
-import { inputLane, LANES, laneName, type InputKind, type Lane, type UnitSource } from "./lanes.js";
+import { inputLane, laneClockMs, LANES, laneName, type InputKind, type Lane, type UnitSource } from "./lanes.js";
 
 export type { SchedulerSnapshot };
 
@@ -52,6 +52,8 @@ function defaultUnitId(): string {
 export class LeadSchedulerRuntime {
   #state: SchedulerState = initialSchedulerState();
   #controller: LeadTaskController | null = null;
+  // 最近一次用户的单元（L0）结束的时刻：L1 的时限从这里算（laneClockMs）。
+  #userUnitEndedAt: number | null = null;
   #aborting: Promise<AbortExecutionResult> | null = null;
   #sessionRecorder: ((data: Record<string, unknown>) => void) | null = null;
   #stage: LeadStageInfo | null = null;
@@ -81,6 +83,20 @@ export class LeadSchedulerRuntime {
 
   get unit(): UnitState | null {
     return this.#state.unit;
+  }
+
+  /** 最近一次用户的单元（L0）结束的时刻；还没有过时是 null。 */
+  get userUnitEndedAt(): number | null {
+    return this.#userUnitEndedAt;
+  }
+
+  /** 一个在等的输入按车道的时限算了多久（laneClockMs）：L1 不算用户的单元在跑的时间。 */
+  laneClockMs(lane: Lane, waitedMs: number): number {
+    const unit = this.#state.unit;
+    return laneClockMs({
+      lane, waitedMs, now: this.#now(),
+      userUnitOpenedAt: unit && unit.lane === 0 ? unit.openedAt : null, userUnitEndedAt: this.#userUnitEndedAt,
+    });
   }
 
   /** 这一段运行的 controller；没有单元时为 null。 */
@@ -182,6 +198,7 @@ export class LeadSchedulerRuntime {
   }
 
   closeUnit(outcome: UnitOutcome): void {
+    if (this.#state.unit?.lane === 0) this.#userUnitEndedAt = this.#now();
     this.dispatch({ type: "unit.close", outcome });
     this.#controller = null;
     this.#stage = null;
@@ -196,10 +213,13 @@ export class LeadSchedulerRuntime {
       const deadline = LANES[lane].firstResponseMs;
       return {
         lane: laneName(lane), deadlineMs: deadline,
-        waiting: (facts.waiting ?? []).filter((entry) => entry.lane === lane).map((entry) => ({
-          who: entry.who, conversation: entry.conversation, count: entry.count, waitedMs: entry.waitedMs,
-          overdue: deadline !== null && entry.waitedMs > deadline,
-        })),
+        waiting: (facts.waiting ?? []).filter((entry) => entry.lane === lane).map((entry) => {
+          const countedMs = this.laneClockMs(lane, entry.waitedMs);
+          return {
+            who: entry.who, conversation: entry.conversation, count: entry.count, waitedMs: entry.waitedMs,
+            countedMs, overdue: deadline !== null && countedMs > deadline,
+          };
+        }),
       };
     });
     return {

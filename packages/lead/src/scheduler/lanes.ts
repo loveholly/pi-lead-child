@@ -69,3 +69,19 @@ export function unitLane(input: { source: UnitSource; system?: string | null; ex
       return 3;
   }
 }
+
+/**
+ * 一个在等的输入按首次可见回应的时限算了多久（spec D1；P1 报告的实施记录，2026-11-10 定下）。
+ * L1（外部的人）不能抢占 L0：用户的单元在跑的时间不算。从到达和最近一次用户的单元结束里晚的那个时刻算起；
+ * 用户的单元正在跑，就算到它开始的时刻为止。别的车道从到达时算（waitedMs）。
+ */
+export function laneClockMs(input: {
+  lane: Lane; waitedMs: number; now: number;
+  userUnitOpenedAt: number | null; userUnitEndedAt: number | null;
+}): number {
+  if (input.lane !== 1) return input.waitedMs;
+  const arrivedAt = input.now - input.waitedMs;
+  const from = Math.max(arrivedAt, input.userUnitEndedAt ?? arrivedAt);
+  const to = input.userUnitOpenedAt ?? input.now;
+  return Math.max(0, to - from);
+}
