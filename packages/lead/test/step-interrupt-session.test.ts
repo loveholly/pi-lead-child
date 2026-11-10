@@ -60,6 +60,9 @@ async function thinkingStub(options: { headers?: boolean; writing?: boolean } = 
   return { baseUrl: `http://127.0.0.1:${(server!.address() as AddressInfo).port}/v1`, chats, closed: () => closed };
 }
 
+// 新会话的第一次请求要先建好提示词和工具：机器忙时超过 vi.waitFor 缺省的 1 秒（2026-11-10 本地连跑 3 次失败 1 次）。
+const FIRST_REQUEST = { timeout: 10_000 };
+
 const textOf = (message: any): string => (typeof message?.content === "string"
   ? message.content
   : (message?.content ?? []).map((part: any) => part?.text ?? "").join(""));
@@ -90,9 +93,9 @@ async function interruptScenario(headers: boolean): Promise<void> {
       const running = session.prompt("问题 A");
       // 模型开始回答了，还没说话：这一步可以中止。代理还没回响应头时（headers=false）也一样。
       if (headers) {
-        await vi.waitFor(() => expect(events.some((event) => event.type === "message_start" && event.message?.role === "assistant")).toBe(true));
+        await vi.waitFor(() => expect(events.some((event) => event.type === "message_start" && event.message?.role === "assistant")).toBe(true), FIRST_REQUEST);
       } else {
-        await vi.waitFor(() => expect(stub.chats).toHaveLength(1));
+        await vi.waitFor(() => expect(stub.chats).toHaveLength(1), FIRST_REQUEST);
         expect(events.some((event) => event.type === "message_start" && event.message?.role === "assistant")).toBe(false);
       }
       await session.steer("插话 B");
@@ -159,7 +162,7 @@ describe("interrupting a real Lead session's step for a steer", () => {
     });
     try {
       const running = session.prompt("问题 A");
-      await vi.waitFor(() => expect(streamed).toContain("长文第3句。"));
+      await vi.waitFor(() => expect(streamed).toContain("长文第3句。"), FIRST_REQUEST);
       await session.steer("插话 B");
       expect(lead.interruptStep()).toBe(true);
       await running;
