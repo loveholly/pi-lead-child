@@ -40,6 +40,7 @@ export * from "./types.js";
 export * from "./card-actions.js";
 export * from "./widgets.js";
 export { BUSY_PLACEMENT_WHERE, type BusyPlacementChange } from "./busy-placement.js";
+export * from "./forms.js";
 export { CONNECTIONS_WHERE, installConfirmedLocalMcp, localMcpLaunchOf, type ConnectionTarget, type SkillTarget, type SkillsTarget } from "./installs.js";
 export { UI_ACTIONS, UI_ACTION_TARGETS, runtimeEnablePermission, type RuntimeTarget } from "./catalog.js";
 
@@ -202,7 +203,7 @@ export async function listLeadUiActions(
       lead: mode,
       leadReady,
       leadReason: !view.available ? view.reason
-        : mode === "user_direct" ? `${why}。请用户在 ${view.where} 里自己点。`
+        : mode === "user_direct" ? `${why}。请用户在 ${view.where} 里自己点。${formHint(definition)}`
         : mode === "external_turn"
           ? externalRefusalText(definition, view.label, null, externalContent ?? [], view.where, externalTurnFloorOf(definition, resolved.value))
         : mode === "user_turn" && turnBlocker !== null ? `${why}（${turnBlocker}）。或者请用户在 ${view.where} 里自己点。`
@@ -270,7 +271,7 @@ function resolveUiAuthority(
   if (mode === "own") return { by: { actor: "lead" }, authority: "lead" };
   if (mode === "delegated") return { by: { actor: "lead" }, authority: "delegated" };
   if (mode === "user_direct") {
-    throw refusal("user_direct", `${definition.label}（${name}）：${why}。请用户在 ${where} 里自己点。`);
+    throw refusal("user_direct", `${definition.label}（${name}）：${why}。请用户在 ${where} 里自己点。${formHint(definition)}`);
   }
   // 改规则的操作，这一轮带着外部内容：拒绝。系统存下这一个操作（参数和这次的一样），拒绝里带着确认卡的 user_action。
   // 只拒绝的操作（externalRefusalNext）不存、不带卡，拒绝里写明 Lead 下一步怎么做。
@@ -305,6 +306,17 @@ function resolveUiAuthority(
     );
   }
   return { by: { actor: "lead", onBehalfOf: turn.onBehalfOf }, authority: "on_behalf", turnStartedAt: turn.startedAt };
+}
+
+/**
+ * 只属于用户本人的操作带参数时，Lead 可以画一个表单（genui 的 Form，工单 #285）：用户在卡片里填好、点提交才执行。
+ * 没有参数的操作（例如作废设备）没有可填的，不提。
+ */
+function formHint(definition: UiActionDefinition): string {
+  const schema = (UI_ACTION_INPUT_SCHEMAS[definition.target] as Record<string, TSchema>)[definition.id] as { properties?: Record<string, unknown> } | undefined;
+  if (!schema?.properties || !Object.keys(schema.properties).length) return "";
+  return `也可以用 render_ui 画一个 Form（target ${definition.target}，action ${definition.id}）请他在会话卡片里填写，他点了提交才执行；`
+    + "带 key 的参数用 secret 字段，他自己填，你拿不到值。";
 }
 
 /**

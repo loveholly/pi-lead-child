@@ -142,6 +142,11 @@ export class ChatRenderer {
           : undefined;
         if (typeof fallback === "string" && fallback.trim()) {
           this.out.write(`\n${CYAN(`[卡片] ${fallback.trim()}`)}\n`);
+          // 卡片里有表单（工单 #285）：命令行填不了，说清楚去哪里填。
+          const nodes = (event.payload.args as { nodes?: unknown } | undefined)?.nodes;
+          if (Array.isArray(nodes) && nodes.some((node) => (node as { type?: unknown } | null)?.type === "Form")) {
+            this.out.write(`${DIM("（这张卡里有一个要填写的表单，命令行填不了：请在 App 的会话里填写、提交。）")}\n`);
+          }
           return;
         }
         this.out.write(`\n${DIM(`· ${String(event.payload.toolName ?? "tool")}(${preview(event.payload.args)})`)}\n`);

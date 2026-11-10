@@ -51,6 +51,7 @@ description: 用 render_ui 画卡片之前读。讲怎样按信息的形状选�
 | 几项独立的检查、几个服务或环境，每项一个结果 | Segments：每格一个短标签和色调，summary 写「4/5 通过」这样的一句 |
 | 转述别人在外部通道（Slack 等）里说的话 | Message：只给外部消息卡的编号（`ref: { "type": "channel_card", "id": 编号 }`），系统取原文、发信人和时间；不要把对方的话打进 Text |
 | 一件事的状态或时间会变（完成了、改了时间、还剩多久） | 在 Tile、Text 上加 `bind`：`{ "ticket": 编号, "field": "stage" }` 让色调跟着状态，`{ "ticket": 编号, "field": "remindAt", "format": "remaining" }` 实时写剩余时间；Tile 绑定 `remindAt`、`format: "date"` 时是一页日历（月份 + 日期），改了时间跟着变。你写的 text、caption、value 是取不到时的快照 |
+| 要用户填信息、改一项设置（地址、模型名、key、几个选项、开关、数字） | Form：绑定一个操作（`target`、`action` 和 Action 一样），每个字段填这个操作的一个参数。用户在卡片里填完点提交就执行，不要让他去找设置页。key、token 用 `secret` 字段（见第 9 节的表单卡） |
 | 用户可能想在卡片上直接对这件事做的操作（改时间、取消、确认……） | Action：`target` 是那个对象，`action` 是 list_ticket_actions 或 list_actions 里的操作编号。要参数时配一个 Field（常用选项 + 自由输入） |
 | 一件事有低频的操作或较长的细节 | Disclosure：收起态放一眼要看的（例如一个 Media），`detail` 放操作和细节。用户点一下，从原位置撑开成浮层 |
 
@@ -164,6 +165,42 @@ description: 用 render_ui 画卡片之前读。讲怎样按信息的形状选�
 进度卡（一张工单修到哪一步）：TicketRef + Steps + Progress；有经过时再加一个带标题的 Timeline 区块。
 
 决定卡：TicketRef 放工单，FactList 列 2–4 个事实，ChoiceGroup 列选项、每个选项的后果和你的推荐。选项不写在正文里。
+
+表单卡（请用户在卡片里填写、选择，点提交执行一个操作）：
+
+- 先用 list_actions（或 list_ticket_actions）找到操作和它的参数。每个要提交的参数一个字段，`param` 写参数名；操作的必填参数都要有字段。没有隐藏参数：不想让用户改的（例如要修改的那一条的 id）写 `readOnly: true` 和 `default`。
+- 字段的 `kind`：`text` 单行，`textarea` 多行，`select` 单选（`options`；`display` 写 `dropdown` 下拉或 `segmented` 分段，分段最多 4 项），`multiselect` 多选，`switch` 开关，`number` 数字，`secret` 敏感。
+- 每个字段写 `label`，需要时写 `help`（一句说明，例如在哪里拿到 key）、`placeholder`、`default`、`required`。校验写在 `validate` 里：`format: "url"`、`format: "email"`、`pattern`（整串匹配的正则，不要嵌套量词）、`minLength`、`maxLength`、`min`、`max`、`integer`、`minItems`、`maxItems`，`message` 写不合格时的一句话。
+- 敏感的值（key、token）只能用 `secret` 字段，也只有登记过的密钥参数能用它（例如 save_fast_model、save_provider 的 apiKey）。你不能给它 `default`，也拿不到用户填的值：提交以后你只知道「已设置 / 保留原值 / 没填」。已经设置过的写 `keep: true`，用户不填就保留原值。不要请用户在对话里把 key 发给你。
+- 只属于用户本人的操作（user_direct，例如 save_fast_model、save_provider）也能画成表单：你调用会被拒，用户点提交才执行，权限和设置页一样。
+- 一张卡最多一个 Form，放在卡片正文里（Stack 或 Section），不要放进 Disclosure、Item、Group。提交按钮就是卡片的主按钮，不要再放 primary 的 Action。
+- 提交以后卡片收成一行结果。成功时系统叫醒你，告诉你结果和填了什么，你接着做下一步（例如用 test_fast_model 测一下）；失败时卡片写着原因，用户可以改了再交，系统也会叫醒你。
+- fallback_text 写清楚要用户填什么。系统会在后面补一句「要在 App 的会话里填，或者去设置页的哪里」：plc 和 Slack 显示不了表单。
+
+```json
+{
+  "root": "card",
+  "fallback_text": "请填公司决策模型的地址、模型名和 key，填完点「保存」就生效。",
+  "nodes": [
+    { "id": "card", "type": "Stack", "props": { "gap": "md" }, "children": ["form"] },
+    { "id": "form", "type": "Form", "props": {
+      "target": { "type": "model_settings", "id": "models" },
+      "action": "save_fast_model",
+      "title": "添加一条直觉",
+      "description": "填完点保存，下一次判断就会用它。",
+      "submitLabel": "保存",
+      "fields": [
+        { "param": "name", "kind": "text", "label": "名字", "default": "公司决策", "required": true },
+        { "param": "baseUrl", "kind": "text", "label": "地址", "placeholder": "https://decision.example.com", "required": true,
+          "validate": { "format": "url" } },
+        { "param": "model", "kind": "text", "label": "模型", "default": "decision-1", "required": true,
+          "validate": { "pattern": "[A-Za-z0-9._-]{1,64}", "message": "模型名只能有字母、数字和 . _ -" } },
+        { "param": "apiKey", "kind": "secret", "label": "Key", "help": "在公司的网关页面复制，只存在这台电脑上", "required": true }
+      ]
+    } }
+  ]
+}
+```
 
 ## 10. 常见错误（来自真实的卡片）
 

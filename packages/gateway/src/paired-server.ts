@@ -99,11 +99,13 @@ import {
   type ChannelCardDto,
   type RuleChangeConfirmationDto,
   type RuntimeSettingsDto,
+  UiFormSubmitRequestSchema,
   withoutModelGrouping,
 } from "@pi-lead-child/protocol";
 import {
   BY_USER, createCoordinator, DelegationBlockedError, DeliveryError, grantItemDelegation, ReviewerChangeError,
-  listUiActions, memoryPreferences, TicketActionError, uiActionDefinition, type DelegateInput, type DelegationGrant, type TicketActionOutcome,
+  getUiForm, listUiActions, memoryPreferences, submitUiForm, TicketActionError, ticketActionDefinition, uiActionDefinition, uiFormDto,
+  type DelegateInput, type DelegationGrant, type TicketActionOutcome,
   type UiActionOutcome, type UiActionServices, type UiActionTarget, type WorkspaceActionResult,
   warmRepositoryIdentity,
 } from "@pi-lead-child/engine";
@@ -630,6 +632,15 @@ const LEAD_CAPABILITIES = new Set<string>(["confirm_item"]);
 function assertLeadCapability(value: unknown): LeadCapability {
   if (typeof value === "string" && LEAD_CAPABILITIES.has(value)) return value as LeadCapability;
   throw new HttpError(400, "invalid_request", `unknown lead capability: ${String(value)}`);
+}
+
+// 表单提交成功以后的那一句：操作给 Lead 的结果里的 summary（例如「添加了直觉 公司决策（api.example.com）」），没有时用操作的名字。
+function formResultMessage(forLead: unknown, label: string): string {
+  if (forLead && typeof forLead === "object") {
+    const summary = (forLead as { summary?: unknown }).summary;
+    if (typeof summary === "string" && summary.trim()) return summary;
+  }
+  return label;
 }
 
 function assertUserActor(body: unknown): void {
@@ -2393,6 +2404,59 @@ export async function startPairedServer(
       // 「改时间」给 remindAt；「10 分钟后再提醒」给 snoozeMinutes（都不给时是 10 分钟以后）。权限和确认提醒一样（tickets:create）。
       // 工单以外的操作的通用页面入口（genui 卡片上的按钮，2026-10-27）：和 Lead 的 list_actions、perform_action 是同一个函数。
       // 清单只读，要 chat；执行时每个操作要自己登记的 scope（performUserUiAction 检查）。
+      // ——— 会话卡片里的表单（工单 #285，protocol 的 ui-forms.ts）———
+      // 读状态要 chat。提交：daemon 只认 render_ui 建的表单记录（绑定的操作和字段），用同一个函数校验值，
+      // 再用设置页的那个入口以你本人的身份执行（performUserUiAction、performUserTicketAction）：权限、检查和账本和设置页一样。
+      // 敏感字段的值只在这个请求体和交给操作的 input 里，不记日志、不进记录。
+      const formMatch = url.pathname.match(/^\/v1\/forms\/(frm_[A-Za-z0-9_-]{8,40})(\/submit)?$/);
+      if (formMatch && ((req.method === "GET" && !formMatch[2]) || (req.method === "POST" && formMatch[2]))) {
+        const formId = formMatch[1]!;
+        if (req.method === "GET") {
+          requireAuth(req, "chat");
+          const record = getUiForm(bridge.db, formId);
+          if (!record) throw new HttpError(404, "not_found", "no such form");
+          json(req, res, 200, { form: uiFormDto(record) });
+          return;
+        }
+        const auth = requireAuth(req, "chat");
+        const body = parseJson(await readBody(req, maxBodyBytes)) ?? {};
+        assertUserActor(body);
+        const { actor: _actor, ...request } = body as Record<string, unknown>;
+        if (!Value.Check(UiFormSubmitRequestSchema, request)) throw new HttpError(400, "invalid_request", "body is { values: { <param>: value } }");
+        const source = requestSource(req, auth.binding);
+        try {
+          const form = await submitUiForm(bridge.db, {
+            id: formId,
+            values: (request as { values: Record<string, unknown> }).values,
+            locale: getLocale(bridge.db),
+            bindingId: auth.binding.id,
+            log: bridge.log,
+            perform: async ({ target, action, input }) => {
+              if (target.type === "ticket") {
+                requireUserActions();
+                const definition = ticketActionDefinition(action);
+                if (definition && !auth.scopes.includes(definition.scope)) {
+                  throw new TicketActionError("forbidden", `${definition.label}要 ${definition.scope} 权限，这个凭证没有`);
+                }
+                await performUserTicketAction(ticketActionContext(), {
+                  itemId: Number(target.id), action, input, binding: auth.binding, source,
+                });
+                return { message: formResultMessage(null, definition?.label ?? action) };
+              }
+              const outcome = await performUserUiAction(uiActionContext(), {
+                target: { type: target.type, id: String(target.id) }, action, input, binding: auth.binding, scopes: auth.scopes, source,
+              });
+              return { message: formResultMessage(outcome.forLead, uiActionDefinition(target.type, action)?.label ?? action) };
+            },
+          });
+          flushGatewayOutbox();
+          json(req, res, 200, { form });
+        } catch (error) {
+          mapTicketActionError(error);
+        }
+        return;
+      }
+
       const uiActionsMatch = url.pathname.match(/^\/v1\/actions\/([a-z_]+)\/([A-Za-z0-9:_.@-]{1,128})(?:\/([a-z_]+))?$/);
       if (uiActionsMatch && (req.method === "GET" || req.method === "POST")) {
         const [, type, rawId, action] = uiActionsMatch as unknown as [string, string, string, string | undefined];

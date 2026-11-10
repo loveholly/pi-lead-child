@@ -5,6 +5,9 @@ import { redactSecretText } from "./redaction.ts";
 import { TICKET_ACTION_INPUT_SCHEMAS } from "./ticket-actions.ts";
 import { UI_ACTION_INPUT_SCHEMAS, UI_ACTION_TARGET_TYPES, isUiActionTargetType, type UiActionTargetType } from "./ui-actions.ts";
 import { UserActionRequestSchema, userActionProblems } from "./user-actions.ts";
+import {
+  UI_FORM_ID_PATTERN, UI_FORM_LIMITS, UiFormFieldSchema, isSecretActionParam, uiFormFieldRuleProblem, type UiFormField,
+} from "./ui-forms.ts";
 import { partialSurfaceMessages } from "./ui-surfaces.messages.ts";
 
 // Lead 生成的富交互卡片（generative UI，2026-10-15 用户决定，.scratch/generative-ui/spec.md）。
@@ -520,6 +523,22 @@ export const UI_CATALOG = {
       action: UserActionRequestSchema,
     }),
   },
+  // 表单（工单 #285，2026-11-06，ui-forms.ts）：用户在卡片里填写、选择，点提交执行操作层里的一个操作（target、action，
+  // 和 Action 一样）。每个字段填这个操作的一个参数；没有隐藏的参数。提交走 POST /v1/forms/:form/submit，daemon 以用户本人的
+  // 身份调用和设置页同一个函数。form 由服务端（render_ui）在定稿时建表单记录后填，Lead 写的不算。
+  Form: {
+    container: false,
+    props: StrictObject({
+      target: ActionTargetSchema,
+      action: Type.String({ minLength: 1, maxLength: 40 }),
+      title: Type.Optional(Type.String({ minLength: 1, maxLength: UI_FORM_LIMITS.title })),
+      description: Type.Optional(Type.String({ minLength: 1, maxLength: UI_FORM_LIMITS.description })),
+      submitLabel: Type.Optional(Type.String({ minLength: 1, maxLength: UI_FORM_LIMITS.submitLabel })),
+      fields: Type.Array(UiFormFieldSchema, { minItems: 1, maxItems: UI_FORM_LIMITS.fields }),
+      // 以下由服务端填。
+      form: Type.Optional(Type.String({ pattern: UI_FORM_ID_PATTERN })),
+    }),
+  },
   // 同类合并（2026-10-28，改版稿第 2 版第 5 组）：几件同类的事收成一行「标签 · 做了什么 · N 件」，
   // 点开从原位置撑开成浮层，children 一件一行。件数由客户端数 children，Lead 不写数字。
   Group: {
@@ -599,7 +618,7 @@ export const UI_CATALOG_USAGE: Readonly<Record<UiComponentType, string>> = {
     + "用户点一下从原位置撑开成浮层，detail 的子节点在浮层里。一张卡最多 1 个，不能嵌套。低频的操作和细节放进 detail",
   Action: "Action { target: { type: ticket, id: 编号 } 或 { type: 目标类型, id: 字符串 }, action, input?, label?, role: primary|default|quiet }："
     + "卡片上的一个按钮，做 list_ticket_actions 或 list_actions 里的一个操作，用户按下时是用户本人做。一张卡最多 1 个 primary。"
-    + "只属于用户本人去设置里点的操作（user_direct）不能做成按钮，用 UserAction",
+    + "只属于用户本人去设置里点的操作（user_direct）不能做成按钮：要用户填参数的用 Form（他点提交才执行），别的用 UserAction",
   Field: "Field { for: Action 节点的 id, param, kind: datetime|choice, label?, presets: [{ label, value }], freeInput? }：给那个按钮的一个参数提供选项。"
     + "只能放在 Disclosure 的 detail 里。datetime 的 value 写 +30m、+2h、+1d 09:00（明天 09:00）、mon 09:00（下周一 09:00）或 ISO 时刻，"
     + "按下时才换算；freeInput 让用户自己填一个时刻",
@@ -608,6 +627,16 @@ export const UI_CATALOG_USAGE: Readonly<Record<UiComponentType, string>> = {
     + "confirm_write（确认写入）、choose（选择）、approve（审批）、accept（验收）、confirm_rule_change（放行一次被拦下的改规则操作）、"
     + "confirm_timer（外部的人要求设的定时器，请用户决定设不设）。"
     + "客户端按 kind 画按钮，按钮只做这一件事",
+  Form: "Form { target, action, title?, description?, submitLabel?, fields: [{ param, kind, label, help?, placeholder?, required?, readOnly?, "
+    + "default?, options?: [{ value, label }], display?: dropdown|segmented, keep?, validate?: { format?: url|email, pattern?, minLength?, "
+    + "maxLength?, min?, max?, integer?, minItems?, maxItems?, message? } }] }：请用户在卡片里填写、选择，点提交执行一个操作"
+    + "（target 和 action 的写法和 Action 一样，list_ticket_actions 或 list_actions 里的操作）。每个字段填这个操作的一个参数（param），"
+    + "要提交的参数都要有字段，没有隐藏参数；操作的必填参数都要有字段。kind：text 单行、textarea 多行、select 单选（display 选下拉或分段）、"
+    + "multiselect 多选、switch 开关、number 数字、secret 敏感（key、token，用密码框，值不经过你）。"
+    + "secret 不能有 default，你也拿不到它的值，只知道「已设置 / 保留原值 / 没填」；已经设置过的写 keep: true，用户不填就保留原值。"
+    + "readOnly 的字段显示 default、不能改（例如要修改的那一条的 id）。"
+    + "只属于用户本人的操作（user_direct，例如 save_fast_model、save_provider）也能做成表单：用户点提交才执行。"
+    + "用户提交后卡片收成一行结果，结果会叫醒你。要用户填信息时用它，不要让用户自己去找设置页。一张卡最多 1 个，不能放进 Disclosure、Item、Group",
   Group: "Group { label, tag?, tone?: neutral|warning }：几件同类的事收成一行「标签 · 做了什么 · N 件」，点开是浮层，children 一件一行"
     + "（Item 或 Text）。件数由客户端数，label 里不要写数字。同一个对象上、结果一样的几件事用它；失败的、要用户处理的那几件不放进去，"
     + "单独写在组的前面。一张卡最多 3 个，不能嵌套，也不能放进 Disclosure；组里的 Item 不带细节",
@@ -616,7 +645,7 @@ export const UI_CATALOG_USAGE: Readonly<Record<UiComponentType, string>> = {
 // 用户能在卡片上直接点、做成一件事的组件。卡片要用户做事时，至少要有一个（render_ui 的检查）。
 export const UI_ACTIONABLE_COMPONENTS: ReadonlySet<UiComponentType> = new Set<UiComponentType>([
   "ChoiceGroup", "ConnectionConnect", "ConnectionConfirm", "MemorySwitchConfirm", "StandingOrderChangeConfirm", "UserAction", "Action", "Reminder",
-  "ChannelCard", "Intervention",
+  "ChannelCard", "Intervention", "Form",
 ]);
 
 /** 卡片上有没有用户能点、做成一件事的控件。 */
@@ -748,7 +777,20 @@ function graphRuleError(nodes: readonly UiNode[], byId: ReadonlyMap<string, UiNo
   if (tiles > UI_COMPONENT_LIMITS.tilesPerCard) return { path: "/nodes", message: `一张卡最多 ${UI_COMPONENT_LIMITS.tilesPerCard} 个 Tile，现在是 ${tiles} 个` };
   const messages = nodes.filter((node) => node.type === "Message").length;
   if (messages > UI_COMPONENT_LIMITS.messagesPerCard) return { path: "/nodes", message: `一张卡最多 ${UI_COMPONENT_LIMITS.messagesPerCard} 个 Message` };
-  return groupRuleError(nodes, byId) ?? disclosureRuleError(nodes, byId) ?? actionRuleError(nodes, byId);
+  return groupRuleError(nodes, byId) ?? disclosureRuleError(nodes, byId) ?? formPlacementError(nodes, byId) ?? actionRuleError(nodes, byId);
+}
+
+// Form：一张卡最多 1 个；不能放进 Disclosure、Item、Group（它会变高，展开态和组都在浮层里，提交后要收成一行）。
+function formPlacementError(nodes: readonly UiNode[], byId: ReadonlyMap<string, UiNode>): UiSurfaceError | null {
+  const forms = nodes.filter((node) => node.type === "Form");
+  if (forms.length > 1) return { path: "/nodes", message: "一张卡最多 1 个 Form：要填的东西放进同一个表单" };
+  if (!forms.length) return null;
+  for (const holder of nodes) {
+    if (holder.type !== "Disclosure" && holder.type !== "Item" && holder.type !== "Group") continue;
+    const below = (holder.children ?? []).flatMap((id) => [...subtree(id, byId)]);
+    if (below.some((id) => byId.get(id)?.type === "Form")) return { path: "/nodes", message: `Form 不能放进 ${holder.type}：把它放在卡片的正文里（Stack、Section）` };
+  }
+  return null;
 }
 
 // Group：一张卡最多 3 个；至少一件；组里只放 Item 和 Text，Item 不带细节（浮层里不再开浮层）；
@@ -860,7 +902,15 @@ function actionRuleError(nodes: readonly UiNode[], byId: ReadonlyMap<string, UiN
       const params = schemaParams(schema);
       const unknown = Object.keys(props.input ?? {}).find((key) => !params.has(key));
       if (unknown) return { path: `/nodes/${index}/props/input/${unknown}`, message: `${props.action} 没有参数 ${unknown}（可用：${[...params].join("、") || "无"}）` };
+      const secret = Object.keys(props.input ?? {}).find((key) => isSecretActionParam(props.target.type, props.action, key));
+      if (secret) return { path: `/nodes/${index}/props/input/${secret}`, message: `${secret} 是密钥：不能写进按钮，用 Form 的 secret 字段让用户自己填` };
       if (props.role === "primary") primaries += 1;
+    }
+    if (node.type === "Form") {
+      const error = formActionError(node, index);
+      if (error) return error;
+      // 表单的提交按钮就是这张卡的主按钮。
+      primaries += 1;
     }
   }
   for (const [index, node] of nodes.entries()) {
@@ -885,7 +935,56 @@ function actionRuleError(nodes: readonly UiNode[], byId: ReadonlyMap<string, UiN
       }
     }
   }
-  if (primaries > 1) return { path: "/nodes", message: "一张卡最多 1 个 role 是 primary 的 Action" };
+  if (primaries > 1) return { path: "/nodes", message: "一张卡最多 1 个 role 是 primary 的 Action（Form 的提交按钮也算一个）" };
+  return null;
+}
+
+// schema 是什么类型（object 的 type 字段；Union 取第一种不是 null 的）。
+function schemaKind(schema: TSchema): string | null {
+  const record = schema as { type?: unknown; anyOf?: TSchema[]; const?: unknown };
+  if (typeof record.type === "string") return record.type;
+  if (record.const !== undefined) return typeof record.const;
+  for (const part of record.anyOf ?? []) {
+    const kind = schemaKind(part);
+    if (kind && kind !== "null") return kind;
+  }
+  return null;
+}
+
+// 字段的类型要和参数的类型对得上。
+const FIELD_PARAM_KINDS: Readonly<Record<UiFormField["kind"], readonly string[]>> = {
+  text: ["string"], textarea: ["string"], secret: ["string"], select: ["string"],
+  multiselect: ["array"], switch: ["boolean"], number: ["number", "integer"],
+};
+
+// Form：操作要登记过；每个字段的 param 是这个操作的参数、类型对得上，选项和缺省值是这个参数能取的值；
+// 操作的必填参数都有字段；密钥参数只能用 secret 字段，secret 字段也只能填密钥参数。
+function formActionError(node: UiNode, index: number): UiSurfaceError | null {
+  const props = node.props as Static<typeof UI_CATALOG.Form.props>;
+  const at = (path: string) => `/nodes/${index}/props${path}`;
+  const schema = actionInputSchema(props.target, props.action);
+  if (!schema) return { path: at("/action"), message: `${props.target.type} 没有操作 ${props.action}（先用 list_ticket_actions 或 list_actions 查）` };
+  const params = schemaParams(schema);
+  for (const [position, field] of props.fields.entries()) {
+    const path = (rest: string) => at(`/fields/${position}${rest}`);
+    if (!params.has(field.param)) return { path: path("/param"), message: `${props.action} 没有参数 ${field.param}（可用：${[...params].join("、") || "无"}）` };
+    const param = paramSchema(schema, field.param)!;
+    const kind = schemaKind(param);
+    if (kind && !FIELD_PARAM_KINDS[field.kind].includes(kind)) {
+      return { path: path("/kind"), message: `${field.param} 是 ${kind}，不能用 ${field.kind} 字段` };
+    }
+    const secret = isSecretActionParam(props.target.type, props.action, field.param);
+    if (secret && field.kind !== "secret") return { path: path("/kind"), message: `${field.param} 是密钥：只能用 secret 字段，值由用户自己填` };
+    if (!secret && field.kind === "secret") return { path: path("/kind"), message: `${field.param} 不是登记过的密钥参数，不能用 secret 字段` };
+    const option = (field.options ?? []).findIndex((entry) => !Value.Check(param, field.kind === "multiselect" ? [entry.value] : entry.value));
+    if (option >= 0) return { path: path(`/options/${option}/value`), message: `选项「${field.options![option]!.value}」不是 ${field.param} 能取的值` };
+    if (field.default !== undefined && !Value.Check(param, field.default)) {
+      return { path: path("/default"), message: `缺省值不是 ${field.param} 能取的值` };
+    }
+  }
+  const required = (schema as { required?: string[] }).required ?? [];
+  const missing = required.find((param) => !props.fields.some((field) => field.param === param));
+  if (missing) return { path: at("/fields"), message: `${props.action} 的必填参数 ${missing} 没有字段：每个要提交的参数都要有一个字段（不能改的用 readOnly）` };
   return null;
 }
 
@@ -894,6 +993,16 @@ function propsRuleError(node: UiNode): UiSurfaceError | null {
   if (node.type === "UserAction") {
     const problems = userActionProblems((node.props as { action?: unknown }).action);
     if (problems.length) return { path: "/action", message: problems.join("；") };
+  }
+  if (node.type === "Form") {
+    const props = node.props as Static<typeof UI_CATALOG.Form.props>;
+    const params = props.fields.map((field) => field.param);
+    const duplicate = params.find((param, at) => params.indexOf(param) !== at);
+    if (duplicate) return { path: "/fields", message: `两个字段填同一个参数 ${duplicate}` };
+    for (const [position, field] of props.fields.entries()) {
+      const problem = uiFormFieldRuleProblem(field);
+      if (problem) return { path: `/fields/${position}${problem[0]}`, message: problem[1] };
+    }
   }
   if (node.type === "SourceQuote") {
     const props = node.props as Static<typeof UI_CATALOG.SourceQuote.props>;
@@ -999,6 +1108,12 @@ function withoutServerQuote(node: UiNode): UiNode {
   return { ...node, props: location };
 }
 
+// 生成中的 Form 还没有表单记录：form 由服务端定稿时填，Lead 写的不显示（不能借它提交到别的表单）。
+function withoutServerForm(node: UiNode): UiNode {
+  const { form: _form, ...rest } = node.props as Record<string, unknown>;
+  return { ...node, props: rest };
+}
+
 // 生成中的 Message 还没有原文：sender、messages、total 由服务端定稿时从外部消息卡填。
 function withoutServerMessages(node: UiNode): UiNode {
   const { sender: _sender, messages: _messages, total: _total, ...reference } = node.props as Record<string, unknown>;
@@ -1043,7 +1158,8 @@ export function partialUiSurface(args: unknown, callId: string, locale: Locale =
     fallbackText: typeof input.fallback_text === "string" && input.fallback_text.trim() ? input.fallback_text : partialSurfaceMessages(locale).generating,
     nodes: nodes.filter((node) => reached.has(node.id)).map((node) => node.children
       ? { ...node, children: node.children.filter((child) => reached.has(child)) }
-      : node.type === "SourceQuote" ? withoutServerQuote(node) : node.type === "Message" ? withoutServerMessages(node) : node),
+      : node.type === "SourceQuote" ? withoutServerQuote(node) : node.type === "Message" ? withoutServerMessages(node)
+        : node.type === "Form" ? withoutServerForm(node) : node),
   };
   const checked = validateUiSurface(surface);
   return checked.ok ? redactUiSurface(checked.surface) : null;

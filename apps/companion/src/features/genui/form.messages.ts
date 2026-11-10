@@ -1,0 +1,43 @@
+// 会话卡片里的表单（genui 的 Form，工单 #285）自己的文案。字段的 label、说明和校验的说法来自 Lead 画的数据和 protocol 的 ui-forms。
+import { defineMessages } from '@/i18n';
+
+export const formMessages = defineMessages({
+  en: {
+    submit: 'Submit',
+    submitting: 'Submitting…',
+    requiredHint: 'Fields marked * are required.',
+    keepPlaceholder: 'Already set. Leave empty to keep the current value.',
+    secretPlaceholder: 'Paste the value here',
+    secretNote: (leadName: string) => `Stored encrypted. ${leadName} cannot see this value.`,
+    show: 'Show',
+    hide: 'Hide',
+    choose: 'Choose…',
+    yes: 'On',
+    no: 'Off',
+    loading: 'Loading the form…',
+    done: 'Submitted',
+    failed: (reason: string) => `Not done: ${reason}`,
+    noForm: 'This form cannot be submitted here. Ask again in the conversation.',
+    unknownForm: 'Could not find this form.',
+    requestFailed: 'The request did not complete. Try again.',
+  },
+  zh: {
+    submit: '提交',
+    submitting: '正在提交…',
+    requiredHint: '带 * 的要填。',
+    keepPlaceholder: '已经设置过，留空就保留现在的值',
+    secretPlaceholder: '把值粘贴在这里',
+    secretNote: (leadName) => `加密保存，${leadName} 看不到这个值。`,
+    show: '显示',
+    hide: '隐藏',
+    choose: '请选择…',
+    yes: '开',
+    no: '关',
+    loading: '正在读表单…',
+    done: '已提交',
+    failed: (reason) => `没有成功：${reason}`,
+    noForm: '这个表单在这里不能提交，请在会话里重新问一次。',
+    unknownForm: '找不到这个表单。',
+    requestFailed: '请求没有完成，请再试一次。',
+  },
+});

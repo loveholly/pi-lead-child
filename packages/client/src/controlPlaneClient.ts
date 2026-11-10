@@ -246,6 +246,9 @@ import {
   type TicketAcceptanceCriteriaResponse,
   TicketActionsResponseSchema,
   UiActionRunResponseSchema,
+  UiFormResponseSchema,
+  type UiFormDto,
+  type UiFormResponse,
   UiActionsResponseSchema,
   SurfaceActionsResponseSchema,
   type SurfaceActionDone,
@@ -1507,6 +1510,26 @@ export class ControlPlaneClient {
       ...(options.signal ? { signal: options.signal } : {}),
     });
     return response.actions;
+  }
+
+  // 会话卡片里的一个表单现在的状态（工单 #285）：还没交、上次失败、已经成功。
+  async getUiForm(id: string, options: { signal?: AbortSignal } = {}): Promise<UiFormDto> {
+    const response = await this.request<UiFormResponse>(`/v1/forms/${encodeURIComponent(id)}`, UiFormResponseSchema, {
+      ...(options.signal ? { signal: options.signal } : {}),
+    });
+    return response.form;
+  }
+
+  // 提交表单：daemon 校验后以你本人的身份执行它绑定的操作（和设置页同一个函数）。敏感字段的值只在这个请求里，
+  // 调用方提交以后就清掉，不存。值不合格时服务端回 400；操作本身失败时回 200，状态是 failed，原因在 result.message。
+  async submitUiForm(id: string, values: Record<string, unknown>, options: { signal?: AbortSignal } = {}): Promise<UiFormDto> {
+    const response = await this.request<UiFormResponse>(`/v1/forms/${encodeURIComponent(id)}/submit`, UiFormResponseSchema, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ values }),
+      ...(options.signal ? { signal: options.signal } : {}),
+    });
+    return response.form;
   }
 
   // 这张工单现在能做的操作（工单 03 的操作层，spec 5.11）：每个操作能不能做、为什么。页面按这份清单决定按钮能不能点，

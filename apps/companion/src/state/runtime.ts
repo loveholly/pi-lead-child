@@ -90,6 +90,7 @@ import type {
   TicketActionRunResponse,
   SurfaceActionDone,
   UiActionRunRequest,
+  UiFormDto,
   UiActionRunResponse,
   UiActionView,
   TicketSummary,
@@ -202,7 +203,7 @@ export type CompanionTransport = Pick<
   | 'getOlderConversationTurns' | 'getConversationTurnsById'
   | 'getLeadQueue' | 'leadQueueAction' | 'followUpAction'
   | 'rescheduleReminder' | 'checkConnection' | 'connectionLost' | 'getOwnBinding' | 'listBindings' | 'revokeBinding'
-  | 'listUiActions' | 'performUiAction' | 'getSurfaceActions'
+  | 'listUiActions' | 'performUiAction' | 'getSurfaceActions' | 'getUiForm' | 'submitUiForm'
   | 'createLoopbackInvitation' | 'getLoopbackInvitationStatus' | 'cancelLoopbackInvitation'
   | 'listConnections' | 'startConnection' | 'addCustomConnection' | 'connectionFlow' | 'updateConnectionSettings'
   | 'testConnection' | 'disconnectConnection' | 'connectionTools' | 'connectionConfirmation' | 'resolveConnectionConfirmation'
@@ -695,6 +696,21 @@ export class CompanionStateRuntime {
     const { client } = this.dependencies;
     if (typeof client.getSurfaceActions !== 'function' || !callIds.length) return [];
     return client.getSurfaceActions(callIds);
+  }
+
+  // 会话卡片里的表单（工单 #285）：读状态、提交。提交以后重取工单和总览（表单可能改了工单），和按钮一样。
+  async getUiForm(id: string): Promise<UiFormDto> {
+    const { client } = this.dependencies;
+    if (typeof client.getUiForm !== 'function') throw new Error(this.messages().noAction);
+    return client.getUiForm(id);
+  }
+
+  async submitUiForm(id: string, values: Record<string, unknown>): Promise<UiFormDto> {
+    const { client } = this.dependencies;
+    if (typeof client.submitUiForm !== 'function') throw new Error(this.messages().noAction);
+    const form = await client.submitUiForm(id, values);
+    await Promise.allSettled([this.ensureResource('tickets', true), this.ensureResource('overview', true)]);
+    return form;
   }
 
   // 执行它：和 Lead 的 perform_action 同一个函数，actor 是你本人。做完以后重取这个对象相关的资源（提醒是那条提醒、通知和日程）。

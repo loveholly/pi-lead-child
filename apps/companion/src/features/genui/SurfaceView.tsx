@@ -28,6 +28,7 @@ import {
 } from './SurfaceControls';
 import { StandingOrderChangeConfirmCard } from './StandingOrderCards';
 import { SurfaceActionsProvider } from './surfaceActions';
+import { FormCard, type FormProps } from './FormCard';
 import { useTicketRef } from './useTicketRef';
 import { UserActionCard } from './UserActionCard';
 
@@ -48,7 +49,7 @@ export function SurfaceView({ surface, partial = false, callId = null }: { surfa
   }
   const valid = checked.surface;
   const byId = new Map(valid.nodes.map((node) => [node.id, node]));
-  const asksUser = valid.nodes.some((node) => node.type === 'ChoiceGroup' || node.type === 'UserAction');
+  const asksUser = valid.nodes.some((node) => node.type === 'ChoiceGroup' || node.type === 'UserAction' || node.type === 'Form');
   // 根节点是贴边的 Media（票根）：卡片不留内边距，前导贴住卡片的边，正文自己留内边距（MediaRow 的 bleed）。
   const root = byId.get(valid.root)!;
   // 根节点是对象组件：它自己就是一整张卡（和系统卡同一张），外面不再套一层。
@@ -284,6 +285,9 @@ function SurfaceNode({ node, byId, partial, bleed = false }: {
     // 请你做一件事（通用，protocol 的 user-actions.ts）：按 kind 选控件，控件只做这一件事。
     case 'UserAction':
       return <UserActionCard action={props.action as UserActionRequest} />;
+    // 表单（工单 #285）：用户填写、选择，点提交执行绑定的操作。值只在卡片自己的 state 里。
+    case 'Form':
+      return <FormCard id={node.id} partial={partial} {...(props as unknown as Omit<FormProps, 'id' | 'partial'>)} />;
     // 目录里有、这个版本还不会画的组件：不画。整张卡不合格时上面已经只显示 fallbackText。
     default:
       return null;

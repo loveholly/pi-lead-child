@@ -15,7 +15,7 @@ import { DAEMON_ENTITY_KEY, parseLeadModelSpec } from "@pi-lead-child/protocol";
 import {
   redactAndCap, redactKnownValues, redactSecretText, redactUiSurface, secretEnvValues, surfaceOffersUserControl, UI_CATALOG_VERSION, UI_SURFACE_LIMITS, uiCatalogGuide,
   uiSurfaceIdForCall, validateUiSurface,
-  type UiNode, type UiSurface,
+  type UiFormField, type UiNode, type UiSurface,
 } from "@pi-lead-child/protocol";
 import type { Db } from "@pi-lead-child/store";
 import type { ConnectionHub } from "@pi-lead-child/connections";
@@ -113,7 +113,7 @@ import {
 import { createCoordinator } from "@pi-lead-child/engine";
 import {
   listLeadTicketActions, relationLinkResult, runTicketAction, stopItemRun, ticketActionCatalogText,
-  listUiActions, permissionOf, ticketActionDefinition, TicketActionError,
+  createUiForm, listUiActions, permissionOf, ticketActionDefinition, TicketActionError,
   type PullRequestRunner, type TicketActionHost, type UiActionServices,
 } from "@pi-lead-child/engine";
 import { setAutoPullRequest, workspaceOfItem } from "@pi-lead-child/engine";
@@ -4301,6 +4301,8 @@ export function createLeadTools(deps: LeadDeps): ToolDefinition<any>[] {
         + "画出来以后不会自动更新；数据有时效时，用 caption 或 Text 写明是什么时候的数据。\n"
         + "要用户做一件事时（授权、确认、选择、审批、验收），卡片里必须有用户能点的控件，不能只写字：系统给了 user_action 时，"
         + "原样放进 UserAction，再用 Section、Text 写清为什么；要用户在你给的几个选项里选时用 ChoiceGroup。"
+        + "要用户填信息（地址、模型名、key、几个选项、开关）时画 Form：用户在卡片里填完点提交就执行那个操作，"
+        + "不要让用户自己去找设置页。key、token 这类敏感的值用 secret 字段，不要请用户在对话里发给你。"
         + "这一轮出现过 user_action、或者 asks_user=true 时，没有控件的卡片会被退回。只是告诉用户一件事的卡片传 asks_user=false。\n"
         + "tone 取 neutral|info|success|warning|danger；danger 只用于真正的故障。fallback_text 必填：不能显示卡片的地方"
         + "（命令行、Slack、旧版 App）显示它，写成一两句完整的话；画表格或图表时，写出结论和最重要的数字。",
@@ -4350,7 +4352,30 @@ export function createLeadTools(deps: LeadDeps): ToolDefinition<any>[] {
         }
         // 卡片上的按钮（Action，genui v3）：对象要在，操作要登记过；只属于用户本人去设置里点的操作（user_direct）不能做成按钮。
         // 能不能按不在这里判断：按钮显示时由客户端用同一个函数实时判断。
+        // 表单（Form，工单 #285）：对象要在，操作要登记过。user_direct 的操作可以做成表单：只有用户点提交才执行（用户的凭证），
+        // 字段都显示给用户，没有隐藏参数，敏感字段 Lead 填不了。这里记下操作的名字和用户自己去哪里做，建表单记录时用。
+        const formTargets = new Map<string, { label: string; where: string | null }>();
         for (const node of checked.surface.nodes) {
+          if (node.type === "Form") {
+            const props = node.props as { target: { type: string; id: string | number }; action: string };
+            if (props.target.type === "ticket") {
+              const item = getItem(db, Number(props.target.id));
+              if (!item) throw new Error(`Form ${node.id} 指向的工单 #${props.target.id} 不存在`);
+              const definition = ticketActionDefinition(props.action);
+              formTargets.set(node.id, { label: definition?.label ?? props.action, where: definition?.where ?? null });
+              continue;
+            }
+            let views: Awaited<ReturnType<typeof listUiActions>>;
+            try {
+              views = await listUiActions(db, props.target, { services: deps.uiActionServices ?? {} });
+            } catch (error) {
+              throw new Error(`Form ${node.id} 指向的 ${props.target.type} ${props.target.id} 读不到：${error instanceof Error ? error.message : String(error)}`);
+            }
+            const view = views.find((entry) => entry.id === props.action);
+            if (!view) throw new Error(`${props.target.type} ${props.target.id} 没有操作 ${props.action}`);
+            formTargets.set(node.id, { label: view.label, where: view.where });
+            continue;
+          }
           if (node.type === "Disclosure" && !(node.props.detail as string[]).length) {
             throw new Error(`Disclosure ${node.id} 的 detail 是空的：把点开以后才要看的节点（选项、按钮、细节）放进 detail`);
           }
@@ -4383,7 +4408,7 @@ export function createLeadTools(deps: LeadDeps): ToolDefinition<any>[] {
             if (!item) throw new Error(`Action ${node.id} 指向的工单 #${props.target.id} 不存在`);
             const definition = ticketActionDefinition(props.action);
             if (definition && permissionOf(definition, item) === "user_direct") {
-              throw new Error(`${definition.label}只有用户本人能在页面上做，不能做成卡片按钮；用 UserAction 请用户去做`);
+              throw new Error(`${definition.label}只有用户本人能在页面上做，不能做成卡片按钮；要用户填参数时用 Form（他点提交才执行），否则用 UserAction 请用户去做`);
             }
             continue;
           }
@@ -4395,7 +4420,7 @@ export function createLeadTools(deps: LeadDeps): ToolDefinition<any>[] {
           }
           const view = views.find((entry) => entry.id === props.action);
           if (!view) throw new Error(`${props.target.type} ${props.target.id} 没有操作 ${props.action}`);
-          if (view.permission === "user_direct") throw new Error(`${view.label}只有用户本人能做（${view.where}），不能做成卡片按钮；用 UserAction`);
+          if (view.permission === "user_direct") throw new Error(`${view.label}只有用户本人能做（${view.where}），不能做成卡片按钮；要用户填参数时用 Form（他点提交才执行），否则用 UserAction`);
         }
         // 先确认每个 ChoiceGroup 的工单都在，再建决策请求：不留下半截。
         const choiceGroups = checked.surface.nodes.filter((node) => node.type === "ChoiceGroup" && node.props.decision === undefined);
@@ -4423,6 +4448,25 @@ export function createLeadTools(deps: LeadDeps): ToolDefinition<any>[] {
             throw new Error(`引用原文以后 surface 不合格：${again.errors.map((error) => `${error.path} ${error.message}`).join("；")}。少引用几处，或者用 heading、contains 只引一节`);
           }
         }
+        // 表单记录（工单 #285）：每个 Form 一条，编号写进 form（Lead 写的不算）。不能显示卡片的地方（plc、Slack）看 fallback_text：
+        // 系统在后面补一句去哪里填。
+        const forms: string[] = [];
+        for (const node of checked.surface.nodes.filter((entry) => entry.type === "Form")) {
+          const props = node.props as {
+            target: { type: string; id: string | number }; action: string; title?: string; fields: UiFormField[]; form?: string;
+          };
+          const meta = formTargets.get(node.id)!;
+          delete props.form;
+          props.form = createUiForm(db, {
+            surfaceId: checked.surface.id, target: props.target, action: props.action, label: meta.label,
+            title: props.title ?? null, fields: props.fields,
+          });
+          forms.push(props.form);
+          const where = `这是一个要填写的表单（${props.title ?? meta.label}），要在 App 的会话里填写、提交`
+            + `${meta.where ? `；也可以在 ${meta.where} 里自己改` : ""}。`;
+          const joined = `${checked.surface.fallbackText}\n${where}`;
+          checked.surface.fallbackText = joined.length > UI_SURFACE_LIMITS.text ? joined.slice(0, UI_SURFACE_LIMITS.text) : joined;
+        }
         const decisions: number[] = [];
         for (const node of choiceGroups) {
           const props = node.props as { ticket: number; prompt?: string; choices: Array<{ id: string; label: string; consequence?: string }> };
@@ -4449,6 +4493,7 @@ export function createLeadTools(deps: LeadDeps): ToolDefinition<any>[] {
             type: "text" as const,
             text: `已在会话里显示卡片 ${checked.surface.id}`
               + (decisions.length ? `；建了决策请求 ${decisions.map((id) => `#${id}`).join("、")}，用户选完会叫醒你` : "")
+              + (forms.length ? "；建了表单，用户提交后会叫醒你，告诉你成没成和填了什么（敏感字段你只看得到「已设置 / 保留原值 / 没填」）" : "")
               + "。卡片显示在这一轮已经写的字后面，接下来写的字在卡片下面。接下来的正文只写卡片里没有的：卡片里已经有结论时，最多写一句"
               + "（例如问用户的问题），也可以不写；卡片只放了细节时，用一两句话写结论。不要把卡片里的内容再写成带小标题的 Markdown。",
           }],

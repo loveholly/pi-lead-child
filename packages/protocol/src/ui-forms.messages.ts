@@ -1,0 +1,43 @@
+// 表单字段的校验说法（ui-forms.ts）。客户端在字段下面显示，daemon 拒绝不合格的提交时也用它。
+import { defineMessages } from "./i18n.ts";
+
+export const uiFormMessages = defineMessages({
+  en: {
+    required: (label: string) => `Fill in ${label}.`,
+    wrongType: (label: string) => `${label} has a value of the wrong type.`,
+    oneLine: (label: string) => `${label} must be one line.`,
+    tooShort: (label: string, min: number) => `${label} needs at least ${min} characters.`,
+    tooLong: (label: string, max: number) => `${label} can have at most ${max} characters.`,
+    notUrl: (label: string) => `${label} must be an address that starts with http:// or https://.`,
+    notEmail: (label: string) => `${label} must be an email address.`,
+    notMatching: (label: string) => `${label} is not in the expected format.`,
+    notAnOption: (label: string) => `Choose ${label} from the list.`,
+    tooFew: (label: string, min: number) => `Choose at least ${min} for ${label}.`,
+    tooMany: (label: string, max: number) => `Choose at most ${max} for ${label}.`,
+    notNumber: (label: string) => `${label} must be a number.`,
+    notInteger: (label: string) => `${label} must be a whole number.`,
+    tooSmall: (label: string, min: number) => `${label} must be ${min} or more.`,
+    tooLarge: (label: string, max: number) => `${label} must be ${max} or less.`,
+    unknownField: (param: string) => `This form has no field ${param}.`,
+    secretState: { set: "set (new value)", kept: "kept (not changed)", empty: "not filled" },
+  },
+  zh: {
+    required: (label) => `请填写${label}。`,
+    wrongType: (label) => `${label}的值类型不对。`,
+    oneLine: (label) => `${label}只能写一行。`,
+    tooShort: (label, min) => `${label}至少要 ${min} 个字符。`,
+    tooLong: (label, max) => `${label}最多 ${max} 个字符。`,
+    notUrl: (label) => `${label}要是以 http:// 或 https:// 开头的地址。`,
+    notEmail: (label) => `${label}要是一个邮箱地址。`,
+    notMatching: (label) => `${label}的格式不对。`,
+    notAnOption: (label) => `请从列表里选${label}。`,
+    tooFew: (label, min) => `${label}至少选 ${min} 项。`,
+    tooMany: (label, max) => `${label}最多选 ${max} 项。`,
+    notNumber: (label) => `${label}要是数字。`,
+    notInteger: (label) => `${label}要是整数。`,
+    tooSmall: (label, min) => `${label}不能小于 ${min}。`,
+    tooLarge: (label, max) => `${label}不能大于 ${max}。`,
+    unknownField: (param) => `这个表单没有字段 ${param}。`,
+    secretState: { set: "已设置（新的值）", kept: "保留原值（没改）", empty: "没填" },
+  },
+});
