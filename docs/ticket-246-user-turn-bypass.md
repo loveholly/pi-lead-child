@@ -2,6 +2,8 @@
 
 状态：定稿。用户 11-05 13:45 定了第 9 节的四点，可以按第 8 节开实施单。只有文档，没有实现代码。
 
+> 2026-11-10 变更：开关不再有时限（用户：「把 bypass 的时间限制去掉，也做成和 steer 一样的开关就好，不要时间限制」）。打开时不选时长，打开以后一直开着，直到用户在设置页关掉，或者 Fairy 用 `disable` 关掉。5.2 改写了，5.1、5.3、5.4、5.5 里和时长有关的地方跟着改了。权限和生效范围不变。
+
 本文里「Fairy」是用户给 Lead 起的名字。代码、路径、标识符里仍然叫 Lead。行号按 2026-11-05 的 master（88ea27ad）。
 
 ## 1. 背景和目标
@@ -93,7 +95,7 @@ daemon 在每一轮开始时建一份 `LeadTurnOrigin`，Fairy 改不了（`pack
 
 ```
 hostBypassActive =
-     开关开着（kv 里 enabled，且 now < until）
+     开关开着（kv 里 enabled；2026-11-10 以前写的旧行还要 now < until）
   && isLiveUserTurn(db, authorityTurnId(deps), "tickets:create")
   && externalContentOf(deps) === null
 ```
@@ -156,32 +158,37 @@ hostBypassActive =
 
 ### 5.1 在哪里打开，谁能打开
 
-- 存储：kv 一行 `lead.host-bypass`，照 `packages/store/src/design-preferences.ts:12-17` 的写法。内容：`{ enabled, until, bindingId, enabledAt, reason }`。不放 config.json：Fairy 本来就写不了 config.json，而且 kv 的改动能走操作层记账。
+- 存储：kv 一行 `lead.host-bypass`，照 `packages/store/src/design-preferences.ts:12-17` 的写法。内容：`{ enabled, bindingId, enabledAt, reason }`（2026-11-10 以前还有 `until`）。不放 config.json：Fairy 本来就写不了 config.json，而且 kv 的改动能走操作层记账。
 - 操作层：新目标 `host_bypass`（`packages/engine/src/ui-actions/host-bypass.ts`，形状照 `reply-style.ts:37-60`），两个操作：
-  - `enable`：`permission: "user_direct"`，`changesRules: true`。输入 `minutes`，只能是 15、30、60、120、240。
+  - `enable`：`permission: "user_direct"`，`changesRules: true`。输入是 `{}`，不带时长（2026-11-10 以前是 `minutes`）。
   - `disable`：`permission: "lead_allowed"`，`changesRules: false`。Fairy 和用户都能关。
 - 页面入口：设置 → Lead → 新的一节「用户本人发话时免沙箱」，在 `apps/companion/src/features/settings/LeadProfileSection.tsx` 旁边加 `HostBypassSection.tsx`，文案放 `hostBypass.messages.ts`（`docs/i18n.md`）。网关路由 `packages/gateway/src/host-bypass-routes.ts`，照 `reply-style-routes.ts`。
-- Fairy 入口：`perform_action` 调同一个定义。`enable` 是 `user_direct`，Fairy 调它得到结构化的拒绝，拒绝里写「请用户在 设置 → Lead → 用户本人发话时免沙箱 里打开」。Fairy 不发「开 30 分钟？」这样的卡：开关授予 Fairy 权力，按 AGENTS.md 的 UI Actions 只能用户自己点。
+- Fairy 入口：`perform_action` 调同一个定义。`enable` 是 `user_direct`，Fairy 调它得到结构化的拒绝，拒绝里写「请用户在 设置 → Lead → 用户本人发话时免沙箱 里打开」。Fairy 不发「要不要打开？」这样的卡：开关授予 Fairy 权力，按 AGENTS.md 的 UI Actions 只能用户自己点。
 - 会话里不加打开的入口。关闭的入口在 5.3 的标记上。
 
-### 5.2 时限
+### 5.2 时限（2026-11-10 去掉）
 
-- 打开时选时长，档位 15、30、60、120、240 分钟，缺省 30，最长 4 小时（用户 11-05 13:45 定）。`until = now + minutes`。
-- 到点自动关：`hostBypassActive` 比较 `now < until`，到点以后不用等任何定时器就不再生效。daemon 另外排一个定时器，到点时把 kv 置成关、发 `snapshot.required`（资源 `host-bypass`）让界面刷新、写一条 inbox 告诉 Fairy「免沙箱到点关了」。daemon 重启时读 kv：`until` 已过的直接置关。
-- 到点前再打开一次：按新的时长从现在重算，不累加。
+2026-11-10 起没有时限。开关和「Fairy 忙时你发的消息」一样是一个普通的设置：
+
+- 打开以后一直开着，直到用户在设置页关掉，或者 Fairy 用 `host_bypass.disable` 关掉。
+- 没有到点的定时器，不再写 `host_bypass.expired`。这个事件种类留着注册，事件表里的旧记录照旧能读。
+- 已经开着时再打开一次什么也不写。
+- 旧行：11-05 到 11-10 的版本打开时选 15–240 分钟，kv 里多存一个 `until`。读这种行时，过了 `until` 的按关算；没过的照旧开到 `until` 为止，因为用户当时只同意了那么久。daemon 启动时不改这种行，也不补写事件。用户再打开一次，新写的行就没有 `until`。
+
+原来的规则（11-05 定，已经不用）：打开时选时长，档位 15、30、60、120、240 分钟，缺省 30，最长 4 小时；到点自动关，daemon 排定时器置关并写 `host_bypass.expired`；到点前再打开一次按新的时长从现在重算。
 
 ### 5.3 打开期间界面上的标记
 
-- 位置：主对话输入框上方的状态栏（`LeadConversation.tsx:437-451`，和 `InterruptBanner`、`LeadQueueBar` 同一区域）。文字：「免沙箱 · 还剩 27 分钟 · 关闭」。「关闭」调 `host_bypass.disable`。
+- 位置：主对话输入框上方的状态栏（`LeadConversation.tsx:437-451`，和 `InterruptBanner`、`LeadQueueBar` 同一区域）。文字：「免沙箱 · 开着 · 关闭」（2026-11-10 以前写剩余时间）。「关闭」调 `host_bypass.disable`。
 - 这一行由系统画（P8.1），颜色用「等你」的琥珀（`docs/design/themes/default.md`），不另发明样式。要在主题文件里加一条「模式标记」的规则：持续状态用状态栏一行，收起态不变高（P1.3）。
-- 设置页同一节显示同样的状态和倒计时。
+- 设置页同一节显示同样的状态（2026-11-10 起和「Fairy 忙时你发的消息」同一种单选卡，没有倒计时，见主题 11.17）。
 - Fairy 每条在沙箱外跑的命令，工具结果开头写「（沙箱外）」，会话里的工具行（`ToolCallRow.tsx`）据此加同一个琥珀小标。
 - plc CLI 的 `status` 输出加一行。
 
 ### 5.4 Fairy 怎么知道开关的状态
 
-- `get_environment` 的结果里加 `hostBypass: { enabled, until }`。
-- 开、关、到点各写一条 inbox 叫醒 Fairy（`wakeLead: true`），内容一句话。
+- `get_environment` 的结果里加 `hostBypass: { enabled }`（2026-11-10 以前还有 `until`）。
+- 开、关各写一条 inbox 叫醒 Fairy（`wakeLead: true`），内容一句话。Fairy 自己关的不叫醒它。
 - bash 和 `run_on_host` 的工具说明不改；工具结果里写明这次是在沙箱里还是沙箱外、为什么。
 
 ### 5.5 事件日志格式
@@ -192,9 +199,9 @@ hostBypassActive =
 | --- | --- | --- |
 | `host_command.started` | spawn 之前，同一笔事务 | `id`、`turnId`、`turnOrigin`（`live_user_companion`、`live_user_plc`、`live_user_slack_self_dm`、`confirmed_card`；按这一轮凭证的 kind 和 origin 写，Slack 自 DM 是 origin `channel_owner`）、`via`（`bash`、`run_on_host`）、`confirmationId`（走确认卡时）、`command`（脱敏，最多 400 字）、`cwd`、`timeoutSeconds`、`screen`（`allow` 和命中的规则名）、`spendsMoney` |
 | `host_command.finished` | 进程结束后 | `id`、`exitCode`、`timedOut`、`durationMs`、`outputPath`、`outputBytes`、`truncated` |
-| `host_bypass.enabled` | 用户打开 | `until`、`minutes`、`bindingId`、`resolvedBy` |
+| `host_bypass.enabled` | 用户打开 | `bindingId`、`resolvedBy`（2026-11-10 以前还有 `until`、`minutes`） |
 | `host_bypass.disabled` | 用户或 Fairy 关 | `by`（`user`、`lead`）、`turnId`、`reason` |
-| `host_bypass.expired` | 到点 | `until` |
+| `host_bypass.expired` | 到点（2026-11-10 起不再产生） | `until` |
 
 现在走确认卡的 `run_on_host` 也写 `host_command.*`，这样「所有在沙箱外跑过的命令」一条查询就能列出来；`rule_change.executed` 照旧写，不删。`started` 和 `finished` 分开写，daemon 中途崩溃时至少留着「开始跑了」。Fairy 的 `query_events` 能读到它们。
 

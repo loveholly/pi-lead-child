@@ -321,6 +321,8 @@ export interface ControlPlaneData {
   channelCards: import('@pi-lead-child/protocol').ChannelCardDto[];
   // Lead 忙时排着的外部消息（工单 10，GET /v1/lead/queue 和 lead-queue 的推送）。没取到、daemon 不支持时为 null。
   leadQueue: import('@pi-lead-child/protocol').LeadQueue | null;
+  // 这一步现在的状态（lead-step 的推送，lead-scheduler spec D11）：等模型等过了 30 秒是 model_slow。没有时为 null。
+  leadStep: import('@pi-lead-child/protocol').LeadStepStatus | null;
   /** 收件箱：等你的工单为什么在等、从什么时候开始；Lead 自己处理掉的事；你上次看的时间（GET /v1/inbox）。 */
   inboxView: InboxView | null;
   /** 项目卡片（GET /v1/projects/overview），含归档的项目；没取到时为 null。 */

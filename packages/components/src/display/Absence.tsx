@@ -102,7 +102,8 @@ function AbsenceRow({ tone, label, text, actions, expandable, expanded, onToggle
     </Row>
   );
   return (
-    <Row minH={38} items="center" gap="inline-item" px="banner-x"> {/* 和一行字一样高：40 减去上下两道 1.5 的虚线（组件规格） */}
+    // 和一行字一样高：40 减去上下两道 1.5 的虚线（组件规格）
+    <Row minH={38} items="center" gap="inline-item" px="banner-x">
       {expandable ? (
         <Pressable flex={1} minW={0} aria-label={m.toggle(label, expanded)} aria-expanded={expanded} onPress={onToggle} feedback="none"
           testID={testID ? `${testID}-${expanded ? 'collapse' : 'expand'}` : undefined}>

@@ -1,7 +1,7 @@
 import {
   CHANNEL_CARDS_SNAPSHOT_RESOURCE, CHANNEL_SETTINGS_SNAPSHOT_RESOURCE, SETUP_RESOURCE, WIDGETS_RESOURCE, CONNECTIONS_SNAPSHOT_RESOURCE, LEAD_ACTIVITY_RESOURCE, LEAD_AVATAR_RESOURCE, LEAD_PROFILE_RESOURCE, HOST_BYPASS_RESOURCE, BUSY_PLACEMENT_RESOURCE, MODEL_SETTINGS_RESOURCE, LeadActivityPushSchema,
-  LEAD_QUEUE_RESOURCE, LeadQueueSchema, TICKET_REPLY_ACTIONS_RESOURCE, TurnPlacementSchema,
-  type LeadActivityCard, type LeadInterrupt, type LeadQueue, type ReminderCard, type SetupChecklistCard, type SetupHintCard, type TurnPlacement, type UiSurface,
+  LEAD_QUEUE_RESOURCE, LEAD_STEP_RESOURCE, LeadQueueSchema, LeadStepStatusSchema, TICKET_REPLY_ACTIONS_RESOURCE, TurnPlacementSchema,
+  type LeadActivityCard, type LeadInterrupt, type LeadQueue, type LeadStepStatus, type ReminderCard, type SetupChecklistCard, type SetupHintCard, type TurnPlacement, type UiSurface,
 } from '@pi-lead-child/protocol';
 import { Value } from 'typebox/value';
 import type { ToolCallUpdate } from '@pi-lead-child/protocol';
@@ -34,7 +34,9 @@ export type ControlPlaneMutation =
   // 「Lead 动态」的一张卡或一条横幅变了（工单 06）：按版本应用，比手上旧的忽略。
   | { type: 'lead-activity.apply'; card?: LeadActivityCard; interrupt?: LeadInterrupt; reminder?: ReminderCard; setup?: SetupChecklistCard; setupHint?: SetupHintCard }
   // Lead 忙时排着的外部消息变了（工单 10）：推送带着整份，整体替换。
-  | { type: 'lead-queue.replace'; queue: LeadQueue };
+  | { type: 'lead-queue.replace'; queue: LeadQueue }
+  // 这一步现在的状态变了（模型回复慢，lead-scheduler spec D11）：推送带着整份，null 是撤掉。
+  | { type: 'lead-step.replace'; status: LeadStepStatus | null };
 
 export type StreamMutation =
   | { type: 'message.append-delta'; turnId: string | null; delta: string }
@@ -327,6 +329,12 @@ export function reduceGatewayEvent(event: ValidatedGatewayEvent): GatewayEventRe
         const queue = (event.payload as Record<string, unknown>).queue;
         if (Value.Check(LeadQueueSchema, queue)) control.push({ type: 'lead-queue.replace', queue });
         else invalidations.push('lead-queue');
+        break;
+      }
+      // 这一步现在的状态（lead-scheduler spec D11）：推送带着整份，直接替换；认不出来时当作没有（不重取，它只是提示）。
+      if (event.payload.resource === LEAD_STEP_RESOURCE) {
+        const status = (event.payload as Record<string, unknown>).status;
+        control.push({ type: 'lead-step.replace', status: status !== null && Value.Check(LeadStepStatusSchema, status) ? status : null });
         break;
       }
       // 工单回复的动作按钮有了判断结果（2026-10-19）：只重取这张工单的对话，按钮跟着快照里的 replyActions 出来。

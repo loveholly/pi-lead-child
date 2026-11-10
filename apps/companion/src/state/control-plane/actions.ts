@@ -13,6 +13,9 @@ export function applyControlPlaneMutation(
     case 'lead-queue.replace':
       store.getState().replaceLeadQueue(mutation.queue);
       return;
+    case 'lead-step.replace':
+      store.getState().replaceLeadStep(mutation.status);
+      return;
     case 'lead-activity.apply':
       store.getState().applyLeadActivityPush({
         ...(mutation.card ? { card: mutation.card } : {}),

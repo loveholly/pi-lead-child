@@ -47,7 +47,7 @@ afterEach(async () => {
 });
 
 function turnOn(): void {
-  enableHostBypass(db, { minutes: 30, bindingId: null, resolvedBy: "user via Mac 网页", reason: "test", now: new Date() });
+  enableHostBypass(db, { bindingId: null, resolvedBy: "user via Mac 网页", reason: "test", now: new Date() });
 }
 
 function companionTurn(id: string): void {

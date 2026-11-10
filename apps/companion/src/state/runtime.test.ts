@@ -1191,6 +1191,24 @@ describe('CompanionStateRuntime', () => {
     expect(runtime.control.getState().leadQueue?.entries).toEqual([stale]);
   });
 
+  // lead-scheduler spec D11（P3）：「这一步现在的状态」（模型回复慢）整份替换，null 是撤掉；补发的不用。
+  it('shows the step status from a lead-step push, clears it on null, and ignores a replayed one', async () => {
+    let handlers: ConnectionHandlers = {};
+    const client = transport({ connect: connectAtLatestSeq(5, (next) => { handlers = next; }) });
+    const runtime = createCompanionStateRuntime({ client, credentials: credentialStore(), scheduler: scheduler() });
+    await runtime.start();
+    const slow = { turnId: 'turn_slow', kind: 'model_slow', since: '2026-11-09T10:00:00.000Z' };
+    handlers.onEvent?.(gatewayEvent(4, 'snapshot.required', { resource: 'lead-step', status: slow }));
+    await runtime.whenIdle();
+    expect(runtime.control.getState().leadStep).toBeNull();
+    handlers.onEvent?.(gatewayEvent(6, 'snapshot.required', { resource: 'lead-step', status: slow }));
+    await runtime.whenIdle();
+    expect(runtime.control.getState().leadStep).toEqual(slow);
+    handlers.onEvent?.(gatewayEvent(7, 'snapshot.required', { resource: 'lead-step', status: null }));
+    await runtime.whenIdle();
+    expect(runtime.control.getState().leadStep).toBeNull();
+  });
+
   it('refetches the snapshots when the gateway skipped the history', async () => {
     const getLeadQueue = vi.fn(async () => ({ busy: false, entries: [] }));
     const client = transport({

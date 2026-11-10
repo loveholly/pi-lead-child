@@ -36,7 +36,7 @@ export const SETTINGS_GROUPS: readonly SettingsGroup[] = [
       { id: 'model', href: '/settings/model', icon: 'agent' },
       { id: 'memory', href: '/settings/memory', icon: 'database' },
       { id: 'standing-orders', href: '/settings/standing-orders', icon: 'shield-check' },
-      // 用户本人发话时免沙箱（工单 #246）：只有你本人能在这里打开，到点自动关。
+      // 用户本人发话时免沙箱（工单 #246）：只有你本人能在这里打开，一直开着，直到你或 Lead 关掉。
       { id: 'host-bypass', href: '/settings/host-bypass', icon: 'shield' },
     ],
   },

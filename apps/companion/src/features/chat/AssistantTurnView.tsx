@@ -2,7 +2,9 @@ import { Row, TaskCard, Text } from '@pi-lead-child/components';
 import { Fragment, useMemo, type ReactNode } from 'react';
 import { useShallow } from 'zustand/react/shallow';
 
-import { useWorkspaceStore } from '../../state/CompanionStateProvider';
+import { useMessages } from '@/i18n';
+
+import { useControlPlaneStore, useWorkspaceStore } from '../../state/CompanionStateProvider';
 import { useMessage, useMessageParts, useStreamingText } from '../../state/hooks';
 import type { MessageEntity } from '../../state/types';
 
@@ -10,6 +12,7 @@ import { useNow } from '../tickets/useNow';
 import { buildAssistantTurn } from './assistantTurn';
 import { ProvenanceChips } from './ProvenanceChips';
 import { MessagePartView } from './MessagePartView';
+import { turnStatusMessages } from './turnStatus.messages';
 
 type AssistantTurnViewProps = {
   messageId: string;
@@ -56,6 +59,12 @@ export function AssistantTurnView({
     [messageId, messageState, failure, parts, text, startedAt, endedAt, now],
   );
   const cardKey = `${messageId}:task`;
+  // 这一步在等模型、等过了 30 秒（lead-scheduler spec D11）：还在想的这一轮写「模型回复慢」，不写「Thinking」。
+  // 推送里的轮次对得上这一轮时才写；系统回合还没落成一轮时推送不带轮次，那时写在正在跑的那一轮上。
+  const leadStep = useControlPlaneStore((state) => state.leadStep);
+  const m = useMessages(turnStatusMessages);
+  const runningTitle = leadStep?.kind === 'model_slow' && messageState === 'streaming'
+    && (leadStep.turnId === null || leadStep.turnId === message?.turnId) ? m.modelSlow : null;
   const stepPrefix = `${cardKey}:`;
   const expanded = useWorkspaceStore((state) => Boolean(state.expandedMessagePartIds[cardKey]));
   const expandedStepIds = useWorkspaceStore(useShallow((state) => Object.keys(state.expandedMessagePartIds)
@@ -81,6 +90,7 @@ export function AssistantTurnView({
           {...(inline && header ? { leading: header } : {})}
           {...(inline && header && headerMark ? { leadingMark: headerMark } : {})}
           status={turn.card.status}
+          runningTitle={runningTitle}
           steps={turn.card.steps}
           durationMs={turn.card.durationMs}
           expanded={expanded}

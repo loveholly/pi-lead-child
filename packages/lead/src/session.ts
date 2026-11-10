@@ -49,8 +49,11 @@ import { createLeadSmartModel } from "./smart-model.js";
 import { createCredibilityExtension } from "./credibility/extension.js";
 import { LEAD_CODEMODE_TOOL, LEAD_HAND_TOOLS, leadHandsExtension } from "./hands.js";
 import { handbookGuardExtension } from "./handbook-guard.js";
-import { redLineGateExtension } from "./red-line.js";
-import { leadSchedulerExtension } from "./scheduler/extension.js";
+import { leadSchedulerExtension, type LeadSchedulerHooks } from "./scheduler/extension.js";
+import type { LeadHandoffDeps } from "./hand-off-tool.js";
+import type { LeadBackgroundJobs } from "./background-jobs.js";
+import type { LeadSchedulerRuntime } from "./scheduler/runtime.js";
+import { idleLaneExtension, type IdleLaneRuntime } from "./scheduler/idle-runtime.js";
 import { TurnEvidence } from "./credibility/evidence.js";
 import type { CreateSmartModelOptions, SmartTextComplete } from "@pi-lead-child/engine";
 
@@ -218,6 +221,15 @@ export async function createLeadSession(opts: {
   schedulerLog?: (line: string) => void;
   // 一行说明宿主的负载（core 的 describeHostLoad）：阶段 A 超时的日志附上它，说出卡顿的原因。
   hostLoad?: () => string;
+  // daemon 的调度器（scheduler/runtime.ts，lead-scheduler spec D13）：扩展和 daemon 共用同一个实例。
+  scheduler?: LeadSchedulerRuntime;
+  // 空闲车道（scheduler/idle-runtime.ts，lead-scheduler spec D8，P4）：pi 想压缩时问它。和 daemon 共用同一个实例。
+  idleLane?: IdleLaneRuntime;
+  // 交接（lead-scheduler spec P2）：扩展的钩子（做过的步骤、每一步的预算状态、让出点）和 hand_off、resume_unit 用的服务。
+  schedulerHooks?: LeadSchedulerHooks;
+  handoff?: LeadHandoffDeps;
+  // 长的只读命令转后台（lead-scheduler spec D6，P3）的出口：daemon 记下作业，结束时把输出交给 Lead。
+  backgroundJobs?: LeadBackgroundJobs;
 }): Promise<{
   session: LeadEngine; modelName: string; syncToolAccess: () => void; reloadExtensions: () => Promise<void>;
   models: string[]; switchModel: (spec: string) => Promise<void>; reportsInputDelivery: boolean; interruptStep: () => boolean;
@@ -372,14 +384,18 @@ export async function createLeadSession(opts: {
     agentDir: isolatedAgentDir,
     systemPromptOverride: () => systemPrompt,
     extensionFactories: [
-      // 调度器（scheduler/extension.ts，lead-scheduler spec D13）：每一步的阶段耗时（P0）。排在最前面：
-      // 它记下的一步的开始，早于别的扩展在 turn_start 里做的事。
+      // 调度器（scheduler/extension.ts，lead-scheduler spec D13）：每一步的阶段耗时（P0），单元编号、阶段和会话文件里的
+      // 调度记录，红线以后的工具限制（P1）。排在最前面：它记下的一步的开始，早于别的扩展在 turn_start 里做的事。
       {
         name: "plc-lead-scheduler", hidden: true,
         factory: leadSchedulerExtension({
           ...(opts.schedulerLog ? { log: opts.schedulerLog } : {}),
           ...(opts.hostLoad ? { hostLoad: opts.hostLoad } : {}),
           ...(opts.currentTurnId ? { turnId: opts.currentTurnId } : {}),
+          ...(opts.scheduler ? { scheduler: opts.scheduler } : {}),
+          // 红灯（red-line.ts）：daemon 停下超时的一轮、叫 Lead 交接以后，这一轮只能用交接的工具。
+          ...(opts.toolGate ? { toolGate: opts.toolGate } : {}),
+          ...(opts.schedulerHooks ? { hooks: opts.schedulerHooks } : {}),
         }),
       },
       { name: "plc-environment", factory: environmentExtension, hidden: true },
@@ -392,6 +408,9 @@ export async function createLeadSession(opts: {
         name: "plc-cost-signals", hidden: true,
         factory: costSignalsExtension({ compactAt: (window) => window - settingsManager.getCompactionSettings().reserveTokens }),
       },
+      // 空闲车道（scheduler/idle-runtime.ts，P4）：pi 在单元中间想压缩时推迟到空闲，或者用子进程写好的摘要。
+      // 排在分段压缩之前：它取消时 pi 不再问后面的扩展；它接上时分段压缩跳过（skip）。
+      ...(opts.idleLane ? [{ name: "plc-idle-lane", hidden: true, factory: idleLaneExtension(opts.idleLane) }] : []),
       // 历史放不进一次摘要请求时分段压缩（compaction-chunks.ts，2026-11-01）。pi 自己触发的压缩也由它来写，
       // 带上删减的标准和「能力不写成规则」（2026-11-02）；daemon 发起、放得进一次请求的压缩照旧交给 pi。
       {
@@ -400,6 +419,7 @@ export async function createLeadSession(opts: {
           ...(opts.onCompactionProgress ? { onProgress: opts.onCompactionProgress } : {}),
           log: (line) => console.error(line),
           instructions: leadAutoCompactionInstructions(),
+          ...(opts.idleLane ? { skip: (event) => opts.idleLane!.claims(event) } : {}),
         }),
       },
       // inlineBudget 0：codemode 的说明不列不常用工具的签名，系统提示词列它们的名字（tool-exposure.ts）。
@@ -410,14 +430,10 @@ export async function createLeadSession(opts: {
           db: opts.db, dataDir: opts.dataDir,
           ...(opts.turnOrigin ? { turnOrigin: opts.turnOrigin } : {}),
           ...(opts.currentTurnId ? { currentTurnId: opts.currentTurnId } : {}),
+          ...(opts.backgroundJobs ? { backgroundJobs: opts.backgroundJobs } : {}),
           log: (line) => console.error(line),
         }),
       },
-      // 红灯（red-line.ts）：daemon 停下超时的一轮、叫 Lead 交接以后，这一轮只能用交接的工具。
-      ...(opts.toolGate ? [{
-        name: "plc-red-line", hidden: true,
-        factory: redLineGateExtension(opts.toolGate, (line) => console.error(line)),
-      }] : []),
       // 交接说明管建编码工单（自动代你处理方案 B，issue 04，handbook-guard.ts）：外部消息叫醒的一轮里看这一句有没有改代码的能力。
       {
         name: "plc-handbook-guard", hidden: true,
@@ -473,6 +489,7 @@ export async function createLeadSession(opts: {
     ...(opts.announceLeadStatus ? { announceLeadStatus: opts.announceLeadStatus } : {}),
     ...(opts.scheduleLeadModelRestart ? { scheduleLeadModelRestart: opts.scheduleLeadModelRestart } : {}),
     ...(opts.ticketActionHost ? { ticketActionHost: opts.ticketActionHost } : {}),
+    ...(opts.handoff ? { handoff: opts.handoff } : {}),
     ...(opts.uiActionServices ? { uiActionServices: opts.uiActionServices } : {}),
     ...(opts.pullRequestRunner ? { pullRequestRunner: opts.pullRequestRunner } : {}),
     ...(opts.ticketSummaries ? { ticketSummaries: opts.ticketSummaries } : {}),

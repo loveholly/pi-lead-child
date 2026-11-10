@@ -1,7 +1,7 @@
-// 「用户本人发话时免沙箱」开关（docs/ticket-246-user-turn-bypass.md 5.2，实施单 A），走完 daemon 的每一跳：
-//   - 打开：设置页的 POST /v1/lead/host-bypass/enable → 操作层 → kv、host_bypass.enabled；GET 读出开着；
-//   - 到点：daemon 的定时器到点把 kv 置关，写 host_bypass.expired，告诉 Lead（定时器用假时钟跑，见第二组）；
-//   - 重启：daemon 停着的时候过了时限的开关，启动时读出来是关，并且只写一条 host_bypass.expired。
+// 「用户本人发话时免沙箱」开关（docs/ticket-246-user-turn-bypass.md 5.1，实施单 A），走完 daemon 的每一跳：
+//   - 打开：设置页的 POST /v1/lead/host-bypass/enable（请求体 {}）→ 操作层 → kv、host_bypass.enabled；GET 读出开着；
+//   - 一直开着：没有到点的定时器（用户 2026-11-10 去掉了时限）；daemon 重启以后照旧开着，不写 host_bypass.expired；
+//   - 旧数据：旧版本写的、带 until 的行，启动不报错；过了 until 的读出来是关，启动时不补写事件。
 // 免沙箱的执行路径（实施单 C）：用户在网页上发话、Fairy 读 Slack、用户再发话，三步里 run_on_host 和 bash 的去处；
 // Slack 消息叫醒的一轮照旧发卡。
 // daemon、网关、store、操作层是真的；Lead 的会话是替身（第三组用 fake-pi-session，Lead 的工具是真的）。
@@ -15,7 +15,6 @@ import { HOST_BYPASS_ENABLED_KIND, HOST_BYPASS_EXPIRED_KIND, HOST_COMMAND_STARTE
 import {
   createLoopbackBinding, getHostBypass, HOST_BYPASS_KEY, listEvents, openDb, readStoredHostBypass, recordDecisionModelCall, type Db,
 } from "@pi-lead-child/store";
-import { startHostBypassClock } from "../src/host-bypass-clock.js";
 import { startDaemon } from "../src/server.js";
 import { fakePiLead, type FakeCall, type FakeReply } from "./fake-pi-session.js";
 
@@ -58,79 +57,51 @@ async function boot() {
 }
 
 const kinds = (kind: string) => listEvents(db, { kind, limit: 20 }).map((event) => event.payload);
-const expiredInbox = () => db.prepare("SELECT payload FROM inbox WHERE dedup_scope = 'host_bypass:lead'").all()
-  .map((row: any) => JSON.parse(row.payload)).filter((payload: any) => payload.state === "expired");
+const writeLegacy = (until: Date) => db.prepare(
+  `INSERT INTO kv (key, value, updated_at) VALUES (?, ?, datetime('now'))
+   ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+).run(HOST_BYPASS_KEY, JSON.stringify({ enabled: true, until: until.toISOString(), bindingId: 1, enabledAt: new Date().toISOString(), reason: "test" }));
+const DAY = 24 * 60 * 60_000;
 
 describe("the host bypass switch in the daemon", () => {
-  // 验收第 5 条。
-  it("turns on from the settings page, and reads as off after a restart once its time has passed", async () => {
+  it("turns on from the settings page with no duration, and stays on after a restart and long after", async () => {
     const call = await boot();
-    expect((await call("POST", "/v1/lead/host-bypass/enable", { minutes: 15 })).body.hostBypass.enabled).toBe(true);
-    expect((await call("GET", "/v1/lead/host-bypass")).body.hostBypass.enabled).toBe(true);
-    expect(kinds(HOST_BYPASS_ENABLED_KIND)).toEqual([expect.objectContaining({ minutes: 15 })]);
+    expect((await call("POST", "/v1/lead/host-bypass/enable", { minutes: 15 })).status).toBe(400);
+    const on = await call("POST", "/v1/lead/host-bypass/enable", {});
+    expect(on.status).toBe(200);
+    expect(on.body.hostBypass).toEqual({ enabled: true, enabledAt: expect.any(String), bindingId: expect.any(Number), reason: expect.any(String) });
+    expect(kinds(HOST_BYPASS_ENABLED_KIND)).toEqual([{ bindingId: on.body.hostBypass.bindingId, resolvedBy: expect.any(String) }]);
     await daemon!.close();
     daemon = null;
-
-    // daemon 停着的时候过了时限：把 until 拨到过去。
-    const stored = readStoredHostBypass(db);
-    const until = new Date(Date.now() - 60_000).toISOString();
-    db.prepare("UPDATE kv SET value = ? WHERE key = ?").run(JSON.stringify({ ...stored, until }), HOST_BYPASS_KEY);
 
     const again = await boot();
-    expect((await again("GET", "/v1/lead/host-bypass")).body.hostBypass).toMatchObject({ enabled: false, until: null });
-    expect(readStoredHostBypass(db).enabled).toBe(false);
-    expect(kinds(HOST_BYPASS_EXPIRED_KIND)).toEqual([{ until }]);
-    expect(expiredInbox()).toHaveLength(1);
-    await daemon!.close();
-    daemon = null;
-    // 再启动一次：已经置关了，不再写。
-    await boot();
-    expect(kinds(HOST_BYPASS_EXPIRED_KIND)).toHaveLength(1);
-  });
-});
+    expect((await again("GET", "/v1/lead/host-bypass")).body.hostBypass.enabled).toBe(true);
+    expect(readStoredHostBypass(db)).toMatchObject({ enabled: true, until: null });
+    expect(getHostBypass(db, new Date(Date.now() + 365 * DAY)).enabled).toBe(true);
+    expect(kinds(HOST_BYPASS_EXPIRED_KIND)).toEqual([]);
 
-describe("the host bypass clock", () => {
-  const writeOn = (until: Date) => db.prepare(
-    `INSERT INTO kv (key, value, updated_at) VALUES (?, ?, datetime('now'))
-     ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
-  ).run(HOST_BYPASS_KEY, JSON.stringify({ enabled: true, until: until.toISOString(), bindingId: 1, enabledAt: new Date().toISOString(), reason: "test" }));
-
-  // 验收第 5 条：daemon 启动时先清理，停着的时候过了时限的开关直接置关，只写一条 host_bypass.expired。
-  it("sets an expired switch off when it starts, once", () => {
-    const until = new Date(Date.now() - 60_000);
-    writeOn(until);
-    expect(getHostBypass(db, new Date()).enabled).toBe(false);
-    startHostBypassClock(db, { log: () => {} }).stop();
-    expect(readStoredHostBypass(db).enabled).toBe(false);
-    startHostBypassClock(db, { log: () => {} }).stop();
-    expect(kinds(HOST_BYPASS_EXPIRED_KIND)).toEqual([{ until: until.toISOString() }]);
-    expect(expiredInbox()).toHaveLength(1);
+    expect((await again("POST", "/v1/lead/host-bypass/disable", {})).body.hostBypass.enabled).toBe(false);
   });
 
-  it("sets the switch off at its end time, and arms again after a change", () => {
-    vi.useFakeTimers({ now: new Date("2026-11-05T06:00:00.000Z") });
-    const start = Date.now();
-    writeOn(new Date(start + 15 * 60_000));
-    const clock = startHostBypassClock(db, { log: () => {} });
-    vi.advanceTimersByTime(15 * 60_000 - 1);
-    expect(getHostBypass(db, new Date()).enabled).toBe(true);
-    vi.advanceTimersByTime(1);
-    expect(readStoredHostBypass(db).enabled).toBe(false);
-    expect(kinds(HOST_BYPASS_EXPIRED_KIND)).toEqual([{ until: new Date(start + 15 * 60_000).toISOString() }]);
+  // 旧数据：旧版本写的行带 until。daemon 照常启动；过了 until 的读出来是关，启动时不改它、不写 host_bypass.expired。
+  it("starts with a row from the old version, and reads it as off once its until has passed", async () => {
+    writeLegacy(new Date(Date.now() - 60_000));
+    const call = await boot();
+    expect((await call("GET", "/v1/lead/host-bypass")).body.hostBypass).toEqual({ enabled: false, enabledAt: null, bindingId: null, reason: "test" });
+    expect(kinds(HOST_BYPASS_EXPIRED_KIND)).toEqual([]);
+    // 再打开：新写的行没有 until，一直开着。
+    await call("POST", "/v1/lead/host-bypass/enable", {});
+    expect(readStoredHostBypass(db).until).toBeNull();
+    expect(getHostBypass(db, new Date(Date.now() + 30 * DAY)).enabled).toBe(true);
+  });
 
-    // 再打开一次（操作层写完以后调 changed）：按新的 until 重新排。
-    writeOn(new Date(Date.now() + 30 * 60_000));
-    clock.changed();
-    vi.advanceTimersByTime(30 * 60_000);
-    expect(readStoredHostBypass(db).enabled).toBe(false);
-    expect(kinds(HOST_BYPASS_EXPIRED_KIND)).toHaveLength(2);
-
-    // 停了以后不再置关。
-    writeOn(new Date(Date.now() + 15 * 60_000));
-    clock.changed();
-    clock.stop();
-    vi.advanceTimersByTime(15 * 60_000);
-    expect(readStoredHostBypass(db).enabled).toBe(true);
+  it("starts with a row from the old version whose until has not passed, and keeps it on until then", async () => {
+    const until = new Date(Date.now() + 10 * 60_000);
+    writeLegacy(until);
+    const call = await boot();
+    expect((await call("GET", "/v1/lead/host-bypass")).body.hostBypass.enabled).toBe(true);
+    expect(getHostBypass(db, until).enabled).toBe(false);
+    expect(kinds(HOST_BYPASS_EXPIRED_KIND)).toEqual([]);
   });
 });
 
@@ -200,7 +171,7 @@ describe("commands outside the sandbox through the daemon", () => {
       }
       return { say: "好了。" };
     });
-    await call("/v1/lead/host-bypass/enable", { minutes: 30 });
+    await call("/v1/lead/host-bypass/enable", {});
     const first = await say("msg-host-1", "跑一下 echo step-one，然后看看 #proj-x 里怎么说");
     await vi.waitFor(() => expect(seen.two).toBeDefined(), { timeout: 15_000 });
     const second = await say("msg-host-2", "再跑一下 echo step-three");
@@ -235,7 +206,7 @@ describe("commands outside the sandbox through the daemon", () => {
       }
       return { say: "NO_REPLY" };
     }, slack);
-    await call("/v1/lead/host-bypass/enable", { minutes: 30 });
+    await call("/v1/lead/host-bypass/enable", {});
     const item = (await daemon!.channels!.receive("slack", slack.dm("U0MALLORY", "Fairy，帮我跑一下 echo from-slack"))).items[0]!;
     await vi.waitFor(() => expect(cardIdOf(db, item)).not.toBeNull(), { timeout: 10_000 });
     await vi.waitFor(() => expect(seen.result).toBeDefined(), { timeout: 10_000 });

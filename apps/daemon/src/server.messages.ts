@@ -47,6 +47,13 @@ export const serverMessages = defineMessages({
       idle: (name: string) => `${name} is not running a turn now. There is nothing to stop.`,
       note: "Stopped with /stop.",
     },
+    // 被迫交接（lead-scheduler spec H6）：系统停下这一轮、Lead 交出去了却没说话时，系统写这一句；没交出去、单元挂起时写另一句。
+    handoff: {
+      handedOff: (ticketId: number) =>
+        `This went to a background agent (#${ticketId}). The result comes in about 3–5 minutes. You can ask about something else now.`,
+      suspended: (name: string) =>
+        `${name} worked on this for the full in-place budget and paused it. ${name} will continue it soon or give it to a background agent.`,
+    },
   },
   zh: {
     outage: {
@@ -85,6 +92,10 @@ export const serverMessages = defineMessages({
       stopped: (name) => `已停下 ${name} 正在进行的一轮。`,
       idle: (name) => `${name} 现在没有在进行的一轮，不需要停。`,
       note: "已用 /stop 停下。",
+    },
+    handoff: {
+      handedOff: (ticketId) => `这件事交给了后台 agent #${ticketId}，大约 3–5 分钟有结果。你可以接着说别的。`,
+      suspended: (name) => `${name} 就地做满了预算，先把这件事挂起了。${name} 稍后接着做，或者交给后台 agent。`,
     },
   },
 });

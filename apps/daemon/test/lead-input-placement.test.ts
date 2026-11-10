@@ -38,7 +38,8 @@ afterEach(async () => {
 });
 
 async function start(lead: ReturnType<typeof fakePiLead>) {
-  daemon = await startDaemon({ dataDir: dir, dbPath, sessionFactory: lead.factory as never, log: () => {}, notifyDesktop: () => {} });
+  const logs: string[] = [];
+  daemon = await startDaemon({ dataDir: dir, dbPath, sessionFactory: lead.factory as never, log: (line: string) => { logs.push(line); }, notifyDesktop: () => {} });
   const issued = redeemPairing(db, createPairing(db, { name: "app", kind: "companion", scopes: ["chat", "tickets:view"] }).code);
   const socket = new WebSocket(`ws://127.0.0.1:${daemon.pairedPort}/v1/paired/events?token=${issued.accessToken}&protocol=2&after_seq=-1`);
   sockets.push(socket);
@@ -56,7 +57,7 @@ async function start(lead: ReturnType<typeof fakePiLead>) {
     expect(result.success).toBe(true);
     return result.data as { turnId: string; mode: string };
   };
-  return { events, send, hello: events.find((event) => event.type === "hello.v2") };
+  return { events, send, logs, hello: events.find((event) => event.type === "hello.v2") };
 }
 
 // 一条 tell 级的系统事件：要叫醒 Lead 的 blocker（默认分诊定成 tell）。
@@ -256,7 +257,7 @@ describe("interrupting Lead's unfinished step for a steer", () => {
       if (input.includes("问题 B")) return { say: "先答 B，A 我接着做。" };
       return { say: "收到。" };
     }, { interruptible: true });
-    const { events, send } = await start(lead);
+    const { events, send, logs } = await start(lead);
 
     const a = await send("问题 A");
     await vi.waitFor(() => expect(lead.calls).toHaveLength(1));
@@ -265,6 +266,8 @@ describe("interrupting Lead's unfinished step for a steer", () => {
 
     await vi.waitFor(() => expect(turn(b.turnId)).toMatchObject({ state: "completed", assistant_text: "先答 B，A 我接着做。" }));
     expect(lead.interrupts()).toBe(1);
+    // 调度器记下这个决定，带单元编号和插话的那一轮（lead-scheduler spec D12 第 4 条）。
+    expect(logs.some((line) => new RegExp(`^\\[sched\\] decide unit=unit_\\w+ lane=L0 turn=${b.turnId} decision=steer_interrupt`, "u").test(line))).toBe(true);
     expect(lead.calls).toHaveLength(2);
     // B 送进去时带着说明：插进来之前在做 A，没改掉 A 就接着做完。用户的话原样在后面。
     const steered = lead.calls[1]!.inputs.join("\n");

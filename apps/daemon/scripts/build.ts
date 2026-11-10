@@ -24,6 +24,8 @@ await build({
     "mcp-server": packageSource("engine", "agent-tools", "mcp-server.ts"),
     // Hindsight 记忆服务的 launchd 入口（supervisor 的 deploy/hindsight.ts）。
     hindsight: packageSource("daemon", "hindsight-main.ts"),
+    // 空闲车道写压缩摘要的子进程（lead 的 scheduler/idle-compaction.ts，lead-scheduler spec P4）。
+    "idle-compact": packageSource("lead", "scheduler", "idle-compact-child.ts"),
   },
   outdir,
   outExtension: { ".js": ".mjs" },
@@ -69,5 +71,5 @@ for (const asset of assets.filter((entry) => entry.kind === "copy")) {
 // 记下这次构建来自哪个 commit、构建时源码有没有改动。Lead 请求重启前按它检查（supervisor 的 deploy/readiness.ts）：
 // 没提交的代码不能部署。
 const provenance = writeBuildProvenance(projectRoot(), outdir);
-console.log(`build ok: ${outdir}/{supervisor,coordinatord,ops,mcp-server,hindsight,launcher-shim}.mjs, assets/`);
+console.log(`build ok: ${outdir}/{supervisor,coordinatord,ops,mcp-server,hindsight,idle-compact,launcher-shim}.mjs, assets/`);
 console.log(`build provenance: ${provenance.commit}${provenance.dirty ? ` (dirty: ${provenance.dirtyFiles.join(", ")})` : ""}`);

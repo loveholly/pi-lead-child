@@ -139,6 +139,8 @@ export interface CompactionChunksOptions {
   summarize?: typeof generateSummaryWithUsage;
   // pi 自己触发的压缩（没有 customInstructions）也要带上的要求（compaction-settings.ts 的 leadAutoCompactionInstructions）。
   instructions?: string;
+  // 这次压缩已经由别的扩展接上（空闲车道写好的摘要，scheduler/idle-runtime.ts）：不再自己写。
+  skip?: (event: SessionBeforeCompactEvent) => boolean;
 }
 
 /**
@@ -194,6 +196,6 @@ export async function compactInChunks(
 /** pi 扩展：历史放不进一次摘要请求时分段压缩。 */
 export function compactionChunksExtension(options: CompactionChunksOptions = {}): ExtensionFactory {
   return (pi) => {
-    pi.on("session_before_compact", (event, ctx) => compactInChunks(event, ctx, options));
+    pi.on("session_before_compact", (event, ctx) => (options.skip?.(event) ? undefined : compactInChunks(event, ctx, options)));
   };
 }

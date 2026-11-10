@@ -55,5 +55,7 @@ export type TaskCardProps = {
   // inline 时排在 leading 前面的标记，例如消息头的 Fairy（主题 F-5）。给了它，在跑时摘要前面不再画小转圈：
   // 标记自己表示还在跑（Fairy 的呼吸）。
   leadingMark?: ReactNode;
+  // thinking 时代替「Thinking」的一句（调用方已经按语言写好），例如等模型等过了 30 秒时的「模型回复慢」（lead-scheduler spec D11）。
+  runningTitle?: string | null;
   testID?: string;
 };

@@ -259,24 +259,28 @@ describe("collectLeadEnvironment", () => {
   });
 });
 
-// 工单 #246 设计 5.4：get_environment 的结果里有 hostBypass: { enabled, until }。
+// 工单 #246 设计 5.4：get_environment 的结果里有 hostBypass: { enabled }。没有到点的时间（用户 2026-11-10 去掉了时限）。
 describe("the host bypass switch in get_environment", () => {
-  it("says whether the switch is on and until when, and says off once the time has passed", () => {
+  it("says whether the switch is on, with no end time, and reads an old row past its until as off", () => {
     const dataDir = tempDir("plc-env-host-bypass-");
     const db = openDb(join(dataDir, "plc.db"));
     try {
       const sources = { db, dataDir, env: {}, leadModel: () => null, smartModel: () => null };
-      expect(collectLeadEnvironment(sources).hostBypass).toEqual({ enabled: false, until: null });
+      expect(collectLeadEnvironment(sources).hostBypass).toEqual({ enabled: false });
       expect(renderEnvironmentDetails(collectLeadEnvironment(sources), {})).toContain("hostBypass: { enabled: false }");
-      const until = new Date(Date.now() + 30 * 60_000).toISOString();
-      const write = (value: string) => db.prepare(
+      const write = (value: Record<string, unknown>) => db.prepare(
         `INSERT INTO kv (key, value, updated_at) VALUES (?, ?, datetime('now')) ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
-      ).run(HOST_BYPASS_KEY, JSON.stringify({ enabled: true, until: value, bindingId: 1, enabledAt: new Date().toISOString(), reason: "test" }));
-      write(until);
-      expect(collectLeadEnvironment(sources).hostBypass).toEqual({ enabled: true, until });
-      expect(renderEnvironmentDetails(collectLeadEnvironment(sources), {})).toContain(`hostBypass: { enabled: true, until: ${until} }`);
-      write(new Date(Date.now() - 1_000).toISOString());
-      expect(collectLeadEnvironment(sources).hostBypass).toEqual({ enabled: false, until: null });
+      ).run(HOST_BYPASS_KEY, JSON.stringify({ enabled: true, bindingId: 1, reason: "test", ...value }));
+      // 打开了几天：照旧开着。
+      write({ enabledAt: new Date(Date.now() - 3 * 24 * 60 * 60_000).toISOString() });
+      expect(collectLeadEnvironment(sources).hostBypass).toEqual({ enabled: true });
+      const line = renderEnvironmentDetails(collectLeadEnvironment(sources), {}).split("\n").find((text) => text.includes("免沙箱"));
+      expect(line).toContain("hostBypass: { enabled: true }");
+      expect(line).toContain("直到用户或你关掉");
+      expect(line).not.toMatch(/until|到点|分钟/);
+      // 旧版本写的行，过了 until：关。
+      write({ enabledAt: new Date().toISOString(), until: new Date(Date.now() - 1_000).toISOString() });
+      expect(collectLeadEnvironment(sources).hostBypass).toEqual({ enabled: false });
     } finally {
       db.close();
     }

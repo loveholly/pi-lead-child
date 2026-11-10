@@ -62,7 +62,10 @@ interface ChatRequest { messages: ChatMessage[] }
 
 const textOf = (content: unknown): string => typeof content === "string" ? content
   : Array.isArray(content) ? content.map((part: { text?: string }) => part.text ?? "").join("") : "";
-const lastUserText = (request: ChatRequest) => textOf([...request.messages].reverse().find((message) => message.role === "user")?.content);
+// 每一步的预算状态（lead-scheduler spec D3）是接在工具结果后面的一段用户内容：替身模型和这里的查找都不把它当用户的话。
+const isBudgetLine = (message: ChatMessage) => message.role === "user" && textOf(message.content).includes('kind="budget"');
+const withoutBudget = (messages: ChatMessage[]): ChatMessage[] => messages.filter((message) => !isBudgetLine(message));
+const lastUserText = (request: ChatRequest) => textOf([...withoutBudget(request.messages)].reverse().find((message) => message.role === "user")?.content);
 
 // 替身模型。用户的话决定它做什么；工具结果和系统的核对说明决定它下一步怎样改。
 async function modelStub(): Promise<{ baseUrl: string; requests: ChatRequest[] }> {
@@ -99,7 +102,8 @@ async function modelStub(): Promise<{ baseUrl: string; requests: ChatRequest[] }
         return;
       }
       requests.push(body);
-      const last = body.messages.at(-1)!;
+      const messages = withoutBudget(body.messages);
+      const last = messages.at(-1)!;
       const user = lastUserText(body);
       if (last.role === "tool") {
         const result = textOf(last.content);
@@ -109,8 +113,8 @@ async function modelStub(): Promise<{ baseUrl: string; requests: ChatRequest[] }
           call("record_decision", { ticket_id: ticket, decision: "pass", reason: "转述 Run #1 的核查报告：测试通过。" });
         } else if (user.includes("读完再记")) {
           // 这一轮（最后一条用户消息之后）的工具结果：第一条是 read 的结果，之后记决定。
-          const lastUser = body.messages.map((message) => message.role).lastIndexOf("user");
-          const results = body.messages.slice(lastUser + 1).filter((message) => message.role === "tool").length;
+          const lastUser = messages.map((message) => message.role).lastIndexOf("user");
+          const results = messages.slice(lastUser + 1).filter((message) => message.role === "tool").length;
           if (results === 1) call("record_decision", { ticket_id: ticket, decision: "pass", reason: "我读了 src/real.ts，导出的三个常量都在。" });
           else say("记好了。");
         } else {

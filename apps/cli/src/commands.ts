@@ -405,6 +405,13 @@ export function buildProgram(deps: CliDeps): Command {
 
   program.command("doctor").description("只读诊断：只读打开账本，不执行迁移，不修改账本和配置").action(ops(["doctor"]));
 
+  // Lead 调度器的查询入口（lead-scheduler spec D12）。只读文件和账本，不经过 daemon：daemon 卡住时照样能查。
+  const schedCmd = program.command("sched").description("Lead 调度器：查一个工作单元的时间线");
+  schedCmd.command("trace <id>")
+    .description("一个工作单元（unit_…）或一轮（turn_…）的调度时间线：daemon 日志、会话文件和账本里的记录合在一起")
+    .option("--log <file...>", "读这些日志文件（缺省读数据目录里 daemon 的日志）")
+    .action((id: string, options: { log?: string[] }) => ops(["sched-trace", id, ...(options.log ?? []).flatMap((file) => ["--log", file])])());
+
   program.command("web")
     .description("打印 daemon 网关提供的 companion web UI 地址")
     .option("--open", "同时用默认浏览器打开")

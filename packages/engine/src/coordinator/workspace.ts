@@ -9,7 +9,7 @@ import { promisify } from "node:util";
 import type { Db } from "@pi-lead-child/store";
 import { addActivity, addInbox, getItem } from "@pi-lead-child/store";
 import type { Actor, Workspace, WorkspaceKind, WorkspaceMode, WorkspaceState } from "@pi-lead-child/core";
-import { removeTree } from "@pi-lead-child/core";
+import { removeTree, waitForHostIdle } from "@pi-lead-child/core";
 import {
   createWorkspace, getWorkspace, listWorkspaces, resolveWorkspace, transitionWorkspace,
 } from "@pi-lead-child/store";
@@ -18,7 +18,7 @@ import { chooseWorktreeBase, chooseWorktreeBaseAsync, recordWorktreeBase, type W
 import { workspaceContentHash } from "./workspace-integrity.js";
 import { startWorktreeDependencies } from "./worktree-dependencies.js";
 import { createCheckpointDomainService } from "./checkpoints.js";
-import { MAX_ARTIFACT_BYTES, openArtifactContentAsync, stageArtifact } from "@pi-lead-child/store";
+import { MAX_ARTIFACT_BYTES, openArtifactContentAsync, stageArtifactAsync } from "@pi-lead-child/store";
 
 const execFileAsync = promisify(execFile);
 
@@ -117,13 +117,15 @@ async function persistWorkspaceSnapshot(db: Db, workspace: Workspace, contentHas
   await writeFile(temporaryPath, content, { flag: "wx", mode: 0o600 });
   let staged;
   try {
-    staged = stageArtifact(db, {
+    // 快照最大 25 MB：复制、哈希和核对都是异步的，提交事务里只核对文件身份（lead-scheduler P0b）。
+    staged = await stageArtifactAsync(db, {
       dataDir, itemId: workspace.owner_item_id, runId: null,
       ref: `workspace-snapshot:${workspace.id}`,
       name: `workspace-${workspace.id}-snapshot.json`, kind: "workspace_snapshot",
       mediaType: "application/json", description: "Immutable workspace cleanup snapshot",
       relativePath,
     });
+    await staged.prepareCommit();
     const result = createCheckpointDomainService({ db }).recordSystemCheckpoint({
       itemId: workspace.owner_item_id, kind: "milestone", title: "Workspace snapshot persisted",
       summary: `Workspace #${workspace.id} cleanup snapshot persisted as an immutable artifact.`,
@@ -216,7 +218,12 @@ async function backgroundDeleteSlot<T>(work: () => Promise<T>): Promise<T> {
 
 function deleteInBackground(path: string): void {
   if (pendingDeletions.has(path)) return;
-  const deletion = backgroundDeleteSlot(() => removeTree(path, { kind: "worktree-delete", label: basename(path) }))
+  // 没有人在等这次删除：开始以前等 Lead 空闲（lead-scheduler spec D8，P4；daemon 装的闸门，没装时马上放行）。
+  // 已经开始的 rm 照常跑完，下一个再等。
+  const deletion = backgroundDeleteSlot(async () => {
+    await waitForHostIdle("worktree-delete", basename(path));
+    await removeTree(path, { kind: "worktree-delete", label: basename(path) });
+  })
     .catch(() => { /* the next sweep tries again */ })
     .finally(() => { pendingDeletions.delete(path); });
   pendingDeletions.set(path, deletion);

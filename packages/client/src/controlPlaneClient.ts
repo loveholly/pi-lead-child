@@ -102,7 +102,6 @@ import {
   type LeadProfileRequest,
   type LeadAvatarDto,
   type HostBypassDto,
-  type EnableHostBypassRequest,
   type BusyPlacementDto,
   type LeadAvatarImage,
   type LeadAvatarSlackEmojiRequest,
@@ -198,6 +197,7 @@ import {
   LeadModelCatalogSchema,
   LeadModelSwitchResultSchema,
   LEAD_QUEUE_OPT_IN,
+  LEAD_STEP_OPT_IN,
   LeadQueueSchema,
   FollowUpActionResultSchema,
   type FollowUpAction,
@@ -2008,9 +2008,10 @@ export class ControlPlaneClient {
     return (await this.request<{ hostBypass: HostBypassDto }>('/v1/lead/host-bypass', HostBypassResponseSchema, { signal })).hostBypass;
   }
 
-  async enableHostBypass(request: EnableHostBypassRequest, signal?: AbortSignal): Promise<HostBypassDto> {
+  // 打开不带时长：打开以后一直开着，直到你或 Lead 关掉。
+  async enableHostBypass(signal?: AbortSignal): Promise<HostBypassDto> {
     const payload = await this.request<{ hostBypass: HostBypassDto }>('/v1/lead/host-bypass/enable', HostBypassResponseSchema, {
-      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(request), ...(signal ? { signal } : {}),
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}', ...(signal ? { signal } : {}),
     });
     return payload.hostBypass;
   }
@@ -2511,7 +2512,7 @@ export class ControlPlaneClient {
         // 选收 Lead 健康（带 lead 的 daemon.status.changed）、Lead 生成的富交互卡片（带 surface 的
         // lead.tool.updated，protocol 的 ui-surfaces.ts）、「Lead 动态」的推送（工单 06）和工单回复的动作按钮
         // 有了判断结果（2026-10-19，ticket-chat.ts）、Lead 忙时排着的外部消息（工单 10，lead-queue.ts）。旧 daemon 忽略这个参数。
-        include: `lead_health,ui_surfaces,${LEAD_ACTIVITY_OPT_IN},${TICKET_REPLY_ACTIONS_OPT_IN},${LEAD_QUEUE_OPT_IN}`,
+        include: `lead_health,ui_surfaces,${LEAD_ACTIVITY_OPT_IN},${TICKET_REPLY_ACTIONS_OPT_IN},${LEAD_QUEUE_OPT_IN},${LEAD_STEP_OPT_IN}`,
       }).toString();
       const socket = this.createSocket(url.toString());
       this.socket = socket;

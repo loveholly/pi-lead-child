@@ -88,15 +88,22 @@ const TASKPOLICY = "/usr/sbin/taskpolicy";
 //   · utility：taskpolicy -d utility，比交互的 I/O 低一档，但不会被饿着。有人在等的删除用它。
 export type TreeDeletePriority = "background" | "utility";
 
-export function removeTreeCommand(
-  target: string, priority: TreeDeletePriority = "background",
+/** 按 I/O 优先级包一层 taskpolicy（macOS）。别的系统上原样返回，io 是 default。 */
+export function priorityCommand(
+  command: string, args: readonly string[], priority: TreeDeletePriority,
 ): { command: string; args: string[]; io: TreeDeletePriority | "default" } {
   const effective = priority === "background" && process.env.PLC_BACKGROUND_DELETE_IO === "utility" ? "utility" : priority;
   if (process.platform === "darwin" && existsSync(TASKPOLICY)) {
     const policy = effective === "background" ? ["-b"] : ["-d", "utility"];
-    return { command: TASKPOLICY, args: [...policy, "/bin/rm", "-rf", "--", target], io: effective };
+    return { command: TASKPOLICY, args: [...policy, command, ...args], io: effective };
   }
-  return { command: "/bin/rm", args: ["-rf", "--", target], io: "default" };
+  return { command, args: [...args], io: "default" };
+}
+
+export function removeTreeCommand(
+  target: string, priority: TreeDeletePriority = "background",
+): { command: string; args: string[]; io: TreeDeletePriority | "default" } {
+  return priorityCommand("/bin/rm", ["-rf", "--", target], priority);
 }
 
 export interface RemoveTreeOptions {
@@ -110,35 +117,150 @@ export interface RemoveTreeOptions {
  * 在子进程里删一整个目录树（rm -rf），等它退出。目录不在也算成功。daemon 进程里不做任何递归删除。
  * 失败时抛错，错误里带 rm 的最后一段输出。
  */
-export function removeTree(path: string, options: RemoveTreeOptions = {}): Promise<void> {
+export async function removeTree(path: string, options: RemoveTreeOptions = {}): Promise<void> {
   const target = assertRemovableTree(path);
-  const kind = options.kind ?? "tree-delete";
-  const label = options.label ?? target.split(sep).slice(-2).join(sep);
-  const job = startJob(kind, label);
-  return new Promise<void>((resolvePromise, reject) => {
-    const { command, args, io } = removeTreeCommand(target, options.priority ?? "background");
+  const result = await runHostChild({
+    kind: options.kind ?? "tree-delete",
+    label: options.label ?? target.split(sep).slice(-2).join(sep),
+    command: "/bin/rm", args: ["-rf", "--", target],
+    priority: options.priority ?? "background",
+  });
+  if (result.code !== 0) {
+    throw new Error(`rm -rf ${target} exited ${result.code ?? result.signal}: ${result.stderr.trim().slice(-500)}`);
+  }
+}
+
+// ── 子进程里的后台作业（P0 的删除和 P4 的空闲车道共用）──────────────────────────────────────
+
+export interface HostChildOptions {
+  // 种类和给人看的对象，进 job.start、job.end 两行日志和卡顿说明。不写消息原文。
+  kind: string;
+  label: string;
+  command: string;
+  args: readonly string[];
+  // I/O 优先级（taskpolicy）。缺省 background。
+  priority?: TreeDeletePriority;
+  // 写进子进程的标准输入（例如压缩要摘要的对话和模型的凭据）。不进日志，不落盘，不进命令行和环境变量。
+  stdin?: string;
+  // 收集标准输出（最多 maxStdoutBytes，超过时按失败处理）。不收集时丢掉。
+  captureStdout?: boolean;
+  maxStdoutBytes?: number;
+  // 超过这个时间还没退出：先 SIGTERM，2 秒后 SIGKILL。结果的 timedOut 为真。
+  timeoutMs?: number;
+  // 中止（例如 daemon 停机）：和超时一样先 SIGTERM，再 SIGKILL。
+  signal?: AbortSignal;
+  env?: NodeJS.ProcessEnv;
+  // 子进程起来了（pid）。
+  onSpawn?: (pid: number | null) => void;
+}
+
+export interface HostChildResult {
+  code: number | null;
+  signal: NodeJS.Signals | null;
+  stdout: string;
+  // 标准错误的最后 2000 字。
+  stderr: string;
+  ms: number;
+  timedOut: boolean;
+  aborted: boolean;
+}
+
+/**
+ * 在子进程里跑一件后台重活，登记成后台作业，起止各记一行 [sched] job.*（spec D12 第 11 条），等它退出。
+ * 子进程不占 daemon 的主线程和 I/O 线程池；daemon 只读写管道。spawn 本身失败时抛错。
+ */
+export function runHostChild(options: HostChildOptions): Promise<HostChildResult> {
+  const job = startJob(options.kind, options.label);
+  const started = Date.now();
+  const maxStdout = options.maxStdoutBytes ?? 8 * 1024 * 1024;
+  return new Promise<HostChildResult>((resolvePromise, reject) => {
+    const { command, args, io } = priorityCommand(options.command, options.args, options.priority ?? "background");
     let stderr = "";
-    let child;
+    const stdout: Buffer[] = [];
+    let stdoutBytes = 0;
+    let overflow = false;
+    let timedOut = false;
+    let aborted = false;
+    let child: ReturnType<typeof spawn>;
     try {
-      child = spawn(command, args, { stdio: ["ignore", "ignore", "pipe"] });
+      child = spawn(command, args, {
+        stdio: [options.stdin === undefined ? "ignore" : "pipe", options.captureStdout ? "pipe" : "ignore", "pipe"],
+        ...(options.env ? { env: options.env } : {}),
+      });
     } catch (error) {
       endJob(job, { exit: null, error: error instanceof Error ? error.message : String(error) });
       reject(error);
       return;
     }
     job.pid = child.pid ?? null;
-    jobLog?.(schedLine("job.start", { id: job.id, kind, label, pid: job.pid, io }));
+    jobLog?.(schedLine("job.start", { id: job.id, kind: options.kind, label: options.label, pid: job.pid, io }));
+    options.onSpawn?.(job.pid);
+    let killTimer: NodeJS.Timeout | null = null;
+    const stop = () => {
+      if (child.exitCode !== null || child.signalCode !== null) return;
+      child.kill("SIGTERM");
+      killTimer = setTimeout(() => { if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL"); }, 2_000);
+      killTimer.unref();
+    };
+    const timer = options.timeoutMs ? setTimeout(() => { timedOut = true; stop(); }, options.timeoutMs) : null;
+    timer?.unref();
+    const onAbort = () => { aborted = true; stop(); };
+    if (options.signal?.aborted) onAbort();
+    else options.signal?.addEventListener("abort", onAbort, { once: true });
     child.stderr?.on("data", (chunk: Buffer) => { stderr = (stderr + chunk.toString("utf8")).slice(-2_000); });
-    child.once("error", (error) => {
-      endJob(job, { exit: null, error: error.message });
-      reject(error);
+    child.stdout?.on("data", (chunk: Buffer) => {
+      stdoutBytes += chunk.length;
+      if (stdoutBytes > maxStdout) {
+        if (!overflow) { overflow = true; stop(); }
+        return;
+      }
+      stdout.push(chunk);
     });
-    child.once("close", (code, signal) => {
-      endJob(job, { exit: code, ...(signal ? { signal } : {}) });
-      if (code === 0) resolvePromise();
-      else reject(new Error(`rm -rf ${target} exited ${code ?? signal}: ${stderr.trim().slice(-500)}`));
-    });
+    if (options.stdin !== undefined && child.stdin) {
+      // 子进程先退出时写管道会报 EPIPE：结果按它的退出码算，这里不另外报错。
+      child.stdin.on("error", () => {});
+      child.stdin.end(options.stdin);
+    }
+    let settled = false;
+    const finish = (code: number | null, signal: NodeJS.Signals | null, error?: string) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      if (killTimer) clearTimeout(killTimer);
+      options.signal?.removeEventListener("abort", onAbort);
+      const result: HostChildResult = {
+        code: overflow ? null : code, signal, stdout: Buffer.concat(stdout).toString("utf8"),
+        stderr: overflow ? `stdout over ${maxStdout} bytes` : stderr, ms: Date.now() - started, timedOut, aborted,
+      };
+      endJob(job, {
+        exit: result.code, ...(signal ? { signal } : {}), ...(timedOut ? { timedOut: true } : {}), ...(aborted ? { aborted: true } : {}),
+        ...(error ? { error } : {}),
+      });
+      resolvePromise(result);
+    };
+    child.once("error", (error) => finish(null, null, error.message));
+    child.once("close", (code, signal) => finish(code, signal));
   });
+}
+
+// ── 空闲车道的闸门（lead-scheduler spec D8，P4）────────────────────────────────────────────
+//
+// 没有人在等的后台重活（回收区的删除）在 Lead 空闲时才开始：daemon 装上闸门（它问 Lead 的调度器）。没装时马上放行，
+// 测试和别的进程照旧。已经在跑的子进程不停：它在自己的进程里、按后台优先级跑，做完这一块再让（下一块等 Lead 空闲）。
+export type HostIdleGate = (job: { kind: string; label: string }) => Promise<void>;
+let idleGate: HostIdleGate | null = null;
+
+export function setHostIdleGate(gate: HostIdleGate | null): void {
+  idleGate = gate;
+}
+
+/** 等到 Lead 空闲（daemon 装了闸门时），再开始这一件没有人在等的后台重活。闸门出错时放行。 */
+export async function waitForHostIdle(kind: string, label: string): Promise<void> {
+  const gate = idleGate;
+  if (!gate) return;
+  try {
+    await gate({ kind, label });
+  } catch { /* 闸门坏了不能让删除永远不做 */ }
 }
 
 /**

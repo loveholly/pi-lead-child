@@ -57,7 +57,10 @@ const systemText = (request: ChatRequest) => request.messages
   .filter((message) => message.role === "system" || message.role === "developer")
   .map((message) => textOf(message.content)).join("\n\n");
 
-const lastUserText = (request: ChatRequest) => textOf([...request.messages].reverse().find((message) => message.role === "user")?.content);
+// 每一步的预算状态（lead-scheduler spec D3）是接在工具结果后面的一段用户内容：替身模型和这里的查找都不把它当用户的话。
+const isBudgetLine = (message: ChatMessage) => message.role === "user" && textOf(message.content).includes('kind="budget"');
+const withoutBudget = (request: ChatRequest): ChatMessage[] => request.messages.filter((message) => !isBudgetLine(message));
+const lastUserText = (request: ChatRequest) => textOf([...withoutBudget(request)].reverse().find((message) => message.role === "user")?.content);
 
 // OpenAI 兼容的 /chat/completions 替身，流式回答：
 //   - SmartModel 的 LLM 兜底（提示词以 "You answer typed questions" 开头）：回答一个 JSON。
@@ -88,7 +91,7 @@ async function modelStub(): Promise<{ baseUrl: string; requests: ChatRequest[] }
         return;
       }
       requests.push(body);
-      const last = body.messages.at(-1)!;
+      const last = withoutBudget(body).at(-1)!;
       if (last.role === "tool") {
         say("Jev 是系统的决策模型，不在我的会话里运行。次数见事件日志。");
       } else if (/jev|环境/i.test(lastUserText(body))) {
@@ -160,10 +163,10 @@ const lastRequest = (requests: ChatRequest[], match: (request: ChatRequest) => b
 
 // 替身模型收到的、某个用户问题之后的工具结果的文字。
 function toolTextAfter(requests: ChatRequest[], question: string): string {
-  const request = lastRequest(requests, (candidate) => candidate.messages.at(-1)?.role === "tool"
+  const request = lastRequest(requests, (candidate) => withoutBudget(candidate).at(-1)?.role === "tool"
     && lastUserText(candidate).includes(question));
   expect(request, `no tool result after「${question}」`).toBeDefined();
-  return textOf(request!.messages.at(-1)!.content);
+  return textOf(withoutBudget(request!).at(-1)!.content);
 }
 
 // get_system_usage 的结果是 JSON。

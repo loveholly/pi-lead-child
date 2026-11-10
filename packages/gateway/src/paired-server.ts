@@ -1570,6 +1570,16 @@ export async function startPairedServer(
         return;
       }
 
+      // Lead 调度器现在的样子（lead-scheduler spec D12，只读）：当前单元、它所处的阶段、各车道在等的人、宿主的负载。
+      // 出了问题时不用翻日志就能看到 Lead 停在哪里。Lead 的会话还没建好时没有调度器：回 503。
+      if (req.method === "GET" && url.pathname === "/v1/lead/scheduler") {
+        requireAuth(req, "chat");
+        const scheduler = bridge.uiActionServices?.leadScheduler;
+        if (!scheduler) throw new HttpError(503, "internal_error", "the Lead scheduler is not running yet");
+        json(req, res, 200, scheduler.snapshot());
+        return;
+      }
+
       // 排到下一个、移出队列：操作层的 lead_queue，和 Lead 的 perform_action 是同一个操作。回答是操作以后的排队。
       const leadQueueMatch = url.pathname.match(/^\/v1\/lead\/queue\/(move_next|remove)$/);
       if (req.method === "POST" && leadQueueMatch) {

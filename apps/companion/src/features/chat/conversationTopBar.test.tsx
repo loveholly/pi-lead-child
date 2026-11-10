@@ -3,7 +3,7 @@
 // 手机上和左栏收起时 Fairy 回到顶栏。顶栏写「执行中 N」；输入框上方原来那一行「执行中 · 需要处理 + 工单标签 + 查看全部」去掉。
 import type { ConversationTurn, LeadQueue } from '@pi-lead-child/protocol';
 import { act, fireEvent, screen, within } from '@testing-library/react';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { renderUI } from '../../../test/render';
 import { CompanionRuntimeProvider } from '../../state/CompanionStateProvider';
@@ -63,14 +63,19 @@ describe('the conversation top bar', () => {
   });
 });
 
-// 「用户本人发话时免沙箱」开着时，输入框上方一行标记（工单 #246 设计 5.3、主题 11.17）：写剩余时间，有「关闭」；
-// 关掉以后标记消失。标记在输入框那一栏里，会话列表还是同一个，里面的消息不动（P1）。
+// 「用户本人发话时免沙箱」开着时，输入框上方一行标记（工单 #246 设计 5.3、主题 11.17）：写「开着」，有「关闭」；
+// 没有剩余时间（用户 2026-11-10 去掉了时限），过了很久也还在。关掉以后标记消失。标记在输入框那一栏里，会话列表还是同一个，里面的消息不动（P1）。
 describe('the sandbox bypass marker above the composer', () => {
-  function renderWithBypass(minutesLeft: number | null) {
-    const off = { enabled: false, until: null, enabledAt: null, bindingId: null, reason: null };
+  afterEach(() => vi.useRealTimers());
+
+  function renderWithBypass(on: boolean) {
+    const off = { enabled: false, enabledAt: null, bindingId: null, reason: null };
+    const onState = { enabled: true, enabledAt: new Date().toISOString(), bindingId: 3, reason: '在设置页打开了免沙箱' };
+    // 假的 daemon：读回的是现在的开关，关掉以后读回关。
+    let current = on ? onState : off;
     const client = {
-      getHostBypass: vi.fn(async () => off),
-      disableHostBypass: vi.fn(async () => off),
+      getHostBypass: vi.fn(async () => current),
+      disableHostBypass: vi.fn(async () => { current = off; return off; }),
     };
     const runtime = createCompanionStateRuntime({
       client: client as unknown as CompanionRuntimeDependencies['client'],
@@ -80,10 +85,7 @@ describe('the sandbox bypass marker above the composer', () => {
     (runtime as unknown as { scopes: Set<string> }).scopes = new Set(['chat', 'tickets:view', 'tickets:create']);
     runtime.control.setState({
       phase: 'ready', connectionState: 'connected', leadQueue: null,
-      hostBypass: minutesLeft === null ? off : {
-        enabled: true, until: new Date(Date.now() + minutesLeft * 60_000 - 1_000).toISOString(),
-        enabledAt: new Date().toISOString(), bindingId: 3, reason: '在设置页打开了免沙箱',
-      },
+      hostBypass: current,
     });
     runtime.control.getState().replaceConversation(SESSION, [reply]);
     renderUI(
@@ -95,13 +97,17 @@ describe('the sandbox bypass marker above the composer', () => {
   }
 
   it('shows nothing while the switch is off', () => {
-    renderWithBypass(null);
+    renderWithBypass(false);
     expect(screen.queryByTestId('host-bypass-bar')).toBeNull();
   });
 
-  it('shows the time left with a turn-off button, and goes away without moving the conversation', async () => {
-    const client = renderWithBypass(27);
-    expect(screen.getByTestId('host-bypass-bar-text').textContent).toBe('Outside the sandbox · 27 minutes left');
+  it('says it is on with no time left, stays after hours, and goes away without moving the conversation', async () => {
+    vi.useFakeTimers({ toFake: ['Date', 'setInterval', 'clearInterval'] });
+    const client = renderWithBypass(true);
+    expect(screen.getByTestId('host-bypass-bar-text').textContent).toBe('Sandbox bypass · On');
+    await act(async () => { vi.advanceTimersByTime(5 * 60 * 60_000); });
+    expect(screen.getByTestId('host-bypass-bar-text').textContent).toBe('Sandbox bypass · On');
+    vi.useRealTimers();
     const list = screen.getByTestId('lead-conversation-scroll');
     const message = screen.getByText('今天有三件事。');
     await act(async () => { fireEvent.click(screen.getByTestId('host-bypass-bar-close')); });

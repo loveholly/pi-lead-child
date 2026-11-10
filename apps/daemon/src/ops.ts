@@ -18,6 +18,10 @@
 //   doctor         只读诊断
 //   lead-model     显示 Lead 模型与 provider
 //   lead-use SPEC  把 Lead 默认模型写入 config.json
+//   sched-trace ID [--log FILE]...
+//                  一个工作单元（unit_…）或一轮（turn_…）的调度时间线（lead-scheduler spec D12）：daemon 日志、Lead 的会话文件和
+//                  events 表里的 scheduler.* 合在一起。只读文件、只读打开账本，daemon 卡住时照样能查。缺省读
+//                  <数据目录>/logs/coordinatord.{out,err}.log 和 <数据目录>/daemon.log（开发 daemon）
 import Database from "better-sqlite3";
 import { execFileSync, spawn } from "node:child_process";
 import { chmodSync, copyFileSync, existsSync, mkdirSync, openSync, readFileSync, statSync, statfsSync } from "node:fs";
@@ -43,10 +47,13 @@ import { defaultWebRoot } from "@pi-lead-child/gateway";
 import { isLocale, type DaemonLocalStatus, type LocalSocketCommand } from "@pi-lead-child/protocol";
 import {
   dropLedgerGuards, ledgerGuardedTables, ledgerGuardDropSql, ledgerGuardTriggers, missingLedgerGuards, openExistingDb,
+  schedulerEventsOfUnit, schedulerUnitsOfTurn, type EventRecord,
 } from "@pi-lead-child/store";
+import { formatSchedTrace, readTraceLogLines, readTraceSessionEntries, SCHED_TRACE_ID, schedTrace, unitsOf } from "./sched-trace.js";
 
 const PROJECT_ROOT = projectRoot();
-const USAGE = "usage: ops.mjs start [--auto] | stop | install | desktop-install --root <dir> [--locale en|zh] [--progress-json] | login-shell-path | selfcheck | migrate-data-dir [--locale en|zh] [--follow] | uninstall | doctor | lead-model | lead-use <provider/model> | ledger-guard status|uninstall";
+const USAGE = "usage: ops.mjs start [--auto] | stop | install | desktop-install --root <dir> [--locale en|zh] [--progress-json] | login-shell-path | selfcheck | migrate-data-dir [--locale en|zh] [--follow] | uninstall | doctor | lead-model | lead-use <provider/model> | ledger-guard status|uninstall | sched-trace <unit_…|turn_…> [--log <file>]...";
+const SCHED_TRACE_USAGE = "usage: plc sched trace <unit_…|turn_…> [--log <file>]...";
 // start --auto 被 supervisor 拒绝（plc 的 daemon-link.ts 认这个退出码）。
 const AUTO_START_REFUSED = 3;
 
@@ -653,6 +660,49 @@ async function ledgerGuard(action: string | undefined): Promise<number> {
   return 0;
 }
 
+// 一个单元（或一轮）的调度时间线（lead-scheduler spec D12）。
+async function schedTraceCommand(args: string[]): Promise<number> {
+  const [id, ...rest] = args;
+  if (!id || !SCHED_TRACE_ID.test(id)) {
+    console.error(SCHED_TRACE_USAGE);
+    return 2;
+  }
+  const logs: string[] = [];
+  for (let index = 0; index < rest.length; index += 1) {
+    const path = rest[index + 1];
+    if (rest[index] !== "--log" || !path) {
+      console.error(SCHED_TRACE_USAGE);
+      return 2;
+    }
+    logs.push(resolve(path));
+    index += 1;
+  }
+  const data = dataDir();
+  const logPaths = logs.length ? logs
+    : [join(data, "logs", "coordinatord.out.log"), join(data, "logs", "coordinatord.err.log"), join(data, "daemon.log")];
+  const logLines = await readTraceLogLines(logPaths, id);
+  const sessionEntries = await readTraceSessionEntries(join(data, "lead-sessions"));
+  let units = unitsOf(id, { logLines, sessionEntries, events: [] });
+  let events: EventRecord[] = [];
+  if (existsSync(dbPath())) {
+    const db = openExistingDb(dbPath(), { readonly: true });
+    try {
+      if (id.startsWith("turn_")) units = unitsOf(id, { logLines, sessionEntries, events: [] }, schedulerUnitsOfTurn(db, id));
+      events = units.flatMap((unit) => schedulerEventsOfUnit(db, unit));
+    } finally {
+      db.close();
+    }
+  }
+  const entries = schedTrace(id, units, { logLines, sessionEntries, events });
+  if (!entries.length) {
+    console.error(`没有找到 ${id} 的调度记录（读了 ${logPaths.filter((path) => existsSync(path)).length} 个日志文件、会话文件和账本）。`);
+    return 1;
+  }
+  console.log(`units: ${units.join(", ") || "-"}`);
+  for (const line of formatSchedTrace(entries)) console.log(line);
+  return 0;
+}
+
 // config.json 损坏不该让运维命令（包括 doctor 本身）连带崩溃：退化为纯进程环境变量，
 // 真正的诊断由 doctor 的"config.json 可解析"检查项负责。
 try {
@@ -676,6 +726,7 @@ try {
     case "lead-model": leadModel(); break;
     case "lead-use": process.exitCode = await leadUse(args[0]); break;
     case "ledger-guard": process.exitCode = await ledgerGuard(args[0]); break;
+    case "sched-trace": process.exitCode = await schedTraceCommand(args); break;
     default:
       console.error(USAGE);
       process.exitCode = 2;

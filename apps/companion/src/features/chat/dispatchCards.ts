@@ -15,8 +15,8 @@ import type { LeadTimelineItem } from './LeadConversation';
 type TicketCard = Extract<ConversationCardEntity, { kind: 'ticket_execution' }>;
 type CheckpointCardEntity = Extract<ConversationCardEntity, { kind: 'checkpoint' }>;
 
-// 派活：child 真的开跑了。
-const DISPATCH_OPERATIONS = new Set(['spawn_child', 'recover_ticket_run']);
+// 派活：child 真的开跑了。hand_off 是交接（lead-scheduler spec H4）：建单和派出合成一次调用，卡片一样挂在那条回复下面。
+const DISPATCH_OPERATIONS = new Set(['spawn_child', 'recover_ticket_run', 'hand_off']);
 // Lead 的记账：写批注、读工单和日志。这些不是要你看的事。
 const BOOKKEEPING_OPERATIONS = new Set([
   'add_comment', 'get_ticket', 'get_ticket_tree', 'query_tickets', 'grep', 'get_session_entries',

@@ -89,24 +89,28 @@ describe("scenario 8: a daemon restart in the middle of a round", () => {
   it("continues every unfinished input from where it was, once each: user messages first, then the event", async () => {
     vi.stubEnv("PLC_LEAD_DRAIN_MS", "100");
     const never = deferred();
-    const first = fakePiLead(async (call) => {
-      if (call.inputs.join("\n").includes("迁移脚本卡住了")) await never.promise;
-      return answers(call);
-    });
+    // 这条事件的一轮停在一个一直不结束的命令上（写操作不被打断，lead-scheduler spec D5）。
+    const first = fakePiLead((call) => (
+      call.inputs.join("\n").includes("迁移脚本卡住了")
+        ? { tools: [{ name: "bash", args: { command: "./migrate.sh" }, until: never.promise }] }
+        : answers(call)
+    ));
     const { send } = await start(first);
     tellEvent("迁移脚本卡住了");
     await vi.waitFor(() => expect(firstCallWith(first.calls, "迁移脚本卡住了")).toBe(0));
     const a = await send("问题 A", "steer");
     const b = await send("问题 B", "followUp");
-    // 两条都排在 pi 的队列里，还没送到模型。
-    expect(first.queued()).toMatchObject({ steering: [expect.stringContaining("问题 A")], followUp: [expect.stringContaining("问题 B")] });
+    // 用户本人的消息不排进这条事件的一轮（P3：等到让出点就抢占这一轮），两条都等用户自己的一轮，还没送到模型。
+    expect(first.queued()).toEqual({ steering: [], followUp: [] });
+    expect(callsWith(first.calls, "问题 A") + callsWith(first.calls, "问题 B")).toBe(0);
 
     await stop();
     // 没有答上的输入都等重启后的 daemon，不算失败；事件还在游标后面，没有算处理过。
     expect(turn(a)).toMatchObject({ state: "queued", error: LEAD_RESTART_INTERRUPTED_ERROR });
     expect(turn(b)).toMatchObject({ state: "queued", error: LEAD_RESTART_INTERRUPTED_ERROR });
     expect(cursorSeq() ?? 0).toBeLessThan(blockerSeq());
-    expect(listInbox(db).map((row) => row.state)).toEqual(["pending"]);
+    // Lead 已经看到这条事件（调了命令），这一轮没有做完：送到了，没有算处理完。
+    expect(listInbox(db).map((row) => row.state)).toEqual(["delivered"]);
 
     const second = fakePiLead(answers);
     await start(second);

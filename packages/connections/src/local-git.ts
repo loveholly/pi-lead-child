@@ -1,6 +1,7 @@
 // 读本地 git 仓库的两样东西：origin 远端（解析出 GitHub 的 owner/repo）和 HEAD 的 sha。
 // 只读文件，不启动 git 进程（代查跑在 daemon 进程里）。这里解析的都是 git 自己写的机器文本。
 import { existsSync, readFileSync, statSync } from "node:fs";
+import { access, readFile, stat } from "node:fs/promises";
 import { isAbsolute, join, resolve } from "node:path";
 
 export interface GithubRepoRef {
@@ -16,27 +17,55 @@ function readText(path: string): string | null {
   }
 }
 
-/** 仓库的 git 目录和公共目录。worktree 的 .git 是一个文件，指向 gitdir，公共目录在 commondir 里。 */
-export function gitDirsOf(root: string): { gitDir: string; commonDir: string } | null {
-  const dotGit = join(root, ".git");
-  let gitDir: string;
+async function readTextAsync(path: string): Promise<string | null> {
   try {
-    const stat = statSync(dotGit);
-    if (stat.isDirectory()) {
-      gitDir = dotGit;
-    } else if (stat.isFile()) {
-      const pointer = /^gitdir:\s*(.+)$/m.exec(readText(dotGit) ?? "")?.[1]?.trim();
-      if (!pointer) return null;
-      gitDir = isAbsolute(pointer) ? pointer : resolve(root, pointer);
-    } else {
-      return null;
-    }
+    return await readFile(path, "utf8");
   } catch {
     return null;
   }
-  const common = readText(join(gitDir, "commondir"))?.trim();
-  const commonDir = common ? (isAbsolute(common) ? common : resolve(gitDir, common)) : gitDir;
-  return { gitDir, commonDir };
+}
+
+function gitDirFromPointer(root: string, dotGitText: string | null): string | null {
+  const pointer = /^gitdir:\s*(.+)$/m.exec(dotGitText ?? "")?.[1]?.trim();
+  if (!pointer) return null;
+  return isAbsolute(pointer) ? pointer : resolve(root, pointer);
+}
+
+function commonDirOf(gitDir: string, commondirText: string | null): string {
+  const common = commondirText?.trim();
+  return common ? (isAbsolute(common) ? common : resolve(gitDir, common)) : gitDir;
+}
+
+/** 仓库的 git 目录和公共目录。worktree 的 .git 是一个文件，指向 gitdir，公共目录在 commondir 里。 */
+export function gitDirsOf(root: string): { gitDir: string; commonDir: string } | null {
+  const dotGit = join(root, ".git");
+  let gitDir: string | null;
+  try {
+    const entry = statSync(dotGit);
+    if (entry.isDirectory()) gitDir = dotGit;
+    else if (entry.isFile()) gitDir = gitDirFromPointer(root, readText(dotGit));
+    else return null;
+  } catch {
+    return null;
+  }
+  if (!gitDir) return null;
+  return { gitDir, commonDir: commonDirOf(gitDir, readText(join(gitDir, "commondir"))) };
+}
+
+/** gitDirsOf 的异步版：不在调用方的线程上读盘（lead-scheduler P0b）。 */
+export async function gitDirsOfAsync(root: string): Promise<{ gitDir: string; commonDir: string } | null> {
+  const dotGit = join(root, ".git");
+  let gitDir: string | null;
+  try {
+    const entry = await stat(dotGit);
+    if (entry.isDirectory()) gitDir = dotGit;
+    else if (entry.isFile()) gitDir = gitDirFromPointer(root, await readTextAsync(dotGit));
+    else return null;
+  } catch {
+    return null;
+  }
+  if (!gitDir) return null;
+  return { gitDir, commonDir: commonDirOf(gitDir, await readTextAsync(join(gitDir, "commondir"))) };
 }
 
 /** 目录是不是一个 git 仓库的根目录（有 .git 目录或 .git 文件）。 */
@@ -44,11 +73,26 @@ export function isGitRoot(path: string): boolean {
   return existsSync(join(path, ".git"));
 }
 
+/** isGitRoot 的异步版。 */
+export async function isGitRootAsync(path: string): Promise<boolean> {
+  return access(join(path, ".git")).then(() => true, () => false);
+}
+
 /** origin 远端的地址。没有时为 null。 */
 export function originRemoteUrl(root: string): string | null {
   const dirs = gitDirsOf(root);
   if (!dirs) return null;
-  const config = readText(join(dirs.commonDir, "config"));
+  return originUrlFromConfig(readText(join(dirs.commonDir, "config")));
+}
+
+/** originRemoteUrl 的异步版。 */
+export async function originRemoteUrlAsync(root: string): Promise<string | null> {
+  const dirs = await gitDirsOfAsync(root);
+  if (!dirs) return null;
+  return originUrlFromConfig(await readTextAsync(join(dirs.commonDir, "config")));
+}
+
+function originUrlFromConfig(config: string | null): string | null {
   if (!config) return null;
   let inOrigin = false;
   for (const line of config.split(/\r?\n/)) {

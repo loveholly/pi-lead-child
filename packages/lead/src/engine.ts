@@ -13,7 +13,7 @@ import type { SmartModel, SmartTextComplete } from "@pi-lead-child/engine";
 export type LeadEngine = Pick<
   AgentSession,
   "sessionId" | "prompt" | "steer" | "followUp" | "subscribe" | "dispose"
-> & Partial<Pick<AgentSession, "clearQueue" | "abort" | "abortCompaction" | "compact">>;
+> & Partial<Pick<AgentSession, "clearQueue" | "abort" | "abortCompaction" | "compact" | "getContextUsage">>;
 
 export interface LeadEngineFactoryResult {
   session: LeadEngine;

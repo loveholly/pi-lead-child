@@ -375,7 +375,7 @@ export const UI_ACTION_INPUT_SCHEMAS = {
     uninstall: Empty,
   },
   host_bypass: {
-    // 打开免沙箱：minutes 只能是 15、30、60、120、240。授予 Lead 权力，只有你本人能做。
+    // 打开免沙箱：不带时长，打开以后一直开着，直到你或 Lead 关掉。授予 Lead 权力，只有你本人能做。
     enable: EnableHostBypassRequestSchema,
     // 关掉免沙箱。你和 Lead 都能关。
     disable: DisableHostBypassRequestSchema,

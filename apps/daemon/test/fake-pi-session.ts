@@ -80,6 +80,12 @@ export interface FakePiLeadOptions {
   // 中止这一次调模型，发 stopReason=aborted 的 message_end，然后和 pi 一样把排着的插话送进去、再调一次模型（同一次运行）。
   // 开始说话以后、跑工具时不中止，返回 false。
   interruptible?: boolean;
+  // 和真的调度器 extension 一样叫 daemon 给的钩子（lead-scheduler spec P2，scheduler/extension.ts）：顶层工具的开始和结束报给
+  // schedulerHooks.work；第二步起每次调模型前叫 schedulerHooks.yieldPoint（让出点）；一批工具做完时，把
+  // schedulerHooks.budgetStatus 的那一行接在工具结果后面（它作为下一次调模型的一段输入出现在 FakeCall.inputs 里）。
+  hooks?: boolean;
+  // 真的执行这些工具（工具名 → 实现，拿到参数和 daemon 交给会话工厂的依赖）。没列的工具照旧只返回 ok。
+  tools?: Record<string, (args: Record<string, unknown>, deps: any) => Promise<{ content: Array<{ type: "text"; text: string }>; details?: unknown }>>;
 }
 
 export function fakePiLead(script: FakeScript, options: FakePiLeadOptions = {}) {
@@ -139,7 +145,11 @@ export function fakePiLead(script: FakeScript, options: FakePiLeadOptions = {}) 
     };
     deliver([text]);
     deliver(takeSteering());
+    let step = 0;
     for (;;) {
+      step += 1;
+      // 让出点：上一批工具的结果回来了，这一步的模型请求还没发（extension 的 turn_start）。
+      if (options.hooks && step >= 2) deps.schedulerHooks?.yieldPoint?.(step);
       const call: FakeCall = {
         index: calls.length, inputs: pendingInputs,
         situation: pendingInputs.map(situationIn).filter((text): text is string => text !== null).at(-1) ?? null,
@@ -197,9 +207,26 @@ export function fakePiLead(script: FakeScript, options: FakePiLeadOptions = {}) 
         const toolCallId = `call-${calls.length}-${n}`;
         const args = tool.args ?? {};
         emit({ type: "tool_execution_start", toolCallId, toolName: tool.name, args });
+        if (options.hooks) deps.schedulerHooks?.work?.toolStart({ id: toolCallId, tool: tool.name, args });
         if (tool.until) await tool.until;
-        emit({ type: "tool_execution_end", toolCallId, toolName: tool.name, args, result: { content: [{ type: "text", text: "ok" }] }, isError: false });
+        const impl = options.tools?.[tool.name];
+        let result: { content: Array<{ type: "text"; text: string }>; details?: unknown } = { content: [{ type: "text", text: "ok" }] };
+        let isError = false;
+        if (impl) {
+          try {
+            result = await impl(args, deps);
+          } catch (error) {
+            result = { content: [{ type: "text", text: error instanceof Error ? error.message : String(error) }] };
+            isError = true;
+          }
+        }
+        emit({ type: "tool_execution_end", toolCallId, toolName: tool.name, args, result, isError });
+        if (options.hooks) deps.schedulerHooks?.work?.toolEnd({ id: toolCallId, result, error: isError });
+        if (impl) pendingInputs.push(result.content.map((part) => part.text).join("\n"));
       }
+      // 一批工具做完：预算状态接在工具结果后面（extension 在 turn_end 里发的那一条自定义消息）。
+      const status = options.hooks && tools.length ? deps.schedulerHooks?.budgetStatus?.() ?? null : null;
+      if (status) pendingInputs.push(status);
       if (abortedNow) { endAborted(); return; }
       const steered = takeSteering();
       if (steered.length) { deliver(steered); continue; }

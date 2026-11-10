@@ -28,11 +28,11 @@ describe("overflow limits", () => {
     const text = overflowReminder({ toolCalls: 12, startedAt: 0 }, 60_000, "tool_calls", { redLine: "2 分 30 秒" });
     expect(text).toContain('kind="overflow"');
     expect(text).toContain("已经调用了 12 次工具");
-    expect(text).toContain("light=true");
+    expect(text).toContain("hand_off");
     expect(text).toContain("二选一");
     expect(text).toContain("还要多久");
     expect(text).toContain("现在没有人在等你");
-    expect(text).toContain("做到 2 分 30 秒 时还有人在等，系统会停下这一轮");
+    expect(text).toContain("做到 2 分 30 秒 时，系统会停下这一轮");
     expect(text).not.toContain("可以做完");
   });
 

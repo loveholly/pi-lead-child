@@ -339,6 +339,18 @@ describe("ops commands", () => {
     expect(h.gatewayCalls()).toBe(0);
   });
 
+  // Lead 调度器的时间线（lead-scheduler spec D12）：只读文件和账本，不连网关。
+  it("sched trace runs the ops entry with the id and the log files", async () => {
+    const h = harness();
+    await h.run("sched", "trace", "unit_mw9asd3m002");
+    await h.run("sched", "trace", "turn_575d99e3", "--log", "/tmp/a.log", "/tmp/b.log");
+    expect(h.calls).toEqual([
+      ["runOps", ["sched-trace", "unit_mw9asd3m002"]],
+      ["runOps", ["sched-trace", "turn_575d99e3", "--log", "/tmp/a.log", "--log", "/tmp/b.log"]],
+    ]);
+    expect(h.gatewayCalls()).toBe(0);
+  });
+
   // 部署闸门（审查 2026-10-20 B）：plc daemon start 也经过闸门，--force 是显式的绕过。
   it("start passes --force to the ops entry only when it is given", async () => {
     const h = harness();
