@@ -207,7 +207,7 @@ describe("core memory goes into Lead's system prompt", () => {
 
 // 免沙箱（docs/ticket-246-user-turn-bypass.md 3.1、3.2，实施单 C）：开关开着、用户本人正在发话、这一轮没读过外部内容。
 describe("hostBypassActive", () => {
-  const turnOn = () => enableHostBypass(db, { minutes: 30, bindingId: null, resolvedBy: "user via Mac 网页", reason: "test", now: new Date() });
+  const turnOn = () => enableHostBypass(db, { bindingId: null, resolvedBy: "user via Mac 网页", reason: "test", now: new Date() });
 
   it("is off while the switch is off, even in the user's own turn", () => {
     userTurn("turn-off");
@@ -264,16 +264,16 @@ describe("hostBypassActive", () => {
     turnId = "turn-set";
     completeTurn(db, "turn-set");
     expect(hostBypassActive(db, deps)).toMatchObject({ active: false, code: "not_user_turn" });
-    // 到点以后。
+    // 打开很久以后照旧生效：没有到点的时间（用户 2026-11-10 去掉了时限）。
     userTurn("turn-late");
     turnId = "turn-late";
-    expect(hostBypassActive(db, deps, new Date(Date.now() + 31 * 60_000))).toMatchObject({ active: false, code: "off" });
+    expect(hostBypassActive(db, deps, new Date(Date.now() + 7 * 24 * 60 * 60_000))).toMatchObject({ active: true, turnId: "turn-late" });
   });
 });
 
 // run_on_host 在免沙箱开着时（实施单 C 验收 1、2、4、5）：用户本人的一轮直接跑、不发卡；读过外部内容、筛查不放行时发卡。
 describe("run_on_host with the sandbox bypass on", () => {
-  const turnOn = () => enableHostBypass(db, { minutes: 30, bindingId: null, resolvedBy: "user via Mac 网页", reason: "test", now: new Date() });
+  const turnOn = () => enableHostBypass(db, { bindingId: null, resolvedBy: "user via Mac 网页", reason: "test", now: new Date() });
   const cards = () => listEvents(db, { kind: "rule_change.requested" });
   const hostEvents = (kind: "started" | "finished") => listEvents(db, { kind: `host_command.${kind}` });
 

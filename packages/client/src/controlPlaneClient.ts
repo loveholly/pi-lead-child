@@ -102,7 +102,6 @@ import {
   type LeadProfileRequest,
   type LeadAvatarDto,
   type HostBypassDto,
-  type EnableHostBypassRequest,
   type BusyPlacementDto,
   type LeadAvatarImage,
   type LeadAvatarSlackEmojiRequest,
@@ -2009,9 +2008,10 @@ export class ControlPlaneClient {
     return (await this.request<{ hostBypass: HostBypassDto }>('/v1/lead/host-bypass', HostBypassResponseSchema, { signal })).hostBypass;
   }
 
-  async enableHostBypass(request: EnableHostBypassRequest, signal?: AbortSignal): Promise<HostBypassDto> {
+  // 打开不带时长：打开以后一直开着，直到你或 Lead 关掉。
+  async enableHostBypass(signal?: AbortSignal): Promise<HostBypassDto> {
     const payload = await this.request<{ hostBypass: HostBypassDto }>('/v1/lead/host-bypass/enable', HostBypassResponseSchema, {
-      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(request), ...(signal ? { signal } : {}),
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}', ...(signal ? { signal } : {}),
     });
     return payload.hostBypass;
   }

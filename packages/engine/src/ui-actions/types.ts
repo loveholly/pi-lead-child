@@ -87,9 +87,6 @@ export interface UiActionServices {
   installs?: InstallServices;
   // 来源的连接方式（daemon 的通道设置，2026-11-02）：登录、换方式、「代你往来源里写」开关。通道接好以后才有。
   channelConnections?: ChannelConnectionService;
-  // 「用户本人发话时免沙箱」到点的定时器（daemon 的 host-bypass-clock.ts）。开、关以后告诉它，它按新的 until 重新排。
-  // 没有时（测试）到点照样不生效（读的时候比较 until），只是 kv 要等下一次读写才置关。
-  hostBypassClock?: { changed(): void };
 }
 
 /** 一个来源的连接方式现在的样子（没有密钥）。 */

@@ -53,7 +53,6 @@ import type {
   LeadProfileDto,
   LeadProfileRequest,
   HostBypassDto,
-  HostBypassMinutes,
   BusyPlacement,
   LeadAvatarDto,
   LeadAvatarSlackEmojiRequest,
@@ -1480,8 +1479,8 @@ export class CompanionStateRuntime {
 
   // 「用户本人发话时免沙箱」（设置 → 免沙箱，工单 #246）：打开、关掉。改完马上换成 daemon 回的值；网关之后的
   // snapshot.required（resource 是 host-bypass）也会触发重取。失败时抛出，原因是 daemon 写的那句话。
-  async enableHostBypass(minutes: HostBypassMinutes): Promise<HostBypassDto> {
-    const hostBypass = await this.memoryClient('enableHostBypass')({ minutes });
+  async enableHostBypass(): Promise<HostBypassDto> {
+    const hostBypass = await this.memoryClient('enableHostBypass')();
     this.control.setState({ hostBypass });
     return hostBypass;
   }

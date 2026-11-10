@@ -157,7 +157,7 @@ export function ruleChangeRefusal(
 // 免沙箱（docs/ticket-246-user-turn-bypass.md 3.1、3.2，实施单 C）。和改规则的拒绝用同一份数据：这一轮是不是用户本人
 // 正在说话（isLiveUserTurn）、这一轮带没带外部内容（externalContentOf）。不同的是读过外部内容以后用户本人的一轮也不放开
 // （沿用 2.3 的「收紧」档）：在沙箱外跑错的命令改不回来，而注入的路正是「用户让 Fairy 读 Slack，Slack 里写着请运行 X」。
-// 每一次 bash、run_on_host 调用都重新算：同一轮里 externalBy 会变，开关也会到点。
+// 每一次 bash、run_on_host 调用都重新算：同一轮里 externalBy 会变，开关也可能被关掉。
 export type HostBypassDecision =
   | { active: true; turnId: string; turnOrigin: HostCommandTurnOrigin }
   // off：开关关着，一切照旧，结果里也不写原因。另外两种开关开着，结果里写明为什么这一次没有免沙箱。
@@ -173,7 +173,7 @@ function liveTurnOrigin(db: Db, bindingId: number): HostCommandTurnOrigin {
 }
 
 /**
- * 这一次能不能在沙箱外跑：开关开着（还没到点）、用户本人正在说话的一轮（Slack 里给自己发的私信开的一轮也算，3.3）、
+ * 这一次能不能在沙箱外跑：开关开着、用户本人正在说话的一轮（Slack 里给自己发的私信开的一轮也算，3.3）、
  * 这一轮没有外部内容。不能时给出原因。
  */
 export function hostBypassActive(db: Db, deps: TurnOriginDeps, now: Date = new Date()): HostBypassDecision {
