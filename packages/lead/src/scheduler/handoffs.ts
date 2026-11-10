@@ -350,6 +350,9 @@ export class LeadHandoffs {
       for (const pkg of suspended) lines.push(`- ${suspendedSummary(pkg, now, firstLine)}`);
       lines.push("剩下不超过 2–3 步：resume_unit(id, action=\"resume\") 接着做；更多：hand_off(suspended=id) 交给子 agent；"
         + "已经不需要了：resume_unit(id, action=\"drop\")。由你决定，系统不替你派出。");
+      // 顺序（spec D10：用户的单元先跑）。开发模式验收 S2：没有这一句时，Lead 在用户自己的这一轮里先把挂起的工作做完，
+      // 用户的回答等到最后（最长 22.8 秒）。和用户这条消息相关的，照样可以在这一轮里接着做。
+      lines.push("用户在等时，先回答用户；和用户这条消息无关的挂起单元，这一轮结束后系统会叫醒你处理。");
     }
     const owned = this.#ownedNow();
     if (owned.length) {

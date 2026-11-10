@@ -189,6 +189,20 @@ describe("suspended units (H10)", () => {
     return { dir, logs, records, make, setUnit: (value: any) => { unit = value; } };
   }
 
+  // 回归（P3 开发模式验收 S2，2026-11-10）：用户的消息抢占了一个系统单元以后，Lead 在用户自己的这一轮里先把挂起的工作
+  // 接着做完（5/5），用户的回答等到最后才出来（最长 22.8 秒，L0 的目标是 10 秒）。当前局面要写明顺序：先回答用户；
+  // 和用户这条消息无关的挂起单元，这一轮结束后系统会叫醒 Lead 再处理。相关的照样可以在这一轮里接着做。
+  it("tells Lead to answer the waiting user first and to leave unrelated suspended work for after the turn", () => {
+    const s = service();
+    const handoffs = s.make();
+    s.setUnit({ id: "unit_c", lane: 2, turnId: null, budgetStartedAt: 1_900_000, openedAt: 1_900_000, steps: 1 });
+    handoffs.beginUnit({ unitId: "unit_c", turnId: null, goal: { text: "列出 acme/engine 的文件", source: "system", origin: "system:blocker", lane: 2, arrivedAt: "x" } });
+    handoffs.suspend("preempt");
+    const text = handoffs.situationText()!;
+    expect(text).toContain("用户在等时，先回答用户");
+    expect(text).toContain("和用户这条消息无关的挂起单元，这一轮结束后系统会叫醒你处理");
+  });
+
   it("stores a suspended unit without a model call, reloads it after a restart, and resumes or drops it", () => {
     const s = service();
     const handoffs = s.make();
