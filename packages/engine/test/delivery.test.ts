@@ -153,6 +153,52 @@ describe("the delivery view of an isolated ticket", () => {
   });
 });
 
+// 回归：交付视图在 repo_root 里跑 git rev-list --count HEAD..<head> 数提交。worktree 挂在另一个仓库上时（repo_root 记成了
+// 公开仓库的 checkout，worktree 却在私有仓库的 checkout 上），这条命令失败，Number('' || 0) 得到 0，于是判成 no_changes：
+// open_pr 说「分支上没有新的改动」，自动开 PR 说「没有共同历史」。分支上其实有提交。
+describe("counting the branch's commits", () => {
+  function onAnotherRepository(itemId: number): string {
+    // 另一个仓库，历史和 worktree 的不一样（像脱敏后的公开仓库）：worktree 上的提交在那里不存在。
+    const other = join(dir, "other");
+    execFileSync("git", ["init", "-q", "-b", "main", other]);
+    writeFileSync(join(other, "README.md"), "public readme\n");
+    git(other, "add", ".");
+    git(other, "-c", "user.email=a@b.test", "-c", "user.name=agent", "commit", "-qm", "public base");
+    const workspace = db.prepare("SELECT id FROM workspaces WHERE owner_item_id=? AND kind='isolated_child' ORDER BY id DESC").get(itemId) as { id: number };
+    db.prepare("UPDATE workspaces SET repo_root=? WHERE id=?").run(other, workspace.id);
+    return other;
+  }
+
+  it("counts the commits in the worktree when the worktree belongs to another repository than repo_root", async () => {
+    const { itemId } = deliveredTicket();
+    onAnotherRepository(itemId);
+
+    const delivery = await ticketDelivery(db, itemId);
+    expect(delivery.workspace).toMatchObject({ commits: 1, integration: "unmerged" });
+    // 合并和开 PR 都在 repo_root 里做，那里没有这条分支：说清楚是仓库对不上，不说「没有改动」。
+    expect(delivery.actions.openPullRequest.available).toBe(false);
+    expect(delivery.actions.openPullRequest.reason).toContain("不是同一个仓库");
+    expect(delivery.actions.merge.available).toBe(false);
+    expect(delivery.actions.merge.reason).toContain("不是同一个仓库");
+    expect(Value.Check(TicketDeliverySchema, delivery)).toBe(true);
+  });
+
+  it("does not call the branch empty when git rev-list fails, and says which command failed", async () => {
+    const { itemId } = deliveredTicket();
+    // 用户的 checkout 在一个还没有提交的分支上：HEAD..<head> 解析不了，rev-list 失败。
+    git(repo, "symbolic-ref", "HEAD", "refs/heads/unborn");
+
+    const delivery = await ticketDelivery(db, itemId);
+    expect(delivery.workspace?.integration).toBe("unmerged");
+    expect(delivery.actions.openPullRequest.available).toBe(false);
+    expect(delivery.actions.openPullRequest.reason).toContain("算不出分支上的提交数");
+    expect(delivery.actions.openPullRequest.reason).toContain("git rev-list --count HEAD..");
+    expect(delivery.actions.merge.reason).toContain("算不出分支上的提交数");
+    await expect(openDeliveryPullRequest(db, itemId, { actor: "user", reason: "用户点了开 PR" }))
+      .rejects.toThrow(/git rev-list --count HEAD\.\./);
+  });
+});
+
 describe("which paths the file preview accepts", () => {
   it("rejects paths that leave the repository or are not plain relative paths", () => {
     for (const bad of ["../plc.db", "/etc/passwd", "docs/../../x", "docs//plan.md", "C:\\x", "a\\b", "", "docs/./plan.md", 7]) {

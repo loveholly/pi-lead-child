@@ -116,7 +116,7 @@ description: 调 create_task 之前读。讲四个判断：要不要建单、用
 - 必须用用户的 checkout（例如要基于用户没提交的改动）时，派发前调 provision_workspace(mode='shared', reason=…) 写明理由。pi-lead-child 自己的仓库是线上部署目录，系统一律拒绝共享，先让用户提交需要的改动。
 - 评审 PR：先读 skill pr-review。
 - **验收标准逐条写进 acceptance_criteria**（create_task）：要达到什么，一条一句、能逐条核对；任务说明里可以再写，界面以结构化的为准。执行 agent 的提示里逐条编号，它不能改，有异议时会用 request_decision 提出，你和用户商量定了再用 ticket_action(action='edit_acceptance_criteria') 改。用户在这一轮说某一条看过、做到了，用 ticket_action(action='confirm_criterion') 代用户确认；这只是用户的记录，不是验收或合并的条件。
-- 编码工单结束后，有改动的 worktree 进入「等合并决定」，当前局面里会出现。用户同意合并，或者已经说过可以合并时，调 integrate_workspace。仓库有 origin 时，系统在交付以后自动开草稿 PR（要独立核查的工单等核查员 PASS），返工交付以后更新同一个 PR。开好、更新或者没开成时你会收到事件，把 PR 地址或原因告诉用户。用户说先别提 PR 时，用 create_task 的 draft_pr=false 或 ticket_action 的 set_auto_pr 关掉。系统没有开的 PR（例如这个功能上线以前交付的工单），用户在对话里要开时，在同一轮调 ticket_action 的 open_pr（它只认用户这一轮，你被事件叫醒时调用会被拒绝）。用户也可以自己在工单详情里看改动、点「验收并合并」「开 PR」或「放弃改动」，问到时告诉用户在哪里点。放弃改动是不可逆的操作：先问用户；用户在这一轮明确要求放弃时，在同一轮调 ticket_action 的 abandon（它只认用户这一轮，工单要已经结束）。没有改动的 worktree 由系统自己清理。合并冲突时，worktree 停在「合并冲突」，等用户在自己的 checkout 里处理，或者同意放弃。
+- 编码工单结束后，有改动的 worktree 进入「等合并决定」，当前局面里会出现。用户同意合并，或者已经说过可以合并时，调 integrate_workspace。仓库有 origin 时，系统在交付以后自动开草稿 PR（要独立核查的工单等核查员 PASS），返工交付以后更新同一个 PR。开好、更新或者没开成时你会收到事件，把 PR 地址或原因告诉用户。用户说先别提 PR 时，用 create_task 的 draft_pr=false 或 ticket_action 的 set_auto_pr 关掉。系统没有开的 PR（例如这个功能上线以前交付的工单），用户在对话里要开时，调 ticket_action 的 open_pr（在哪一轮都能开；读过外部内容的一轮里会被拒绝，改发确认卡，用户本人这一轮除外）。用户也可以自己在工单详情里看改动、点「验收并合并」「开 PR」或「放弃改动」，问到时告诉用户在哪里点。放弃改动是不可逆的操作：先问用户；用户在这一轮明确要求放弃时，在同一轮调 ticket_action 的 abandon（它只认用户这一轮，工单要已经结束）。没有改动的 worktree 由系统自己清理。合并冲突时，worktree 停在「合并冲突」，等用户在自己的 checkout 里处理，或者同意放弃。
 
 ## 8. 选执行者和模型
 

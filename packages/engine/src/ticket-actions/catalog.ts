@@ -785,7 +785,7 @@ export const TICKET_ACTIONS: TicketActionCatalog = {
   open_pr: {
     id: "open_pr", label: "开草稿 PR", area: "delivery", scope: "tickets:create",
     permission: "user_only", external: true, irreversible: false, ownerAction: null,
-    hint: "把隔离分支推到 origin，用 gh 开一个草稿 PR。你被事件叫醒的一轮会被拒绝。工单要已经交付（review 或 done），分支上要有提交。",
+    hint: "把隔离分支推到 origin，用 gh 开一个草稿 PR。在哪一轮都能开；读过外部内容的一轮（用户本人这一轮除外）会被拒绝，改发确认卡。工单要已经交付（review 或 done），分支上要有提交。",
     defaultReason: "用户在工单详情里点了「开 PR」",
     available: async (_item, env) => {
       const { openPullRequest } = (await env.delivery()).actions;

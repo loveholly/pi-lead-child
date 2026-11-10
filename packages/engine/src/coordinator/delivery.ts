@@ -201,16 +201,19 @@ async function deliveryView(db: Db, itemId: number): Promise<DeliveryViewResult>
 
   const targetResult = await gitRun(["branch", "--show-current"], repo);
   const target = targetResult.ok ? targetResult.stdout.trim() || null : null;
-  const commits = head && workspace.merge_status !== "merged"
-    ? Number((await gitRun(["rev-list", "--count", `HEAD..${head}`], repo)).stdout.trim() || 0)
-    : 0;
+  const repositoryProblem = present ? await worktreeRepositoryMismatch(db, workspace, repo) : null;
+  const counted = head && workspace.merge_status !== "merged"
+    ? await branchCommitCount(workspace, repo, head, repositoryProblem !== null)
+    : { count: 0, problem: null };
+  // 算不出提交数时视图照旧写 0（协议里是非负整数），但不判成 no_changes：原因写进合并和开 PR 的不可用说明。
+  const commits = counted.count ?? 0;
   const integrated = workspace.merge_status === "merged"
     ? latestDecision(db, itemId, "workspace_integrated", workspace.id) : null;
   const pr = latestDecision(db, itemId, "workspace_pr_opened", workspace.id);
   const integration: DeliveryIntegration = workspace.merge_status === "merged" ? "merged"
     : abandonFinished(workspace) ? "abandoned"
       : workspace.merge_status === "conflict" ? "conflict"
-        : commits > 0 || uncommittedFiles > 0 ? "unmerged" : "no_changes";
+        : commits > 0 || uncommittedFiles > 0 || counted.problem ? "unmerged" : "no_changes";
 
   const deliveryWorkspaceView: DeliveryWorkspace = {
     workspaceId: workspace.id, branch: workspace.branch, head, target, commits, uncommittedFiles, integration,
@@ -219,6 +222,7 @@ async function deliveryView(db: Db, itemId: number): Promise<DeliveryViewResult>
 
   const actions = await deliveryActions(db, item, workspace, {
     head, target, commits, uncommittedFiles, integration, present, pullRequestUrl: pr?.url ?? null,
+    repositoryProblem, commitsProblem: counted.problem,
     listProblem: listProblem(db, item, { snapshot, outcome: outcome ?? null, head, integration }), abandonProblem,
     halfAbandoned: workspace.merge_status === "abandoned" && integration !== "abandoned",
   });
@@ -229,6 +233,44 @@ async function deliveryView(db: Db, itemId: number): Promise<DeliveryViewResult>
       truncated: snapshot?.truncated ?? false, totals, workspace: deliveryWorkspaceView, actions,
     },
   };
+}
+
+// worktree 实际挂在哪个仓库上。以前 worktree 挂在私有仓库的 checkout 上，repo_root 却记成公开仓库的 checkout：
+// 在 repo_root 里数提交、合并、推送都找不到这条分支，视图把它判成「没有改动」，自动开 PR 报「没有共同历史」。
+// 两边的 git common dir 不一样时返回给用户看的原因；一样、或者读不出来时返回 null（读不出来时由数提交报原因）。
+async function worktreeRepositoryMismatch(db: Db, workspace: Workspace, repo: string): Promise<string | null> {
+  const [recorded, actual] = await Promise.all([gitCommonDir(repo), gitCommonDir(workspace.path)]);
+  if (!recorded || !actual || recorded === actual) return null;
+  return `工作区记下的仓库（${repo}）和 worktree 所在的仓库（${actual}）不是同一个仓库。`
+    + `合并和开 PR 都在记下的仓库里做，那里找不到这条分支，所以现在不能合并，也不能开 PR。`
+    + `分支上的提交还在 worktree 里（${workspace.path}）。可以请 ${leadDisplayName(db)} 处理这个工作区。`;
+}
+
+async function gitCommonDir(dir: string): Promise<string | null> {
+  const result = await gitRun(["rev-parse", "--path-format=absolute", "--git-common-dir"], dir);
+  const path = result.ok ? result.stdout.trim() : "";
+  if (!path) return null;
+  try {
+    return realpathSync(path);
+  } catch {
+    return path;
+  }
+}
+
+// 分支上还没合进去的提交数。平常在 repo_root 里数 HEAD..<head>（用户的分支没有的提交）。
+// worktree 挂在另一个仓库上时，repo_root 里没有这些提交：改在 worktree 里数 base_ref..<head>。
+// git 失败时不当成 0（以前 Number('' || 0) 把有提交的分支判成没有改动）：返回写明哪条命令失败的原因。
+type CommitCount = { count: number; problem: null } | { count: null; problem: string };
+
+async function branchCommitCount(workspace: Workspace, repo: string, head: string, otherRepository: boolean): Promise<CommitCount> {
+  const [args, cwd] = otherRepository && workspace.base_ref
+    ? [["rev-list", "--count", `${workspace.base_ref}..${head}`], workspace.path]
+    : [["rev-list", "--count", `HEAD..${head}`], repo];
+  const result = await gitRun(args, cwd);
+  const count = result.ok ? Number.parseInt(result.stdout.trim(), 10) : Number.NaN;
+  if (Number.isFinite(count) && count >= 0) return { count, problem: null };
+  const detail = redact(firstLine(result.stderr)) || "没有输出";
+  return { count: null, problem: `算不出分支上的提交数：在 ${cwd} 里运行 git ${args.join(" ")} 失败（git：${detail}）。` };
 }
 
 // abandoned 只在工作区已经释放以后才算放弃完了。以前放弃时快照存不成，merge_status 已经写成 abandoned，
@@ -274,6 +316,8 @@ async function deliveryActions(
     present: boolean; pullRequestUrl: string | null;
     // 合并不可用的原因：文件列表和要合并的提交对不上（listProblem）。放弃不可用的原因：看不到要放弃的改动。
     listProblem: string | null; abandonProblem: string | null;
+    // worktree 不在 repo_root 那个仓库里（worktreeRepositoryMismatch），和算不出提交数的原因（branchCommitCount）。
+    repositoryProblem: string | null; commitsProblem: string | null;
     // 放弃到一半停下的工作区（abandonFinished）：只能再放弃一次，不能合并或开 PR。
     halfAbandoned: boolean;
   },
@@ -291,6 +335,8 @@ async function deliveryActions(
   else if (halfAbandoned) merge = unavailable(halfAbandoned);
   else if (!["review", "done"].includes(item.stage)) merge = unavailable("交付以后才能合并。");
   else if (running) merge = unavailable("还有 agent 在这个分支上工作，等它结束再合并。");
+  else if (state.repositoryProblem) merge = unavailable(state.repositoryProblem);
+  else if (state.commitsProblem) merge = unavailable(state.commitsProblem);
   else if (state.listProblem) merge = unavailable(state.listProblem);
   else if (state.uncommittedFiles > 0) merge = unavailable(`分支上还有 ${state.uncommittedFiles} 个没提交的文件。先让工单的 agent 提交，或者打回返工。`);
   else if (!state.target) merge = unavailable("你的仓库现在不在任何分支上（分离 HEAD），不知道合并到哪里。");
@@ -306,6 +352,8 @@ async function deliveryActions(
   else if (state.integration === "merged" || state.integration === "abandoned" || state.integration === "no_changes") openPullRequest = unavailable(settled!);
   else if (!["review", "done"].includes(item.stage)) openPullRequest = unavailable("交付以后才能开 PR。");
   else if (state.uncommittedFiles > 0) openPullRequest = unavailable(`分支上还有 ${state.uncommittedFiles} 个没提交的文件，先让工单的 agent 提交。`);
+  else if (state.repositoryProblem) openPullRequest = unavailable(state.repositoryProblem);
+  else if (state.commitsProblem) openPullRequest = unavailable(state.commitsProblem);
   else if (state.commits === 0) openPullRequest = unavailable("分支上没有新的提交。");
   else if (!(await gitRun(["remote", "get-url", "origin"], repo)).ok) openPullRequest = unavailable("这个仓库没有名为 origin 的远程仓库，开不了 PR。");
   else openPullRequest = AVAILABLE;

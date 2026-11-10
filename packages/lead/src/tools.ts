@@ -4089,8 +4089,8 @@ export function createLeadTools(deps: LeadDeps): ToolDefinition<any>[] {
       label: "Release Workspace",
       description: "释放当前工单的 workspace；只处理 workspace 生命周期，不改变工单 stage。"
         + "隔离 worktree：合并用 integrate_workspace；放弃传 merge_status='abandoned'，worktree 会被删掉，改动留在分支上。"
-        + "放弃是不可逆的操作，和 ticket_action 的 abandon 是同一份实现：只在用户这一轮明确要求放弃时调用，工单要已经结束，"
-        + "你被事件叫醒的一轮会被拒绝。reason 写凭什么放弃，例如「用户说这些改动不要了」。",
+        + "放弃是不可逆的操作，和 ticket_action 的 abandon 是同一份实现：只在用户这一轮明确要求放弃时调用，工单要已经结束。"
+        + "读过外部内容的一轮（用户本人这一轮除外）会被拒绝，改发确认卡。reason 写凭什么放弃，例如「用户说这些改动不要了」。",
       parameters: Type.Object({
         item_id: Type.Number({ minimum: 1 }),
         merge_status: Type.Optional(Type.Union([Type.Literal("merged"), Type.Literal("abandoned")])),
