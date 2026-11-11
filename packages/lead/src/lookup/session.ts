@@ -16,6 +16,8 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { loadLeadModelConfig, registerLeadProviders, resolveLeadModel, selectedLeadModelSpec } from "../model-config.js";
 import { configuredLeadModelSpecs, selectSmartModelSpec } from "../smart-model.js";
+import type { LeadBackgroundJobs } from "../background-jobs.js";
+import { installToolAbortGuard } from "../tool-abort-guard.js";
 
 /** runtime 用到的会话接口。AgentSession 满足它；测试也可以给一个更简单的替身。 */
 export interface LookupSession {
@@ -50,6 +52,8 @@ export async function createIsolatedLookupSession(input: {
   thinkingLevel?: "off" | "minimal" | "low" | "medium" | "high";
   retry?: boolean;
   extensionFactories?: Array<{ name: string; factory: ExtensionFactory }>;
+  // 工具不听中止、过了宽限还在跑时（tool-abort-guard.ts），它的结果从这里交回。不给时只写日志。
+  backgroundJobs?: LeadBackgroundJobs;
 }): Promise<LookupSession> {
   const cwd = join(input.workDir, "cwd");
   const agentDir = join(input.workDir, "agent");
@@ -81,6 +85,8 @@ export async function createIsolatedLookupSession(input: {
     tools: names,
     customTools: input.tools,
   });
+  // 子 agent 的会话也一样：工具不听中止时，中止照样落地（.scratch/tool-occupancy/spec.md L1）。
+  installToolAbortGuard(session.agent, input.backgroundJobs ? { jobs: input.backgroundJobs } : {});
   try {
     await session.bindExtensions({});
     const registered = session.getAllTools().map((tool) => tool.name).sort();

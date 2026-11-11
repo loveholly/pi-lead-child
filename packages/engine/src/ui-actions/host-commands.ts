@@ -59,6 +59,8 @@ export function hostCommandInputOf(input: unknown): HostCommandInput {
 export interface HostCommandResult {
   exitCode: number | null;
   timedOut: boolean;
+  // 被 signal 停下（用户 /stop 时 run_on_host 停掉进程组）。
+  aborted: boolean;
   outputPath: string;
   text: string;
 }
@@ -162,6 +164,7 @@ export function hostCommandResultText(input: { timeoutSeconds: number }, result:
   const lines = result.output.split("\n").filter((line) => line.length > 0).length;
   const tail = result.output.length > HOST_COMMAND_LIMITS.tailChars ? `…${result.output.slice(-HOST_COMMAND_LIMITS.tailChars)}` : result.output;
   const status = result.timedOut ? `超过 ${input.timeoutSeconds} 秒没跑完，停掉了`
+    : result.aborted ? "这一步被停下了，命令也停掉了（整个进程组）"
     : result.exitCode === 0 ? "跑完了，退出码 0" : `跑完了，退出码 ${result.exitCode ?? "未知"}`;
   return `${status}，用了 ${seconds} 秒。输出共 ${lines} 行，全文在 ${outputPath}（用 read 读）。`
     + (tail.trim() ? `\n末尾：\n${tail.trim()}` : "\n没有输出。");
@@ -177,7 +180,7 @@ export async function runHostCommand(
   });
   const outputPath = saveHostCommandOutput(options.dataDir, options.id, result);
   return {
-    exitCode: result.exitCode, timedOut: result.timedOut, outputPath,
+    exitCode: result.exitCode, timedOut: result.timedOut, aborted: result.aborted, outputPath,
     text: hostCommandResultText({ timeoutSeconds: input.timeout_seconds }, result, outputPath),
   };
 }
@@ -235,17 +238,18 @@ export function recordHostCommandFinished(db: Db, id: string, result: HostProces
 export async function runRecordedHostCommand(
   db: Db, input: HostCommandInput, record: Omit<HostCommandRecord, "command" | "cwd" | "timeoutSeconds">,
   // run：真正跑的命令（脚本换成筛查过的副本以后的那一条）。事件里记 Lead 写的 input.command。
-  options: { dataDir?: string; shell?: string; run?: string } = {},
+  // signal：中止时停掉整个进程组（spawnHostProcess）。免沙箱直接跑的 run_on_host 传，确认卡上跑的不传。
+  options: { dataDir?: string; shell?: string; run?: string; signal?: AbortSignal } = {},
 ): Promise<HostCommandResult> {
   if (!existsSync(input.cwd) || !statSync(input.cwd).isDirectory()) throw new UiActionError("invalid_input", `目录不存在：${input.cwd}`);
   recordHostCommandStarted(db, { ...record, command: input.command, cwd: input.cwd, timeoutSeconds: input.timeout_seconds });
   const result = await spawnHostProcess(options.run ?? input.command, {
-    cwd: input.cwd, timeoutSeconds: input.timeout_seconds, ...(options.shell ? { shell: options.shell } : {}),
+    cwd: input.cwd, timeoutSeconds: input.timeout_seconds, ...(options.shell ? { shell: options.shell } : {}), signal: options.signal,
   });
   const outputPath = saveHostCommandOutput(options.dataDir, record.id, result);
   recordHostCommandFinished(db, record.id, result, outputPath);
   return {
-    exitCode: result.exitCode, timedOut: result.timedOut, outputPath,
+    exitCode: result.exitCode, timedOut: result.timedOut, aborted: result.aborted, outputPath,
     text: hostCommandResultText({ timeoutSeconds: input.timeout_seconds }, result, outputPath),
   };
 }

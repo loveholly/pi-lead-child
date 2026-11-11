@@ -24,7 +24,7 @@ import {
 } from "@pi-lead-child/lead";
 import {
   abortedByRedLine, abortedForPreempt, abortedForRestart, admitSystemUnit, budgetStatusLine, canInterruptForSteer, countedWaiting,
-  handoffGate, IdleLaneRuntime, idleLaneLimitsFromEnv, LANES, LeadHandoffs, LeadSchedulerRuntime, redLinePhase as schedRedLinePhase,
+  ForegroundWaits, handoffGate, IdleLaneRuntime, idleLaneLimitsFromEnv, LANES, LeadHandoffs, LeadSchedulerRuntime, redLinePhase as schedRedLinePhase,
   schedulerLine, stepP90Ms, stoppedByUser, unitLane, yieldedToInput, type PrecipitationOutcome,
   type BudgetFacts, type Lane, type LeadBackgroundJobs, type SchedulerEffect, type SchedulerLimits, type UnitOutcome,
   type WaitingEntry,
@@ -871,6 +871,8 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
   // 结束时把输出作为一件事交给 Lead（inbox，叫醒 Lead），车道是作业开始时那个单元的车道（D1：结果走原请求者的车道）。
   // 输出是本机命令的结果，不算外部内容（turn-origin.ts）。
   const backgroundJobOwners = new Map<string, { unitId: string | null; lane: Lane; turnId: string | null }>();
+  // 这一步里正在等、能转后台的工具调用：用户插话时 interruptForSteer 让它们马上转后台（.scratch/tool-occupancy/spec.md）。
+  const foregroundWaits = new ForegroundWaits();
   const backgroundJobs: LeadBackgroundJobs = {
     started: (job) => {
       const unit = sched.unit;
@@ -2167,13 +2169,20 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
   // （没写字、没调工具），就中止这一步的模型请求，pi 马上把插话送进去再想一次，不用等这一步想完、它调的工具跑完。
   // 正在跑的工具、压缩不打断；/stop、红线、停机的时候不做。插话已经送到了（不在 queuedInputs 里）时也不做。
   // 中止的那半步以 stopReason=aborted 结束：message_end 那里认出是这里要求的（stepInterruptedForSteer），不算失败。
+  // 工具在跑时（2026-11-10，.scratch/tool-occupancy/eval-2026-11-10.md）：能转后台的（免沙箱直接跑的 run_on_host、
+  // 标了 read_only 的 bash）马上转后台，命令不停，这一步结束，插话马上送到。以前插话要等 20 秒的软时限，回答要 15–18 秒。
+  // 有副作用、不能转后台的工具照旧等它做完。
   function interruptForSteer(sink: ActiveChannelTurn): void {
-    if (!interruptLeadStep || !canInterruptForSteer(sched.state)) return;
+    if (!canInterruptForSteer(sched.state)) return;
     if (!queuedInputs.some((input) => input.entry === sink && input.kind === "steer")) return;
-    if (!interruptLeadStep()) return;
-    stepInterruptedForSteer = true;
-    log(`steer ${sink.turn.id}: stopped the model's unfinished step so Lead reads the steer now`);
-    sched.noteSteerInterrupt(sink.turn.id);
+    if (interruptLeadStep?.()) {
+      stepInterruptedForSteer = true;
+      log(`steer ${sink.turn.id}: stopped the model's unfinished step so Lead reads the steer now`);
+      sched.noteSteerInterrupt(sink.turn.id);
+      return;
+    }
+    const moved = foregroundWaits.detachAll();
+    if (moved) log(`[sched] steer.detach turn=${sink.turn.id} calls=${moved}`);
   }
 
   // user-placement.ts 要的、正在跑的这一轮的事实。
@@ -2945,6 +2954,12 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       stepStatus: (status) => publishLeadStep(status),
     },
     backgroundJobs,
+    // 这一步被中止的原因：run_on_host 据此决定停掉命令（/stop）还是转后台（红线、抢占）（.scratch/tool-occupancy/spec.md L4）。
+    abortReason: () => sched.controller?.abortReason ?? null,
+    // 用户插话时，正在等的 run_on_host 和只读的 bash 马上转后台（interruptForSteer）。
+    foregroundWaits,
+    // 工具不听中止、被转到后台时（tool-abort-guard.ts）写的 [sched] 行。
+    log,
     handoff: {
       handoffs,
       forced: () => schedRedLinePhase(sched.state) === "handoff",

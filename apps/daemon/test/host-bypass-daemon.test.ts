@@ -11,9 +11,12 @@ import { tempDir } from "@pi-lead-child/core/testing";
 import { withCallObserver } from "@pi-lead-child/engine";
 import { cardIdOf, FakeSlack, scriptedSmartModel } from "@pi-lead-child/engine/testing";
 import { createLeadTools, hostCommandRoute } from "@pi-lead-child/lead";
-import { HOST_BYPASS_ENABLED_KIND, HOST_BYPASS_EXPIRED_KIND, HOST_COMMAND_STARTED_KIND } from "@pi-lead-child/protocol";
 import {
-  createLoopbackBinding, getHostBypass, HOST_BYPASS_KEY, listEvents, openDb, readStoredHostBypass, recordDecisionModelCall, type Db,
+  HOST_BYPASS_ENABLED_KIND, HOST_BYPASS_EXPIRED_KIND, HOST_COMMAND_FINISHED_KIND, HOST_COMMAND_STARTED_KIND,
+} from "@pi-lead-child/protocol";
+import {
+  createLoopbackBinding, getHostBypass, HOST_BYPASS_KEY, listEvents, listInbox, openDb, readStoredHostBypass, recordDecisionModelCall,
+  type Db,
 } from "@pi-lead-child/store";
 import { startDaemon } from "../src/server.js";
 import { fakePiLead, type FakeCall, type FakeReply } from "./fake-pi-session.js";
@@ -195,6 +198,97 @@ describe("commands outside the sandbox through the daemon", () => {
       expect.objectContaining({ turnId: second, turnOrigin: "live_user_companion", via: "run_on_host", command: "echo step-three" }),
     ]);
   }, 45_000);
+
+  // 回归（2026-11-10，.scratch/tool-occupancy/spec.md L4）：免沙箱时 run_on_host 在前台下载 3.2 GB，不接收 signal。
+  // 红线到点中止这一步，命令照跑，这一轮被占了十几分钟。现在：调度器停下这一步（红线、抢占）时命令转后台，不杀；
+  // 用户 /stop 时杀掉进程组；超过软时限还没结束也转后台。转后台的命令结束时，输出作为一件事交给 Lead。
+  describe("a long host command while the user speaks", () => {
+    const savedSoft = process.env.PLC_LEAD_TOOL_SOFT_MS;
+    afterEach(() => {
+      if (savedSoft === undefined) delete process.env.PLC_LEAD_TOOL_SOFT_MS;
+      else process.env.PLC_LEAD_TOOL_SOFT_MS = savedSoft;
+    });
+    type Outcome = { text: string; ms: number };
+    // run_on_host 收到 pi 给的这一步的 signal；中止的原因由调度器给（deps.abortReason）。
+    const runStoppable = async (deps: any, command: string, stop: { afterMs: number; reason: unknown } | null): Promise<Outcome> => {
+      const tool = createLeadTools({ ...deps, abortReason: () => stop?.reason ?? null })
+        .find((candidate: any) => candidate.name === "run_on_host") as any;
+      const controller = new AbortController();
+      if (stop) setTimeout(() => controller.abort(), stop.afterMs);
+      const started = Date.now();
+      const result = await tool.execute("call", { command, cwd: dir, reason: "用户让我跑" }, controller.signal);
+      return { text: result.content.map((part: any) => part.text ?? "").join("\n"), ms: Date.now() - started };
+    };
+    async function speak(command: string, stop: { afterMs: number; reason: unknown } | null): Promise<Outcome> {
+      let outcome: Outcome | null = null;
+      let ran = false;
+      const { say, call } = await bootLead(async (fake, _live, deps) => {
+        if (!ran && fake.inputs.some((input) => input.includes("跑这条长命令"))) {
+          ran = true;
+          outcome = await runStoppable(deps, command, stop);
+        }
+        return { say: "好。" };
+      });
+      await call("/v1/lead/host-bypass/enable", {});
+      await say("msg-long-1", "跑这条长命令");
+      await vi.waitFor(() => expect(outcome).not.toBeNull(), { timeout: 40_000 });
+      return outcome!;
+    }
+    // 输出里才有的字（命令原文里没有）：作业结束的收件箱里有它，说明交回的是输出。
+    const jobOutput = (marker: string) => listInbox(db).find((row) => row.summary.includes(marker));
+
+    it("keeps the command running in the background when the scheduler stops the step, then hands its output to Lead", async () => {
+      const outcome = await speak("sleep 2; printf 'late%s' -done", { afterMs: 300, reason: { kind: "budget" } });
+      expect(outcome.ms).toBeLessThan(1_500);
+      expect(outcome.text).toContain("转到后台");
+      expect(outcome.text).toMatch(/作业 job_/);
+      await vi.waitFor(() => expect(jobOutput("late-done")).toBeDefined(), { timeout: 15_000 });
+      expect(JSON.parse(String(jobOutput("late-done")!.payload))).toMatchObject({ kind: "lead_job_finished", wakeLead: true });
+    }, 45_000);
+
+    it("stops the process group when the user stops the step", async () => {
+      const outcome = await speak("sleep 30", { afterMs: 300, reason: { kind: "user_stop" } });
+      expect(outcome.ms).toBeLessThan(8_000);
+      expect(outcome.text).toContain("停掉了");
+      const finished = listEvents(db, { kind: HOST_COMMAND_FINISHED_KIND }).map((event) => event.payload as any);
+      expect(finished).toHaveLength(1);
+      expect(finished[0].durationMs).toBeLessThan(8_000);
+      expect(finished[0].timedOut).toBe(false);
+    }, 45_000);
+
+    // 开发模式评估（2026-11-10）：插话要等到 20 秒软时限，命令转后台、这一步结束，插话才送到 Lead，回答要 15–18 秒。
+    // 用户插话本身就说明他在等：插话一到，能转后台的工具马上转后台，命令不停。
+    it("moves the command to the background as soon as the user steers in", async () => {
+      process.env.PLC_LEAD_TOOL_SOFT_MS = "10000";
+      let outcome: Outcome | null = null;
+      let ran = false;
+      const { say, call } = await bootLead(async (fake, _live, deps) => {
+        if (!ran && fake.inputs.some((input) => input.includes("跑这条长命令"))) {
+          ran = true;
+          outcome = await runStoppable(deps, "sleep 6; printf 'steer%s' -done", null);
+        }
+        return { say: "好。" };
+      });
+      await call("/v1/lead/host-bypass/enable", {});
+      await say("msg-steer-1", "跑这条长命令");
+      await vi.waitFor(() => expect(started().some((row) => String(row.command).includes("steer%s"))).toBe(true), { timeout: 15_000 });
+      await call("/v1/chat/send", { id: "msg-steer-2", message: "顺便问一下现在几点", mode: "steer" });
+      await vi.waitFor(() => expect(outcome).not.toBeNull(), { timeout: 20_000 });
+      const answer = outcome as unknown as Outcome;
+      expect(answer.ms).toBeLessThan(4_500);
+      expect(answer.text).toContain("插话");
+      expect(answer.text).toMatch(/作业 job_/);
+      await vi.waitFor(() => expect(jobOutput("steer-done")).toBeDefined(), { timeout: 20_000 });
+    }, 45_000);
+
+    it("moves a command that outlives the soft limit to the background", async () => {
+      process.env.PLC_LEAD_TOOL_SOFT_MS = "300";
+      const outcome = await speak("sleep 2; printf 'soft%s' -done", null);
+      expect(outcome.ms).toBeLessThan(1_500);
+      expect(outcome.text).toContain("转到后台");
+      await vi.waitFor(() => expect(jobOutput("soft-done")).toBeDefined(), { timeout: 15_000 });
+    }, 45_000);
+  });
 
   it("keeps sending the card in a turn that a Slack message woke", async () => {
     const slack = new FakeSlack({ users: { U0MALLORY: { name: "Mallory" } } });

@@ -29,6 +29,8 @@ import { credentialGuardExtension, knownSecretValues } from "./credential-guard.
 import { applyLeadCompactionReserve, leadAutoCompactionInstructions } from "./compaction-settings.js";
 import { costSignalsExtension } from "./cost-signals.js";
 import { installStepInterrupt } from "./step-interrupt.js";
+import { installToolAbortGuard } from "./tool-abort-guard.js";
+import type { LeadAbortReason } from "./scheduler/controller.js";
 import { compactionChunksExtension, type CompactionProgress } from "./compaction-chunks.js";
 import {
   getDesignPreferences, getLeadProfile, getReplyStyle, leadProfileFields, recordDecisionModelCall, renderCoreMemory, renderStandingOrdersForLead,
@@ -51,7 +53,7 @@ import { LEAD_CODEMODE_TOOL, LEAD_HAND_TOOLS, leadHandsExtension } from "./hands
 import { handbookGuardExtension } from "./handbook-guard.js";
 import { leadSchedulerExtension, type LeadSchedulerHooks } from "./scheduler/extension.js";
 import type { LeadHandoffDeps } from "./hand-off-tool.js";
-import type { LeadBackgroundJobs } from "./background-jobs.js";
+import type { ForegroundWaits, LeadBackgroundJobs } from "./background-jobs.js";
 import type { LeadSchedulerRuntime } from "./scheduler/runtime.js";
 import { idleLaneExtension, type IdleLaneRuntime } from "./scheduler/idle-runtime.js";
 import { TurnEvidence } from "./credibility/evidence.js";
@@ -230,6 +232,11 @@ export async function createLeadSession(opts: {
   handoff?: LeadHandoffDeps;
   // 长的只读命令转后台（lead-scheduler spec D6，P3）的出口：daemon 记下作业，结束时把输出交给 Lead。
   backgroundJobs?: LeadBackgroundJobs;
+  // 这一步被中止的原因（调度器的 controller 记着）。run_on_host 据此决定停掉命令还是转后台（.scratch/tool-occupancy/spec.md L4）。
+  abortReason?: () => LeadAbortReason | null;
+  // 用户插话时，正在等的 run_on_host 和只读的 bash 马上转后台（background-jobs.ts 的 ForegroundWaits）。
+  foregroundWaits?: ForegroundWaits;
+  log?: (line: string) => void;
 }): Promise<{
   session: LeadEngine; modelName: string; syncToolAccess: () => void; reloadExtensions: () => Promise<void>;
   models: string[]; switchModel: (spec: string) => Promise<void>; reportsInputDelivery: boolean; interruptStep: () => boolean;
@@ -431,6 +438,7 @@ export async function createLeadSession(opts: {
           ...(opts.turnOrigin ? { turnOrigin: opts.turnOrigin } : {}),
           ...(opts.currentTurnId ? { currentTurnId: opts.currentTurnId } : {}),
           ...(opts.backgroundJobs ? { backgroundJobs: opts.backgroundJobs } : {}),
+          ...(opts.foregroundWaits ? { foregroundWaits: opts.foregroundWaits } : {}),
           log: (line) => console.error(line),
         }),
       },
@@ -490,6 +498,9 @@ export async function createLeadSession(opts: {
     ...(opts.scheduleLeadModelRestart ? { scheduleLeadModelRestart: opts.scheduleLeadModelRestart } : {}),
     ...(opts.ticketActionHost ? { ticketActionHost: opts.ticketActionHost } : {}),
     ...(opts.handoff ? { handoff: opts.handoff } : {}),
+    ...(opts.backgroundJobs ? { backgroundJobs: opts.backgroundJobs } : {}),
+    ...(opts.abortReason ? { abortReason: opts.abortReason } : {}),
+    ...(opts.foregroundWaits ? { foregroundWaits: opts.foregroundWaits } : {}),
     ...(opts.uiActionServices ? { uiActionServices: opts.uiActionServices } : {}),
     ...(opts.pullRequestRunner ? { pullRequestRunner: opts.pullRequestRunner } : {}),
     ...(opts.ticketSummaries ? { ticketSummaries: opts.ticketSummaries } : {}),
@@ -533,6 +544,12 @@ export async function createLeadSession(opts: {
   session.setFollowUpMode("all");
   // 打断式插话（step-interrupt.ts）：在会话建好、还没开始第一轮时包上，每次对话循环的请求都带这一步自己的中止信号。
   const stepInterrupt = installStepInterrupt(session);
+  // 工具不听中止时，这一步也要停得下来（tool-abort-guard.ts，.scratch/tool-occupancy/spec.md L1）：包在 agent 的工具表上，
+  // 以后 SoL-Pi、扩展重载、授权变化换工具表时也包上。过了宽限还在跑的工具记成后台作业，结果以后交回 Lead。
+  installToolAbortGuard(session.agent, {
+    ...(opts.backgroundJobs ? { jobs: opts.backgroundJobs } : {}),
+    log: opts.log ?? ((line) => console.log(line)),
+  });
   // SoL-Pi 在 session_start 里注册它的工具和钩子。SDK 会话只在 bindExtensions 时发 session_start。
   await session.bindExtensions({
     onError: (error) => console.error(`[lead] extension ${error.extensionPath} ${error.event}: ${error.error}`),

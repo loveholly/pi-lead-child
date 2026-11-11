@@ -30,7 +30,7 @@ import { tildeHome } from "./home-paths.js";
 import { isLiveUserTurn } from "@pi-lead-child/engine";
 import { authorityTurnId, hostBypassActive, type LeadTurnOrigin, type TurnOriginDeps } from "./turn-origin.js";
 import {
-  bashSoftLimitMs, DEFAULT_BACKGROUND_JOB_MAX_SECONDS, newBackgroundJobId, runWithSoftLimit, type LeadBackgroundJobs,
+  bashSoftLimitMs, DEFAULT_BACKGROUND_JOB_MAX_SECONDS, newBackgroundJobId, runWithSoftLimit, type ForegroundWaits, type LeadBackgroundJobs,
 } from "./background-jobs.js";
 
 export const LEAD_HAND_TOOLS = ["bash", "edit", "write"] as const;
@@ -179,6 +179,8 @@ export interface LeadHandsOptions {
   backgroundJobs?: LeadBackgroundJobs;
   // 软时限（毫秒），缺省 PLC_LEAD_BASH_SOFT_MS 或 20 秒。测试用短的。
   bashSoftLimitMs?: number;
+  // 用户插话时，正在等的只读命令马上转后台（background-jobs.ts 的 ForegroundWaits）。
+  foregroundWaits?: ForegroundWaits;
 }
 
 /** 工具结果的第一段文字前面加一句。 */
@@ -239,6 +241,7 @@ export function leadHandsExtension(options: LeadHandsOptions): ExtensionFactory 
           const longCall = createBashToolDefinition(scratch, { operations: withDefaultTimeout(routed, DEFAULT_BACKGROUND_JOB_MAX_SECONDS) });
           const result = await runWithSoftLimit({
             softMs: options.bashSoftLimitMs ?? bashSoftLimitMs(), stepSignal: signal, jobs,
+            ...(options.foregroundWaits ? { waits: options.foregroundWaits } : {}),
             job: { id: newBackgroundJobId(), tool: "bash", command: String((params as { command?: unknown }).command ?? "").slice(0, 300), toolCallId },
             run: async (jobSignal) => {
               try {
