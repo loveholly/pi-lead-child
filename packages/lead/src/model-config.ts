@@ -342,6 +342,19 @@ async function providerCatalog(
         // 不是 CLIProxyAPI：没有详细目录。
       }
       const details = new Map<string, Record<string, unknown>>();
+      // magpie 没有详细目录，能力直接写在普通目录的每一项里（modalities.input、display_name、context_window、
+      // max_output_tokens，2026-11-05）：先拿普通目录当详细信息，详细目录有的再覆盖。
+      for (const item of payload.data) {
+        if (!isRecord(item) || typeof item.id !== "string" || !item.id.trim()) continue;
+        const modalities = isRecord(item.modalities) ? item.modalities.input : undefined;
+        // 推理强度不拿：Lead 把强度写成 id 后面的 (level) 后缀，magpie 不认（「knows no model」），只有详细目录（vibeproxy）给的才算。
+        const { supported_reasoning_levels: _levels, default_reasoning_level: _default, ...rest } = item;
+        details.set(item.id.trim(), {
+          ...rest,
+          ...(item.input_modalities === undefined && modalities !== undefined ? { input_modalities: modalities } : {}),
+          ...(item.max_tokens === undefined && item.max_output_tokens !== undefined ? { max_tokens: item.max_output_tokens } : {}),
+        });
+      }
       for (const item of rich) {
         if (isRecord(item) && typeof item.slug === "string" && item.visibility !== "hide") details.set(item.slug.trim(), item);
       }
@@ -367,7 +380,7 @@ async function providerCatalog(
           created: created.get(id) ?? null,
         }));
       }
-      note = `${name}: discovered ${owners.size} model(s) from ${provider.baseUrl}${details.size ? ` (${details.size} with details)` : ""}`;
+      note = `${name}: discovered ${owners.size} model(s) from ${provider.baseUrl}${rich.length ? ` (${rich.length} with details)` : ""}`;
     } catch (error) {
       if (byId.size === 0) throw error;
       note = `${name}: discover failed, using ${byId.size} configured model(s): ${String(error)}`;
