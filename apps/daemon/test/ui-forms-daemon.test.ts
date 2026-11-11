@@ -91,14 +91,24 @@ const formCard = {
 
 // 数据目录里所有的文件（数据库、WAL、config.json、日志……）原样读成文字。
 function dataDirText(): string {
-  const read = (path: string): string => {
+  // One unreadable entry (a socket, or a file removed mid-walk) must not blank out the whole directory.
+  const readFile = (path: string): string => {
     try {
-      return readdirSync(path, { withFileTypes: true })
-        .map((entry) => (entry.isDirectory() ? read(join(path, entry.name)) : readFileSync(join(path, entry.name)).toString("latin1")))
-        .join("\n");
+      return readFileSync(path).toString("latin1");
     } catch {
       return "";
     }
+  };
+  const read = (path: string): string => {
+    let entries;
+    try {
+      entries = readdirSync(path, { withFileTypes: true });
+    } catch {
+      return "";
+    }
+    return entries
+      .map((entry) => (entry.isDirectory() ? read(join(path, entry.name)) : readFile(join(path, entry.name))))
+      .join("\n");
   };
   return read(dir);
 }
