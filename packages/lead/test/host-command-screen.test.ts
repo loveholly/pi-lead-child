@@ -131,12 +131,12 @@ describe("五条底线", () => {
 describe("读不懂的写法返回 unknown", () => {
   it("每种写法一例", () => {
     check([
-      ["echo $(whoami)", "unknown", "command-substitution"],
+      ["rm -rf \"$(whoami)\"", "unknown", "dynamic-word"],
       ["echo `whoami`", "unknown", "command-substitution"],
       ["eval \"ls -la\"", "unknown", "eval"],
       ["find . -name '*.log' | xargs rm", "unknown", "xargs"],
       ["bash -c 'ls -la'", "unknown", "inline-code"],
-      ["cat <<EOF\nhello\nEOF", "unknown", "heredoc"],
+      ["bash <<EOF\nhello\nEOF", "unknown", "heredoc"],
       ["sudo ls", "unknown", "privilege-escalation"],
       ["osascript -e 'tell application \"Finder\" to quit'", "unknown", "inline-code"],
     ]);
@@ -160,8 +160,8 @@ describe("读不懂的写法返回 unknown", () => {
 
 describe("四条保守规则", () => {
   it("每条一个正例，结果都不是 allow", () => {
-    const longCommand = `echo ${"a".repeat(396)}`;
-    expect(longCommand).toHaveLength(401);
+    const longCommand = `echo ${"a".repeat(19_996)}`;
+    expect(longCommand).toHaveLength(20_001);
     check([
       ["sudo ls", "unknown", "privilege-escalation"],
       ["echo x >> ~/.zshrc", "floor", "startup-file-write"],
@@ -179,6 +179,76 @@ describe("四条保守规则", () => {
       ["cp a.txt <worktree>/b.txt", "allow", null],
       [`echo ${"a".repeat(395)}`, "allow", null],
     ]);
+  });
+});
+
+// 回归（2026-11-11）：免沙箱开着、用户本人发话的一轮里，推 PR 的 git 命令超过 400 个字或者带 $(…)，筛查器给 unknown，
+// 命令退回没有 git 凭据的沙箱，推送失败。现在 $(…) 里的命令逐条筛查，git、gh 的说明文字类参数可以是它的值；长度只受
+// 筛查器能读的上限限制（卡上的 400 字只管要发卡的命令）。
+describe("长命令和命令替换（$(…)）", () => {
+  const commitMessage = `fix(lead): keep the user's follow-up turn (and don't drop it)\n\n${"Explain the change. ".repeat(30)}`;
+
+  it("超过 400 个字的 git 命令照常筛查，放行", () => {
+    const push = `git add -A && git commit -m '${commitMessage.replace(/'/g, "")}' && git push origin HEAD`;
+    expect(push.length).toBeGreaterThan(400);
+    check([[push, "allow", null]]);
+  });
+
+  it("git commit 和 gh pr create 的说明文字来自 $(cat <<'EOF' …)：正文里的括号和撇号不影响", () => {
+    check([
+      [`git commit -m "$(cat <<'EOF'\n${commitMessage}\nEOF\n)"`, "allow", null],
+      [`gh pr create --title "Fix bypass" --body "$(cat <<'EOF'\n## Summary\n- it's (finally) fixed\nEOF\n)"`, "allow", null],
+      [`git push origin "$(git rev-parse --abbrev-ref HEAD)"`, "allow", null],
+      [`git -c user.name="$(git log -1 --format=%an)" commit -m "x"`, "allow", null],
+      [`git rev-list --count "$(git merge-base origin/master HEAD)"..HEAD`, "allow", null],
+      [`gh pr view "$(git branch --show-current)" --json url`, "allow", null],
+      [`BRANCH=$(git branch --show-current) && echo "on $BRANCH"`, "allow", null],
+      [`echo "files: $(git status --porcelain | wc -l)"`, "allow", null],
+    ]);
+  });
+
+  it("$(…) 里的命令按同样的规则筛查：里面碰到底线时照样拦", () => {
+    check([
+      [`git commit -m "$(cat ~/.ssh/id_ed25519)"`, "floor", "credentials"],
+      [`echo "$(security find-generic-password -s example)"`, "floor", "credentials"],
+      [`git commit -m "$(rm -rf ~/Documents)"`, "floor", "delete-outside-roots"],
+      [`echo "$(sudo ls)"`, "unknown", "privilege-escalation"],
+      [`echo "$(echo \`whoami\`)"`, "unknown", "command-substitution"],
+    ]);
+  });
+
+  it("不知道的值不能当路径用：删除、读写文件、不在引号里、跑命令的配置照样 unknown", () => {
+    check([
+      [`rm -rf "$(git rev-parse --show-toplevel)"`, "unknown", "dynamic-word"],
+      [`cat "$(git rev-parse --show-toplevel)/x"`, "unknown", "dynamic-word"],
+      [`git commit -F "$(git rev-parse --show-toplevel)/msg"`, "unknown", "dynamic-word"],
+      [`git diff --no-index "$(git rev-parse --show-toplevel)" /tmp/x`, "unknown", "dynamic-word"],
+      [`git clean -fd "$(git rev-parse --show-toplevel)"`, "unknown", "dynamic-word"],
+      [`git push origin $(git branch --show-current)`, "unknown", "dynamic-word"],
+      [`git -c core.sshCommand="$(echo ssh)" push`, "unknown", "dynamic-word"],
+      [`gh release create v1 "$(git rev-parse --show-toplevel)/notes.md"`, "unknown", "dynamic-word"],
+      [`gh issue create --body-file "$(git rev-parse --show-toplevel)/x"`, "unknown", "dynamic-word"],
+      [`echo hi > "$(git rev-parse --show-toplevel)/x"`, "unknown", "dynamic-word"],
+      [`echo $((1 + 2))`, "unknown", "shell-construct"],
+    ]);
+  });
+
+  it("heredoc 只给把它当数据读的程序；正文没有结束标记、不带引号的正文里有命令替换时 unknown", () => {
+    check([
+      ["cat <<EOF\nhello\nEOF", "allow", null],
+      ["python3 <<'EOF'\nprint(1)\nEOF", "unknown", "heredoc"],
+      ["cat <<EOF\n$(whoami)\nEOF", "unknown", "heredoc"],
+      ["cat <<'EOF'\n$(whoami)\nEOF", "allow", null],
+      ["cat <<EOF\nno end", "unknown", "unterminated"],
+      [`git commit -m "$(cat <<'EOF'\nno end\n)"`, "unknown", "unterminated"],
+    ]);
+  });
+
+  it("不放行时的原因写明是哪一段", () => {
+    const unquoted = screen("git push origin $(git branch --show-current)");
+    expect(screenReason(unquoted, "zh")).toBe("筛查器不知道 $(…)（没有加双引号） 的值。");
+    const inner = screen(`git commit -m "$(cat ~/.ssh/id_ed25519)"`);
+    expect(screenReason(inner, "zh")).toMatch(/命令会读凭证/);
   });
 });
 

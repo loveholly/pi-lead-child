@@ -21,6 +21,8 @@ import { UiActionError } from "./types.js";
 export const HOST_COMMAND_LIMITS = {
   // 卡上能完整显示的长度（RULE_CHANGE_CONFIRMATION_LIMITS.value）：用户看不全的命令不能让他确认。
   command: 400,
+  // 免沙箱直接跑的命令（不发卡）能有多长：筛查器读得了整条命令就行，不受卡上的长度限制（工单 #324）。
+  screenedCommand: 20_000,
   defaultTimeoutSeconds: 120,
   maxTimeoutSeconds: 1_800,
   // 存下的输出最多这么多字节，多的截掉并写明。
@@ -37,15 +39,22 @@ export interface HostCommandInput {
   spends_money?: true;
 }
 
-/** 存下的参数（Lead 给的）：命令、在哪个目录跑、最多跑多久。不对时报 invalid_input。 */
-export function hostCommandInputOf(input: unknown): HostCommandInput {
+/** 命令比 limit 长时给 Lead 的话：写成 lead-scratch 里的脚本。 */
+export function commandTooLongForCard(limit: number): string {
+  return limit === HOST_COMMAND_LIMITS.command
+    ? `命令超过 ${limit} 个字符，卡上显示不全。把它写进 Lead 临时目录里的一个脚本，命令写成 bash <脚本路径>`
+    : `命令超过 ${limit} 个字符。把它写进 Lead 临时目录里的一个脚本，命令写成 bash <脚本路径>`;
+}
+
+/**
+ * 存下的参数（Lead 给的）：命令、在哪个目录跑、最多跑多久。不对时报 invalid_input。
+ * maxCommand：命令最长多少字。缺省是卡上能完整显示的长度；免沙箱直接跑、不发卡时，调用方给 screenedCommand。
+ */
+export function hostCommandInputOf(input: unknown, maxCommand: number = HOST_COMMAND_LIMITS.command): HostCommandInput {
   const raw = (input && typeof input === "object" ? input : {}) as Record<string, unknown>;
   const command = typeof raw.command === "string" ? raw.command.trim() : "";
   if (!command) throw new UiActionError("invalid_input", "要写 command");
-  if (command.length > HOST_COMMAND_LIMITS.command) {
-    throw new UiActionError("invalid_input",
-      `命令超过 ${HOST_COMMAND_LIMITS.command} 个字符，卡上显示不全。把它写进 Lead 临时目录里的一个脚本，命令写成 bash <脚本路径>`);
-  }
+  if (command.length > maxCommand) throw new UiActionError("invalid_input", commandTooLongForCard(maxCommand));
   const cwd = typeof raw.cwd === "string" && raw.cwd.trim() ? raw.cwd.trim() : process.env.HOME ?? "/";
   if (!isAbsolute(cwd)) throw new UiActionError("invalid_input", "cwd 要写绝对路径");
   const timeout = typeof raw.timeout_seconds === "number" && Number.isFinite(raw.timeout_seconds)

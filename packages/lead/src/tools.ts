@@ -32,7 +32,8 @@ import {
 } from "@pi-lead-child/store";
 import { listWatches, watchOrigin, WatchInputError, WATCH_LIMITS, type WatchAgentChoice } from "@pi-lead-child/store";
 import {
-  checkRepositoryAccess, describeWatchSchedule, findRepositoryCheckout, HOST_COMMAND_LIMITS, hostCommandInputOf, isLiveUserTurn,
+  checkRepositoryAccess, commandTooLongForCard, describeWatchSchedule, findRepositoryCheckout, HOST_COMMAND_LIMITS, hostCommandInputOf,
+  isLiveUserTurn,
   parseRepositorySpec, recordTicketRepository, recordTicketRepositoryClone, runRecordedHostCommand, startRepositoryClone, workspaceRepository,
   type RepositoryCheckout,
 } from "@pi-lead-child/engine";
@@ -3159,11 +3160,14 @@ export function createLeadTools(deps: LeadDeps): ToolDefinition<any>[] {
         + `和他的终端一样；不超过 ${HOST_COMMAND_LIMITS.command} 个字符（卡上要能看全），长的先写成你临时目录里的脚本，命令写 bash <脚本>。`
         + "cwd 是绝对路径（缺省是 home）。reason 写清为什么要跑、为什么沙箱里做不了，会显示在卡上。"
         + "通常结果是一张确认卡（user_action）：用 render_ui 发给用户；用户确认后命令才跑，跑完以后结果进你的收件箱。"
-        + "用户在设置里打开了免沙箱、而且这是用户本人发话的一轮时，命令马上跑：20 秒内跑完的，结果直接给你；"
+        + "用户在设置里打开了免沙箱、而且这是用户本人发话的一轮或者用户让你设的跟进到点的一轮时，命令马上跑：20 秒内跑完的，结果直接给你；"
         + "跑得更久的（下载、升级）转到后台，你拿到作业编号，命令结束时系统叫醒你、把输出交给你，这期间你可以接着处理别的消息。"
         + "timeout_seconds 是命令最多跑多久，到点停掉。完整输出在你的临时目录里。",
       parameters: Type.Object({
-        command: Type.String({ minLength: 1, maxLength: HOST_COMMAND_LIMITS.command }),
+        command: Type.String({
+          minLength: 1, maxLength: HOST_COMMAND_LIMITS.screenedCommand,
+          description: `发确认卡时最多 ${HOST_COMMAND_LIMITS.command} 个字符；免沙箱直接跑时可以更长。`,
+        }),
         cwd: Type.Optional(Type.String()),
         timeout_seconds: Type.Optional(Type.Integer({ minimum: 1, maximum: HOST_COMMAND_LIMITS.maxTimeoutSeconds })),
         reason: Type.String({ minLength: 1, maxLength: 1000 }),
@@ -3174,8 +3178,9 @@ export function createLeadTools(deps: LeadDeps): ToolDefinition<any>[] {
         params: { command: string; cwd?: string; timeout_seconds?: number; reason: string; spends_money?: boolean },
         signal?: AbortSignal,
       ) => {
-        const input = hostCommandInputOf(params);
-        // 免沙箱开着、用户本人正在发话、没读过外部内容、筛查器放行时直接跑，不发卡（docs/ticket-246-user-turn-bypass.md 3.1）。
+        // 免沙箱直接跑时不发卡，命令可以比卡上能显示的长；要发卡时再按卡的长度查（下面）。
+        const input = hostCommandInputOf(params, HOST_COMMAND_LIMITS.screenedCommand);
+        // 免沙箱开着、用户的一轮（本人正在发话，或者用户让 Fairy 设的跟进到点）、没读过外部内容、筛查器放行时直接跑，不发卡（docs/ticket-246-user-turn-bypass.md 3.1）。
         const route = hostCommandRoute(db, deps, {
           command: input.command, cwd: input.cwd, via: "run_on_host", spendsMoney: input.spends_money === true, dataDir: deps.dataDir,
         });
@@ -3185,7 +3190,7 @@ export function createLeadTools(deps: LeadDeps): ToolDefinition<any>[] {
           const run = async (jobSignal: AbortSignal | undefined) => {
             const result = await runRecordedHostCommand(db, input, route.record, { dataDir: deps.dataDir, run: route.run, signal: jobSignal });
             return {
-              ...text(`${HOST_RUN_MARK}免沙箱开着，这是用户本人发话的一轮：命令直接跑了，没有发确认卡。退出码 ${result.exitCode ?? "未知"}。\n${result.text}`),
+              ...text(`${HOST_RUN_MARK}免沙箱开着，这是用户的一轮：命令直接跑了，没有发确认卡。退出码 ${result.exitCode ?? "未知"}。\n${result.text}`),
               details: {
                 exitCode: result.exitCode, timedOut: result.timedOut, aborted: result.aborted, outputPath: result.outputPath,
               } as Record<string, unknown>,
@@ -3203,6 +3208,9 @@ export function createLeadTools(deps: LeadDeps): ToolDefinition<any>[] {
           const details = result.details as { backgroundJob?: string } | undefined;
           if (!details?.backgroundJob) return result as Awaited<ReturnType<typeof run>>;
           return { ...text(`${HOST_RUN_MARK}${toolResultText(result)}`), details: details as Record<string, unknown> };
+        }
+        if (input.command.length > HOST_COMMAND_LIMITS.command) {
+          throw new Error(commandTooLongForCard(HOST_COMMAND_LIMITS.command) + (route.why ? `。免沙箱开着，但这一次没有直接跑：${route.why}` : ""));
         }
         const card = authorizationCardResult(db, deps, {
           tool: "run_on_host", code: "needs_authorization", input,

@@ -24,7 +24,9 @@
 //      （engine 的 external-content.ts），还没登记成 UI 动作的工具（改常设指令）用 ruleChangeRefusal。拒绝时系统存下这一个
 //      操作，结果里带着确认卡的 user_action：用户在卡上点「确认这一次」以后，系统只执行这一个操作
 //      （engine 的 rule-change-confirmations.ts，工单 09）。
-import { activePairedUserTurn, CORE_KINDS, getBinding, getHostBypass, type Db, type NoteKind, type PairedUserTurn } from "@pi-lead-child/store";
+import {
+  activePairedUserTurn, CORE_KINDS, getBinding, getHostBypass, SCHEDULED_TURN_PREFIX, type Db, type NoteKind, type PairedUserTurn,
+} from "@pi-lead-child/store";
 import { bindingOriginOf, type HostCommandTurnOrigin, type Scope, type TimerOrigin } from "@pi-lead-child/protocol";
 import {
   externalTimerOriginOf, externalTurnWhy, isLiveUserTurn, leadUserTurnOf, requestExternalTimer, requestRuleChangeConfirmation,
@@ -154,8 +156,9 @@ export function ruleChangeRefusal(
   };
 }
 
-// 免沙箱（docs/ticket-246-user-turn-bypass.md 3.1、3.2，实施单 C）。和改规则的拒绝用同一份数据：这一轮是不是用户本人
-// 正在说话（isLiveUserTurn）、这一轮带没带外部内容（externalContentOf）。不同的是读过外部内容以后用户本人的一轮也不放开
+// 免沙箱（docs/ticket-246-user-turn-bypass.md 3.1、3.2，实施单 C）。和改规则的拒绝用同一份数据：这一轮是不是用户的一轮
+// （activePairedUserTurn）、这一轮带没带外部内容（externalContentOf）。和改规则不同的有两点：用户让 Fairy 设的跟进到点的一轮
+// 也能免沙箱（改规则只认用户本人正在说话的一轮）；读过外部内容以后用户本人的一轮也不放开
 // （沿用 2.3 的「收紧」档）：在沙箱外跑错的命令改不回来，而注入的路正是「用户让 Fairy 读 Slack，Slack 里写着请运行 X」。
 // 每一次 bash、run_on_host 调用都重新算：同一轮里 externalBy 会变，开关也可能被关掉。
 export type HostBypassDecision =
@@ -172,18 +175,25 @@ function liveTurnOrigin(db: Db, bindingId: number): HostCommandTurnOrigin {
   return origin === "cli" ? "live_user_plc" : "live_user_companion";
 }
 
+const NOT_USER_TURN_WHY = "这一轮不是用户的一轮（Fairy 自己设的跟进、提醒、外部消息或系统叫醒的），"
+  + "免沙箱只在用户本人发话的一轮和用户让 Fairy 设的跟进到点的一轮生效";
+
 /**
- * 这一次能不能在沙箱外跑：开关开着、用户本人正在说话的一轮（Slack 里给自己发的私信开的一轮也算，3.3）、
- * 这一轮没有外部内容。不能时给出原因。
+ * 这一次能不能在沙箱外跑：开关开着、用户的一轮、这一轮没有外部内容。不能时给出原因。
+ * 用户的一轮有两种：用户本人正在说话的一轮（Slack 里给自己发的私信开的一轮也算，3.3），和用户让 Fairy 设的跟进到点、
+ * 只为它开的一轮（timer:<编号>，用户 2026-11-11：「我不是给你设置了 bypass 吗，如果 bypass 都还要我审批，那 bypass 有啥意义呢」）。
+ * 跟进到点的一轮记成设它那一轮的凭证来源（live_user_*），turnId 是 timer:<编号>。改规则仍然不认跟进到点的一轮（规则 4）。
  */
 export function hostBypassActive(db: Db, deps: TurnOriginDeps, now: Date = new Date()): HostBypassDecision {
   if (!getHostBypass(db, now).enabled) return { active: false, code: "off", why: null };
-  const turnId = authorityTurnId(deps);
-  if (!turnId || !isLiveUserTurn(db, turnId, "tickets:create")) {
-    return {
-      active: false, code: "not_user_turn",
-      why: "这一轮不是用户本人正在发话的一轮（定时器、跟进到点、外部消息或系统叫醒的），免沙箱只在用户本人发话的那一轮生效",
-    };
+  const origin = turnOriginOf(deps);
+  // 跟进到点的一轮读了外部内容以后，authorityTurnId 不再给 timer:<编号>；这里照样认出它，原因写成读了外部内容。
+  const turnId = authorityTurnId(deps) ?? (origin.timer !== null ? `${SCHEDULED_TURN_PREFIX}${origin.timer}` : null);
+  let user: PairedUserTurn;
+  try {
+    user = activePairedUserTurn(db, turnId, "host_bypass", "tickets:create");
+  } catch {
+    return { active: false, code: "not_user_turn", why: NOT_USER_TURN_WHY };
   }
   const sources = externalContentOf(deps);
   if (sources !== null) {
@@ -192,13 +202,7 @@ export function hostBypassActive(db: Db, deps: TurnOriginDeps, now: Date = new D
       why: `${externalTurnWhy(sources)}，从那以后这一轮的命令不在沙箱外跑。用户在新的一条消息里再说一句，新的一轮又能免沙箱`,
     };
   }
-  let user: PairedUserTurn;
-  try {
-    user = activePairedUserTurn(db, turnId, "host_bypass", "tickets:create");
-  } catch {
-    return { active: false, code: "not_user_turn", why: "这一轮不是用户本人正在发话的一轮，免沙箱只在用户本人发话的那一轮生效" };
-  }
-  return { active: true, turnId, turnOrigin: liveTurnOrigin(db, user.origin_binding_id) };
+  return { active: true, turnId: user.id, turnOrigin: liveTurnOrigin(db, user.origin_binding_id) };
 }
 
 /**

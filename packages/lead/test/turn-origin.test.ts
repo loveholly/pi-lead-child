@@ -244,17 +244,43 @@ describe("hostBypassActive", () => {
     expect(hostBypassActive(db, deps)).toMatchObject({ active: false, code: "external_content" });
   });
 
-  it("stays off in system turns, a follow-up's turn, an external message's turn, a finished turn and after the end time", () => {
+  // 回归（2026-11-11）：用户让 Fairy 设的跟进到点、只为它开的一轮，系统说它「算用户的一轮」，免沙箱却一律不生效，
+  // 推 PR 和推 master 攒成了确认卡。现在它和用户本人发话的一轮一样：记成设它那一轮的凭证来源，turnId 是 timer:<编号>。
+  it("is on in the turn of a follow-up the user set, recorded with the setter's credential", () => {
+    turnOn();
+    const bindingId = userTurn("turn-set");
+    const followUp = addLeadFollowUp(db, {
+      at: new Date(Date.now() - 1_000), note: "推 PR",
+      setBy: { turnId: "turn-set", bindingId, startedAt: new Date().toISOString() },
+    });
+    completeTurn(db, "turn-set");
+    origin = { external: false, timer: followUp };
+    expect(hostBypassActive(db, deps)).toEqual({ active: true, turnId: `timer:${followUp}`, turnOrigin: "live_user_companion" });
+    // 那一轮读了外部内容以后照样退回，原因写读了什么。
+    origin = withExternalContent(origin, { via: "tool", tool: "call_connection_tool" });
+    const decision = hostBypassActive(db, deps);
+    expect(decision).toMatchObject({ active: false, code: "external_content" });
+    expect(decision.active ? "" : decision.why).toContain("call_connection_tool");
+    // 和外部消息混在同一轮时也不算。
+    origin = { external: true, timer: followUp, externalBy: [{ via: "message", source: "slack" }], externalEvents: [7] };
+    expect(hostBypassActive(db, deps)).toMatchObject({ active: false, code: "external_content" });
+  });
+
+  it("stays off in system turns, Fairy's own follow-up, an external message's turn, a finished turn and after the end time", () => {
     turnOn();
     // 系统回合（定时器、通知、心跳、摘要、子 agent 交回）：没有 channel turn。
     expect(hostBypassActive(db, deps)).toMatchObject({ active: false, code: "not_user_turn" });
-    // 用户设的跟进到点的一轮：timer:<编号>。
+    // Fairy 自己设的跟进到点的一轮：没有 setBy，不算用户的一轮。
+    const own = addLeadFollowUp(db, { at: new Date(Date.now() - 1_000), note: "我自己看一下" });
+    origin = { external: false, timer: own };
+    expect(hostBypassActive(db, deps)).toMatchObject({ active: false, code: "not_user_turn" });
+    // 还没到点的、取消了的跟进也不算。
     const bindingId = userTurn("turn-set");
-    const followUp = addLeadFollowUp(db, {
-      at: new Date(Date.now() - 1_000), note: "看一下",
+    const notDue = addLeadFollowUp(db, {
+      at: new Date(Date.now() + 60_000), note: "以后",
       setBy: { turnId: "turn-set", bindingId, startedAt: new Date().toISOString() },
     });
-    origin = { external: false, timer: followUp };
+    origin = { external: false, timer: notDue };
     expect(hostBypassActive(db, deps)).toMatchObject({ active: false, code: "not_user_turn" });
     // 外部消息叫醒的一轮。
     origin = { external: true, timer: null, externalBy: [{ via: "message", source: "slack" }], externalEvents: [7] };
@@ -324,7 +350,7 @@ describe("run_on_host with the sandbox bypass on", () => {
     turnId = "turn-screen";
     for (const [params, rule] of [
       [{ command: "security find-generic-password -s x" }, "credentials"],
-      [{ command: "echo $(whoami)" }, "command-substitution"],
+      [{ command: "ls \"$(whoami)\"" }, "dynamic-word"],
       [{ command: "sudo ls" }, "privilege-escalation"],
       [{ command: "echo ok", spends_money: true }, "spends-money"],
     ] as const) {
@@ -335,6 +361,45 @@ describe("run_on_host with the sandbox bypass on", () => {
       expect(body.refusal.message, rule).toContain("命令筛查没有放行");
     }
     expect(hostEvents("started")).toEqual([]);
+  });
+
+  // 回归（2026-11-11）：跟进到点的一轮里推 PR，run_on_host 每次都发卡。
+  it("runs the command at once in the turn of a follow-up the user set", async () => {
+    turnOn();
+    const bindingId = userTurn("turn-set");
+    const followUp = addLeadFollowUp(db, {
+      at: new Date(Date.now() - 1_000), note: "推 PR",
+      setBy: { turnId: "turn-set", bindingId, startedAt: new Date().toISOString() },
+    });
+    completeTurn(db, "turn-set");
+    origin = { external: false, timer: followUp };
+    const result = await tool("run_on_host").execute("t", { command: "echo from-follow-up", cwd: deps.dataDir, reason: "test" });
+    expect(result.isError).toBeFalsy();
+    expect(result.content[0].text).toMatch(/^（沙箱外）/);
+    expect(result.content[0].text).toContain("from-follow-up");
+    expect(cards()).toEqual([]);
+    expect(hostEvents("started")[0]?.payload).toMatchObject({
+      turnId: `timer:${followUp}`, turnOrigin: "live_user_companion", via: "run_on_host", confirmationId: null,
+    });
+  });
+
+  // 回归（2026-11-11）：超过 400 个字、带 $(…) 的命令以前被筛查器退回。直接跑时不发卡，不受卡上 400 字的限制。
+  it("runs a long command with $(…) at once, and asks for a script only when it would need a card", async () => {
+    turnOn();
+    userTurn("turn-long");
+    turnId = "turn-long";
+    const command = `echo "$(echo long-${"x".repeat(450)})"`;
+    expect(command.length).toBeGreaterThan(400);
+    const result = await tool("run_on_host").execute("t", { command, cwd: deps.dataDir, reason: "test" });
+    expect(result.isError).toBeFalsy();
+    expect(result.content[0].text).toMatch(/^（沙箱外）/);
+    expect(result.content[0].text).toContain("long-xxx");
+    expect(hostEvents("started")[0]?.payload).toMatchObject({ screen: { verdict: "allow", rule: null } });
+    // 要发卡时（这一轮读过外部内容）还是 400 个字：卡上要显示整条命令。
+    origin = withExternalContent(origin, { via: "tool", tool: "read_channel_conversation" });
+    await expect(tool("run_on_host").execute("t", { command, cwd: deps.dataDir, reason: "test" }))
+      .rejects.toThrow(/命令超过 400 个字符，卡上显示不全/);
+    expect(cards()).toEqual([]);
   });
 
   it("sends the confirm card as before when the switch is off, without a bypass reason", async () => {

@@ -10,7 +10,9 @@ import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-work
 import { createAgentSession, DefaultResourceLoader, SessionManager, SettingsManager } from "@earendil-works/pi-coding-agent";
 import { tempDir } from "@pi-lead-child/core/testing";
 import { HOST_COMMAND_STARTED_KIND } from "@pi-lead-child/protocol";
-import { channelOwnerBinding, createLoopbackBinding, createTurn, listEvents, openDb, type Db } from "@pi-lead-child/store";
+import {
+  addLeadFollowUp, channelOwnerBinding, completeTurn, createLoopbackBinding, createTurn, listEvents, openDb, type Db,
+} from "@pi-lead-child/store";
 import { enableHostBypass, resetSandboxForTests } from "@pi-lead-child/engine";
 import { credentialGuardExtension } from "../src/credential-guard.js";
 import { HOST_RUN_MARK, leadHandsExtension } from "../src/hands.js";
@@ -130,7 +132,7 @@ describe("bash with the sandbox bypass on", () => {
   it("falls back to the sandbox and says why when the screen says unknown or the command spends money", async () => {
     turnOn();
     companionTurn("turn-screen");
-    const ends = await session([bash("echo $(echo nested)"), bash("echo pay", { spends_money: true })]);
+    const ends = await session([bash("ls \"$(echo nested)\""), bash("echo pay", { spends_money: true })]);
     for (const end of ends) expect(end.text).toMatch(/^（沙箱里：免沙箱开着，但这一次没有用——命令筛查没有放行/);
     expect(ends[0]?.text).toContain("unknown");
     expect(ends[1]?.text).toContain("floor");
@@ -138,10 +140,39 @@ describe("bash with the sandbox bypass on", () => {
     expect(started()).toEqual([]);
   }, 90_000);
 
+  // 回归（2026-11-11）：用户让 Fairy 设的跟进到点的一轮里，bash 一律退回沙箱，推 PR 没有 git 凭据。
+  it("runs outside the sandbox in the turn of a follow-up the user set", async () => {
+    turnOn();
+    const { binding } = createLoopbackBinding(db, { name: "Mac 网页" });
+    createTurn(db, { id: "turn-set", originBindingId: binding.id, originKind: "paired:companion", userText: "…", state: "streaming" });
+    const followUp = addLeadFollowUp(db, {
+      at: new Date(Date.now() - 1_000), note: "推 PR",
+      setBy: { turnId: "turn-set", bindingId: binding.id, startedAt: new Date().toISOString() },
+    });
+    completeTurn(db, "turn-set");
+    origin = { external: false, timer: followUp };
+    const ends = await session([bash("echo from-follow-up")]);
+    expect(ends[0]?.text.startsWith(HOST_RUN_MARK)).toBe(true);
+    expect(wrap).not.toHaveBeenCalled();
+    expect(started()[0]).toMatchObject({ turnId: `timer:${followUp}`, turnOrigin: "live_user_companion", via: "bash" });
+  }, 90_000);
+
+  // 回归（2026-11-11）：超过 400 个字或者带 $(…) 的 git 命令退回沙箱。
+  it("runs a long command with $(…) outside the sandbox in the user's own turn", async () => {
+    turnOn();
+    companionTurn("turn-long");
+    const command = `echo "$(echo long-${"x".repeat(450)})"`;
+    expect(command.length).toBeGreaterThan(400);
+    const ends = await session([bash(command)]);
+    expect(ends[0]?.text.startsWith(HOST_RUN_MARK)).toBe(true);
+    expect(ends[0]?.text).toContain("long-xxx");
+    expect(wrap).not.toHaveBeenCalled();
+  }, 90_000);
+
   it("keeps a system turn in the sandbox", async () => {
     turnOn();
     const ends = await session([bash("echo system-turn")]);
-    expect(ends[0]?.text).toMatch(/^（沙箱里：免沙箱开着，但这一次没有用——这一轮不是用户本人正在发话的一轮/);
+    expect(ends[0]?.text).toMatch(/^（沙箱里：免沙箱开着，但这一次没有用——这一轮不是用户的一轮/);
     expect(ends[0]?.text).toContain("system-turn");
     expect(wrap).toHaveBeenCalledTimes(1);
     expect(started()).toEqual([]);

@@ -4,8 +4,11 @@
 //
 // 怎么读一条命令（4.1）：
 //   1. 按 shell 的词法拆：;、&&、||、|、&、换行和括号分开简单命令，每个简单命令取程序名和参数，去掉引号。
-//   2. 读不懂的写法直接 unknown：$(…)、反引号、进程替换；eval、exec、source、.；xargs；bash -c 这类直接写代码的；
-//      heredoc；sudo、su、doas；程序名或参数的值来自筛查器不知道的变量。
+//   2. 读不懂的写法直接 unknown：反引号、进程替换、$((…))；eval、exec、source、.；xargs；bash -c 这类直接写代码的；
+//      sudo、su、doas；程序名或参数的值来自筛查器不知道的变量或者 $(…)。
+//      两处放宽（用户 2026-11-11：「推个 PR 都这么谨慎的吗」）：$(…) 里的命令逐条按同样的规则筛查，它的值按不知道算，
+//      只在 echo、printf 和 git、gh 的文字参数里放行（unreadableDynamicArg）；heredoc 的正文是标准输入，只给把它当数据读的
+//      程序（HEREDOC_READERS）。命令的长度只受 screenedCommand 限制：直接跑的命令不发卡，不受卡上 400 字的限制。
 //   3. bash <脚本>：脚本在 lead-scratch 下的，读出内容逐行同样筛查，结果里带上内容；执行的一方用 copyScreenedScripts
 //      写成副本再跑副本，筛查和执行是同一份内容。脚本在别处的 unknown。
 //   4. 路径先展开 ~、按 cwd 解析相对路径（cd 会改后面命令的 cwd），再解析符号链接，然后比较。macOS 的文件系统不分
@@ -150,7 +153,7 @@ export function screenHostCommand(input: ScreenInput): ScreenResult {
     startup: SANDBOX_DENY_WRITE_HOME.map((path) => join(home, path)),
   };
   const result: ScreenResult = { verdict: "allow", rule: null, scripts: [] };
-  const hit = input.command.length > HOST_COMMAND_LIMITS.command
+  const hit = input.command.length > HOST_COMMAND_LIMITS.screenedCommand
     ? { rule: "too-long" as const, detail: `${input.command.length}`, line: 1 }
     : input.spendsMoney
       ? { rule: "spends-money" as const, detail: "spends_money", line: 1 }
@@ -176,7 +179,7 @@ export function screenReason(result: ScreenResult, locale: Locale): string | nul
     "privilege-escalation": () => m.privilegeEscalation(detail),
     "startup-file-write": () => m.startupFileWrite(detail),
     "plc-cli": () => m.plcCli(detail),
-    "too-long": () => m.tooLong(HOST_COMMAND_LIMITS.command),
+    "too-long": () => m.tooLong(HOST_COMMAND_LIMITS.screenedCommand),
     "command-substitution": () => m.commandSubstitution(detail),
     eval: () => m.eval(detail),
     xargs: () => m.xargs(detail),
@@ -268,15 +271,20 @@ function interpreterInlineFlag(program: string, args: readonly string[]): string
 
 // ——— 词法 ———
 
+// quoted：在双引号里。不在引号里的变量和命令替换会按空白拆开、按通配展开。
 type Segment =
   | { kind: "text"; text: string; quoted: boolean }
-  | { kind: "var"; name: string }
+  | { kind: "var"; name: string; quoted: boolean }
+  // $(…)：里面拆好的命令。
+  | { kind: "subst"; tokens: Token[]; quoted: boolean; line: number }
   | { kind: "tilde" };
 
 interface WordToken { type: "word"; segments: Segment[]; start: number; end: number; line: number; raw: string }
 interface OpToken { type: "op"; op: string; line: number }
 interface RedirectToken { type: "redirect"; op: string; line: number }
-type Token = WordToken | OpToken | RedirectToken;
+// <<、<<- 开的 heredoc：正文在词法里已经读过（只是标准输入），这里只留下「这条命令有 heredoc」。
+interface HeredocToken { type: "heredoc"; line: number }
+type Token = WordToken | OpToken | RedirectToken | HeredocToken;
 
 interface Hit { rule: ScreenRule; detail: string; line: number; script?: string }
 
@@ -291,9 +299,24 @@ const NAME_START = /[A-Za-z_]/;
 const NAME_CHAR = /[A-Za-z0-9_]/;
 
 function lex(source: string): Token[] {
+  return lexFrom(source, 0, 1, 0).tokens;
+}
+
+// 命令替换最多套几层。再深的 unknown。
+const MAX_SUBSTITUTION_DEPTH = 8;
+
+interface PendingHeredoc { delimiter: string; stripTabs: boolean; quoted: boolean; line: number }
+
+/**
+ * 从 start 开始拆词。depth 为 0 时拆到结尾；大于 0 时是 $(…) 里面的命令，拆到和它配对的 ) 为止，end 是那个 ) 的位置。
+ * 里面的引号、括号和 heredoc 和外面一样拆，所以 heredoc 正文里的 (、) 和撇号不会提前结束 $(…)。
+ */
+function lexFrom(source: string, start: number, startLine: number, depth: number): { tokens: Token[]; end: number; line: number } {
   const tokens: Token[] = [];
-  let i = 0;
-  let line = 1;
+  let i = start;
+  let line = startLine;
+  let parens = 0;
+  let heredocs: PendingHeredoc[] = [];
   const fail = (rule: ScreenRule, detail: string): never => {
     throw new Unreadable({ rule, detail, line });
   };
@@ -305,12 +328,66 @@ function lex(source: string): Token[] {
     tokens.push({ type: "redirect", op: text, line });
     i += length;
   };
+  // heredoc 的正文从操作符那一行的下一行开始，到只有结束标记的一行为止。正文是给程序的标准输入，不是命令：
+  // 结束标记带引号时原样不展开；不带引号时正文里的 $(…) 和反引号会跑，筛查器不读，unknown。
+  const readHeredocBodies = () => {
+    for (const doc of heredocs) {
+      let closed = false;
+      while (i < source.length) {
+        const newline = source.indexOf("\n", i);
+        const lineEnd = newline < 0 ? source.length : newline;
+        const raw = source.slice(i, lineEnd);
+        const body = doc.stripTabs ? raw.replace(/^\t+/, "") : raw;
+        i = newline < 0 ? source.length : newline + 1;
+        if (newline >= 0) line += 1;
+        if (body === doc.delimiter) { closed = true; break; }
+        if (!doc.quoted && /\$\(|`/.test(body)) fail("heredoc", `<<${doc.delimiter}：正文里有命令替换`);
+      }
+      if (!closed) throw new Unreadable({ rule: "unterminated", detail: `<<${doc.delimiter}`, line: doc.line });
+    }
+    heredocs = [];
+  };
+  const heredoc = () => {
+    i += 2;
+    const stripTabs = source[i] === "-";
+    if (stripTabs) i += 1;
+    while (source[i] === " " || source[i] === "\t") i += 1;
+    let delimiter = "";
+    let quoted = false;
+    while (i < source.length && !WORD_BREAK.has(source[i]!)) {
+      const c = source[i]!;
+      if (c === "'" || c === "\"") {
+        const close = source.indexOf(c, i + 1);
+        if (close < 0) fail("unterminated", c);
+        delimiter += source.slice(i + 1, close);
+        quoted = true;
+        i = close + 1;
+      } else if (c === "\\") {
+        delimiter += source[i + 1] ?? "";
+        quoted = true;
+        i += 2;
+      } else if (c === "$" || c === "`") {
+        fail("heredoc", `<<${source.slice(i, i + 12)}`);
+      } else {
+        delimiter += c;
+        i += 1;
+      }
+    }
+    if (!delimiter) fail("unterminated", "<<");
+    heredocs.push({ delimiter, stripTabs, quoted, line });
+    tokens.push({ type: "heredoc", line });
+  };
   while (i < source.length) {
     const ch = source[i]!;
     const next = source[i + 1];
     if (ch === " " || ch === "\t") { i += 1; continue; }
     if (ch === "\\" && next === "\n") { i += 2; line += 1; continue; }
-    if (ch === "\n") { op("\n"); line += 1; continue; }
+    if (ch === "\n") {
+      op("\n");
+      line += 1;
+      if (heredocs.length) readHeredocBodies();
+      continue;
+    }
     if (ch === "#") {
       while (i < source.length && source[i] !== "\n") i += 1;
       continue;
@@ -329,10 +406,19 @@ function lex(source: string): Token[] {
       else op("|");
       continue;
     }
-    if (ch === "(" || ch === ")") { op(ch); continue; }
+    if (ch === "(") { parens += 1; op(ch); continue; }
+    if (ch === ")") {
+      if (depth > 0 && parens === 0) {
+        if (heredocs.length) fail("unterminated", `<<${heredocs[0]!.delimiter}`);
+        return { tokens, end: i, line };
+      }
+      parens = Math.max(0, parens - 1);
+      op(ch);
+      continue;
+    }
     if (ch === "<") {
       if (source.startsWith("<<<", i)) redirect("<<<");
-      else if (next === "<") fail("heredoc", source.slice(i, i + 12).split("\n")[0]!);
+      else if (next === "<") heredoc();
       else if (next === "(") fail("command-substitution", "<(…)");
       else if (next === "&") redirect("<&");
       else if (next === ">") redirect(">", 2);
@@ -347,38 +433,47 @@ function lex(source: string): Token[] {
       else redirect(">");
       continue;
     }
-    const start = i;
-    const startLine = line;
+    const wordStart = i;
+    const wordLine = line;
     const segments: Segment[] = [];
     const text = (value: string, quoted: boolean) => {
       const last = segments.at(-1);
       if (last?.kind === "text" && last.quoted === quoted) last.text += value;
       else segments.push({ kind: "text", text: value, quoted });
     };
-    const dollar = (): void => {
+    const dollar = (quoted: boolean): void => {
       const after = source[i + 1];
-      if (after === "(") fail("command-substitution", "$(…)");
+      if (after === "(") {
+        if (source[i + 2] === "(") fail("shell-construct", "$((…))");
+        if (depth + 1 > MAX_SUBSTITUTION_DEPTH) fail("command-substitution", "$(…)");
+        // 命令替换（工单 #324）：拆出里面的命令，筛查时逐条按同样的规则筛（screenSubstitutions），值按不知道算。
+        const inner = lexFrom(source, i + 2, line, depth + 1);
+        segments.push({ kind: "subst", tokens: inner.tokens, quoted, line });
+        line = inner.line;
+        i = inner.end + 1;
+        return;
+      }
       if (after === "'") fail("dynamic-word", "$'…'");
       if (after === "{") {
         const close = source.indexOf("}", i + 2);
         if (close < 0) fail("unterminated", "${");
-        segments.push({ kind: "var", name: source.slice(i + 2, close) });
+        segments.push({ kind: "var", name: source.slice(i + 2, close), quoted });
         i = close + 1;
         return;
       }
       if (after !== undefined && NAME_START.test(after)) {
         let end = i + 1;
         while (end < source.length && NAME_CHAR.test(source[end]!)) end += 1;
-        segments.push({ kind: "var", name: source.slice(i + 1, end) });
+        segments.push({ kind: "var", name: source.slice(i + 1, end), quoted });
         i = end;
         return;
       }
       if (after !== undefined && /[0-9@*#?$!-]/.test(after)) {
-        segments.push({ kind: "var", name: after });
+        segments.push({ kind: "var", name: after, quoted });
         i += 2;
         return;
       }
-      text("$", false);
+      text("$", quoted);
       i += 1;
     };
     while (i < source.length && !WORD_BREAK.has(source[i]!)) {
@@ -401,7 +496,7 @@ function lex(source: string): Token[] {
           const d = source[i]!;
           if (d === "\"") { i += 1; break; }
           if (d === "`") fail("command-substitution", "`…`");
-          if (d === "$") { dollar(); continue; }
+          if (d === "$") { dollar(true); continue; }
           if (d === "\\" && i + 1 < source.length && "$`\"\\\n".includes(source[i + 1]!)) {
             if (source[i + 1] === "\n") line += 1;
             else text(source[i + 1]!, true);
@@ -415,11 +510,11 @@ function lex(source: string): Token[] {
       } else if (c === "`") {
         fail("command-substitution", "`…`");
       } else if (c === "$") {
-        dollar();
+        dollar(false);
       } else if (c === "~" && tildeAllowed(segments)) {
         let end = i + 1;
         while (end < source.length && !WORD_BREAK.has(source[end]!) && source[end] !== "/") end += 1;
-        if (end > i + 1) segments.push({ kind: "var", name: source.slice(i, end) });
+        if (end > i + 1) segments.push({ kind: "var", name: source.slice(i, end), quoted: false });
         else segments.push({ kind: "tilde" });
         i = end;
       } else {
@@ -428,11 +523,13 @@ function lex(source: string): Token[] {
       }
     }
     // 2>file、2>&1 前面的数字是文件描述符，不是参数。
-    const raw = source.slice(start, i);
+    const raw = source.slice(wordStart, i);
     if (/^[0-9]+$/.test(raw) && (source[i] === ">" || source[i] === "<")) continue;
-    tokens.push({ type: "word", segments, start, end: i, line: startLine, raw });
+    tokens.push({ type: "word", segments, start: wordStart, end: i, line: wordLine, raw });
   }
-  return tokens;
+  if (depth > 0) fail("unterminated", "$(");
+  if (heredocs.length) throw new Unreadable({ rule: "unterminated", detail: `<<${heredocs[0]!.delimiter}`, line: heredocs[0]!.line });
+  return { tokens, end: i, line };
 }
 
 // ~ 只在词的开头、赋值的 = 后面和选项的 = 后面展开（--prefix=~/x 按展开算，多拦不少拦）。
@@ -448,8 +545,10 @@ function tildeAllowed(segments: readonly Segment[]): boolean {
 interface Word {
   token: WordToken;
   text: string;
-  /** 用了筛查器不知道值的变量。 */
+  /** 用了筛查器不知道值的变量或者命令替换。 */
   dynamic: string | null;
+  /** 不知道的值有一部分不在双引号里：会按空白拆成几个参数、按通配展开。 */
+  unquotedDynamic: boolean;
   /** 有不带引号的通配（* ? [ 或者 {a,b}）。 */
   glob: boolean;
   /** NAME=value 形式的赋值。 */
@@ -465,29 +564,36 @@ function initialVars(home: string, cwd: string): Vars {
 function wordOf(token: WordToken, vars: Vars, home: string): Word {
   let text = "";
   let dynamic: string | null = null;
+  let unquotedDynamic = false;
   let unquoted = "";
   for (const segment of token.segments) {
     if (segment.kind === "tilde") text += home;
     else if (segment.kind === "text") {
       text += segment.text;
       if (!segment.quoted) unquoted += segment.text;
+    } else if (segment.kind === "subst") {
+      dynamic ??= "$(…)";
+      if (!segment.quoted) unquotedDynamic = true;
     } else {
       const value = vars.get(segment.name);
       if (typeof value === "string") text += value;
-      else dynamic ??= segment.name.startsWith("~") ? segment.name : `$${segment.name}`;
+      else {
+        dynamic ??= segment.name.startsWith("~") ? segment.name : `$${segment.name}`;
+        if (!segment.quoted) unquotedDynamic = true;
+      }
     }
   }
   const glob = /[*?]/.test(unquoted) || /\[[^\]]*\]/.test(unquoted) || /\{[^}]*(,|\.\.)[^}]*\}/.test(unquoted);
   const first = token.segments[0];
   const match = first?.kind === "text" && !first.quoted ? /^([A-Za-z_][A-Za-z0-9_]*)=/.exec(first.text) : null;
   const assignment = match ? { name: match[1]!, value: text.slice(match[0].length) } : null;
-  return { token, text, dynamic, glob, assignment };
+  return { token, text, dynamic, unquotedDynamic, glob, assignment };
 }
 
 // ——— 简单命令 ———
 
 interface Redirect { op: string; target: WordToken | null; line: number }
-interface SimpleCommand { words: WordToken[]; redirects: Redirect[]; line: number }
+interface SimpleCommand { words: WordToken[]; redirects: Redirect[]; line: number; heredoc: boolean }
 
 function commandsOf(tokens: readonly Token[]): SimpleCommand[] {
   const commands: SimpleCommand[] = [];
@@ -499,9 +605,13 @@ function commandsOf(tokens: readonly Token[]): SimpleCommand[] {
       current = null;
       continue;
     }
-    current ??= { words: [], redirects: [], line: token.line };
+    current ??= { words: [], redirects: [], line: token.line, heredoc: false };
     if (token.type === "word") {
       current.words.push(token);
+      continue;
+    }
+    if (token.type === "heredoc") {
+      current.heredoc = true;
       continue;
     }
     const target = tokens[index + 1];
@@ -566,6 +676,8 @@ interface PathRef {
 
 function screenCommand(command: SimpleCommand, context: ScreenContext, env: ScreenEnv): Hit | null {
   const at = (rule: ScreenRule, detail: string): Hit => ({ rule, detail, line: command.line, ...(context.script ? { script: context.script } : {}) });
+  const substituted = screenSubstitutions(command, context, env);
+  if (substituted) return substituted;
   const words = command.words.map((token) => wordOf(token, context.vars, env.home));
 
   // 开头的赋值。整条都是赋值时记下来，后面的命令能用；只是前缀时只对这一条有效，不记。
@@ -603,8 +715,9 @@ function screenCommand(command: SimpleCommand, context: ScreenContext, env: Scre
   if (program.glob) return at("dynamic-word", program.text);
   const name = basename(program.text);
   const args = rest.slice(1);
-  const dynamicArg = args.find((arg) => arg.dynamic);
-  if (dynamicArg) return at("dynamic-word", dynamicArg.dynamic!);
+  const dynamicArg = unreadableDynamicArg(name, args);
+  if (dynamicArg) return at("dynamic-word", dynamicArg.unquotedDynamic ? `${dynamicArg.dynamic!}（没有加双引号）` : dynamicArg.dynamic!);
+  if (command.heredoc && !HEREDOC_READERS.has(name)) return at("heredoc", name);
   const argTexts = args.map((arg) => arg.text);
 
   // 读不懂的写法和保守规则：看程序名就够。
@@ -712,6 +825,115 @@ function screenCommand(command: SimpleCommand, context: ScreenContext, env: Scre
   }
 
   return screenRedirects(command, { cwd }, context, env, at);
+}
+
+/**
+ * 一条命令里的 $(…)（词和重定向的目标里的）：里面的每条命令按同样的规则筛查。里面是子 shell：cd 和赋值不带出来。
+ * 里面再用 bash <脚本> 的，执行时换不成筛查过的副本，unknown。
+ */
+function screenSubstitutions(command: SimpleCommand, context: ScreenContext, env: ScreenEnv): Hit | null {
+  const tokens = [...command.words, ...command.redirects.flatMap((redirect) => redirect.target ? [redirect.target] : [])];
+  for (const token of tokens) {
+    for (const segment of token.segments) {
+      if (segment.kind !== "subst") continue;
+      const inner: ScreenContext = {
+        cwd: context.cwd, vars: new Map(context.vars), depth: context.depth, scripts: [],
+        ...(context.script ? { script: context.script } : {}),
+      };
+      for (const nested of commandsOf(segment.tokens)) {
+        const hit = screenCommand(nested, inner, env);
+        if (hit) return hit;
+      }
+      if (inner.scripts.length) {
+        return { rule: "script-not-screened", detail: "$(bash <脚本>)", line: segment.line, ...(context.script ? { script: context.script } : {}) };
+      }
+    }
+  }
+  return null;
+}
+
+// 值不知道的参数（来自 $(…) 或者筛查器不知道的变量）在哪些地方可以放行（工单 #324）。不知道的值不能当路径比较，所以只放行
+// 当作文字用、不当路径用的位置：echo、printf 只打印；git 的这些子命令的参数是提交、分支、远端和说明文字，删除和写文件的子命令、
+// 读写文件的选项不在里面；gh 只放行说明文字类选项的值，和 pr、issue、run 的编号或分支。git 和 gh 的不知道的值要在双引号里：
+// 不在引号里的会拆成几个参数，可能变成选项。
+const DYNAMIC_PRINTERS = new Set(["echo", "printf"]);
+const GIT_DYNAMIC_SUBCOMMANDS = new Set([
+  "add", "commit", "push", "fetch", "pull", "log", "show", "diff", "status", "rev-parse", "rev-list", "merge-base", "branch",
+  "tag", "switch", "checkout", "merge", "rebase", "cherry-pick", "revert", "reset", "describe", "ls-remote", "ls-files",
+  "for-each-ref", "cat-file", "grep", "blame", "shortlog", "notes", "remote", "stash",
+]);
+// git 读文件或者写文件的选项：值不能是不知道的。
+const GIT_PATH_OPTIONS = new Set(["-F", "--file", "-o", "--output", "--output-directory", "-t", "--template", "--pathspec-from-file"]);
+// 有它们时 git 读或写仓库以外的文件：这时不放行任何不知道的值。
+const GIT_OUTSIDE_FLAGS = /^(--no-index|--output(=.*)?|--output-directory(=.*)?)$/;
+const GH_TEXT_OPTIONS = new Set([
+  "-t", "--title", "-b", "--body", "-n", "--notes", "-m", "--message", "--subject", "-H", "--head", "-B", "--base",
+  "-f", "--raw-field", "-R", "--repo", "-l", "--label", "-q", "--jq", "--search",
+]);
+const GH_ID_COMMANDS = new Set(["pr", "issue", "run"]);
+// 能读 heredoc 的程序：把正文当数据，不当代码。别的程序（shell、解释器、sqlite3）收到的 heredoc 可能是代码，unknown。
+const HEREDOC_READERS = new Set(["cat", "tee", "git", "gh", "wc", "head", "tail", "grep", "sort"]);
+
+/** 第一个不能放行的值不知道的参数。都能放行（或者没有）时为 null。 */
+function unreadableDynamicArg(name: string, args: readonly Word[]): Word | null {
+  const dynamic = args.filter((arg) => arg.dynamic);
+  if (!dynamic.length || DYNAMIC_PRINTERS.has(name)) return null;
+  const unquoted = dynamic.find((arg) => arg.unquotedDynamic);
+  if (unquoted) return unquoted;
+  if (name === "git") return gitDynamicArg(args);
+  if (name === "gh") return ghDynamicArg(args);
+  return dynamic[0]!;
+}
+
+/** 词开头的 --选项= 的选项名（--body="$(…)"）。不是这种写法时为 null。 */
+function assignedOption(arg: Word): string | null {
+  const first = arg.token.segments[0];
+  return first?.kind === "text" ? /^(--?[A-Za-z-]+)=/.exec(first.text)?.[1] ?? null : null;
+}
+
+function gitDynamicArg(args: readonly Word[]): Word | null {
+  let position = 0;
+  while (position < args.length && args[position]!.text.startsWith("-") && !args[position]!.dynamic) {
+    const option = args[position]!.text;
+    if (["-C", "-c", "--git-dir", "--work-tree"].includes(option) && position + 1 < args.length) {
+      const value = args[position + 1]!;
+      // git -c user.name="$(…)"：只有作者的名字和邮箱可以是不知道的值。别的配置可能跑命令（core.sshCommand、alias.*）。
+      const first = value.token.segments[0];
+      const userIdentity = option === "-c" && first?.kind === "text" && /^user\.(name|email)=/i.test(first.text);
+      if (value.dynamic && !userIdentity) return value;
+      position += 2;
+    } else position += 1;
+  }
+  const subcommand = args[position];
+  if (!subcommand) return args.find((arg) => arg.dynamic) ?? null;
+  if (subcommand.dynamic) return subcommand;
+  const rest = args.slice(position + 1);
+  const dynamic = rest.find((arg) => arg.dynamic);
+  if (!dynamic) return null;
+  if (!GIT_DYNAMIC_SUBCOMMANDS.has(subcommand.text) || rest.some((arg) => GIT_OUTSIDE_FLAGS.test(arg.text))) return dynamic;
+  for (let index = 0; index < rest.length; index += 1) {
+    const arg = rest[index]!;
+    if (!arg.dynamic) continue;
+    const assigned = assignedOption(arg);
+    if ((assigned && GIT_PATH_OPTIONS.has(assigned)) || GIT_PATH_OPTIONS.has(rest[index - 1]?.text ?? "")) return arg;
+  }
+  return null;
+}
+
+function ghDynamicArg(args: readonly Word[]): Word | null {
+  const group = args.find((arg) => !arg.text.startsWith("-") && !arg.dynamic);
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index]!;
+    if (!arg.dynamic) continue;
+    const previous = args[index - 1]?.text ?? "";
+    const assigned = assignedOption(arg);
+    if (assigned ? GH_TEXT_OPTIONS.has(assigned) : GH_TEXT_OPTIONS.has(previous)) continue;
+    // pr、issue、run 后面的位置参数是编号或者分支：gh pr view "$(git branch --show-current)"。
+    const positional = !assigned && !previous.startsWith("-") && group !== undefined && args.indexOf(group) < index;
+    if (positional && GH_ID_COMMANDS.has(group.text)) continue;
+    return arg;
+  }
+  return null;
 }
 
 // 外壳后面真正的命令。env 不带命令时整份打印变量；command -v 只是查找。
