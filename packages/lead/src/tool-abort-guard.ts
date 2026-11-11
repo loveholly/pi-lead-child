@@ -144,7 +144,9 @@ export function installToolAbortGuard(agent: { state: { tools: any[] } }, option
     configurable: true,
     enumerable: descriptor.enumerable ?? true,
     get,
-    set: (next: any[]) => set(wrap(next)),
+    set: (next: any[]) => {
+      set(wrap(next));
+    },
   });
   set(wrap(get()));
 }
