@@ -1,4 +1,4 @@
-// @vitest-environment jsdom
+// @vitest-environment happy-dom
 // 会话卡片里的表单（工单 #285）：字段按类型画；第一次点提交以前不报错，之后不合格的字段标红、原因写在操作组左边那一行；
 // 敏感字段是密码框，可以临时显示，提交以后清空；提交走 /v1/forms/:id/submit，成功以后收成一行结果；失败写原因，可以改了再交。
 import { UI_CATALOG_VERSION, type UiFormDto, type UiSurface } from '@pi-lead-child/protocol';
