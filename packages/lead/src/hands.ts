@@ -10,7 +10,7 @@
 // 子 agent，结果交回 Lead 审核。拒绝写明这是能力缺口，并给出下一条路（D11、D13）。
 // 只读了连接结果（例如用户自己 PR 的 CI 状态）的一轮、用户本人正在说话的一轮照用（用户 2026-10-29：「起码要让 lead agent
 // 有能力处理」）：命令在沙箱里跑，沙箱挡住凭证和逃出去的路，它才是边界。
-// 免沙箱（docs/ticket-246-user-turn-bypass.md，实施单 C）：开关开着、用户的一轮（本人正在发话，或者用户让 Fairy 设的跟进到点）、
+// 免沙箱（docs/ticket-246-user-turn-bypass.md，实施单 C）：开关开着、用户的一轮或系统事件叫醒的一轮（hostBypassActive）、
 // 这一轮没读过外部内容、命令过了筛查器时，这一次 bash 在沙箱外跑（engine 的 hostBashOperations），结果开头写「（沙箱外）」。每次调用重新判断
 // （hostCommandRoute）。开关开着但这一次退回沙箱时，结果开头写原因；开关关着时什么都不加，和以前一样。
 import { mkdirSync } from "node:fs";
@@ -146,7 +146,8 @@ function routeOf(db: Db, deps: TurnOriginDeps, input: HostCommandRouteInput): Ho
     route: "host",
     run: screen.scripts.length ? copyScreenedScripts(input.command, screen.scripts, tmpdir()) : input.command,
     record: {
-      id: newHostCommandId(), turnId: decision.turnId, turnOrigin: decision.turnOrigin, via: input.via, confirmationId: null,
+      id: newHostCommandId(), turnId: decision.turnId, turnOrigin: decision.turnOrigin,
+      ...(decision.wokenBy ? { wokenBy: decision.wokenBy } : {}), via: input.via, confirmationId: null,
       command: input.command, screen: { verdict: screen.verdict, rule: screen.rule }, spendsMoney: input.spendsMoney,
     },
   };

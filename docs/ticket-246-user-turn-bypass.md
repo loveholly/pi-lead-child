@@ -371,3 +371,8 @@ hostBypassActive =
 1. 用户让 Fairy 设的跟进到点、只为它开的一轮，免沙箱和用户本人发话的一轮一样生效（`turn-origin.ts` 的 `hostBypassActive`）。`host_command.started` 记设它那一轮的凭证来源（`live_user_*`），`turnId` 是 `timer:<编号>`。Fairy 自己设的跟进、读过外部内容的一轮照旧不生效。改规则仍然不认跟进到点的一轮。
 2. 筛查器不再一律拒绝 `$(…)`。里面的每条命令按同样的规则筛查，它的值按不知道算。不知道的值只在这些地方放行：`echo`、`printf`；`git` 的一组只读或者只改仓库的子命令（读写文件的选项除外）；`gh` 的说明文字类选项和 `pr`、`issue`、`run` 的编号。`git` 和 `gh` 的不知道的值要在双引号里。heredoc 只给把正文当数据读的程序（`cat`、`git`、`gh` 等）。
 3. 400 字上限只管要发卡的命令。直接跑的命令上限是 `HOST_COMMAND_LIMITS.screenedCommand`（20000 字）。
+
+同一天 13:35 用户又说：「当然要免 bypass 啊，而且先前的任务也不是我设置的跟进吧」。所以第 1 点扩大到系统事件叫醒的一轮：
+
+4. daemon 发起的系统回合（执行或核查结束、后台检查有结果、Fairy 自己设的跟进到点、命令结果回来这类）也免沙箱。daemon 给这一轮记 `wokenBy`：发起它的系统来源和交给它的事件 kind（`server.ts` 的 `runTurnNow`）。`host_command.started` 写 `turnOrigin: "system_event"` 和 `wokenBy`，`turnId` 为 null，不冒充用户。
+5. 照旧不免沙箱：外部消息叫醒的一轮、和外部消息混在一起的一轮、读过外部内容（连接结果、通道对话、通道文件）以后的命令。没有 `wokenBy`、也不是用户的一轮时，来源认不出来，也不免沙箱。改规则仍然只认用户本人正在说话的一轮。

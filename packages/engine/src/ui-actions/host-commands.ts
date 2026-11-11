@@ -13,7 +13,7 @@ import { isAbsolute, join } from "node:path";
 import { dataDir as defaultDataDir } from "@pi-lead-child/core";
 import {
   HOST_COMMAND_FINISHED_KIND, HOST_COMMAND_STARTED_KIND, hostCommandEntityKey, redactKnownValues, redactSecretText, secretEnvValues,
-  type HostCommandTurnOrigin, type HostCommandVia,
+  type HostCommandTurnOrigin, type HostCommandVia, type HostCommandWokenBy,
 } from "@pi-lead-child/protocol";
 import { appendEvent, type Db } from "@pi-lead-child/store";
 import { UiActionError } from "./types.js";
@@ -201,6 +201,8 @@ export interface HostCommandRecord {
   id: string;
   turnId: string | null;
   turnOrigin: HostCommandTurnOrigin;
+  // 系统事件叫醒的一轮：发起它的系统来源和交给它的事件 kind（turnOrigin 是 system_event 时才有）。
+  wokenBy?: HostCommandWokenBy;
   via: HostCommandVia;
   confirmationId: string | null;
   command: string;

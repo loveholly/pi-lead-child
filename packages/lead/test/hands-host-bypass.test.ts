@@ -169,10 +169,40 @@ describe("bash with the sandbox bypass on", () => {
     expect(wrap).not.toHaveBeenCalled();
   }, 90_000);
 
-  it("keeps a system turn in the sandbox", async () => {
+  // 回归（2026-11-11 返工）：执行结束的通知叫醒的一轮里，bash 一律退回沙箱。现在免沙箱，读了连接结果以后才退回。
+  it("runs outside the sandbox in a turn that run.finished woke, then back in the sandbox after a connection result", async () => {
+    turnOn();
+    origin = { external: false, timer: null, wokenBy: { origin: "system:blocker", kinds: ["run.finished"] } };
+    const ends = await session([bash("echo first-host"), bash("echo second-sandbox")], (index) => {
+      if (index === 1) origin = withExternalContent(origin, { via: "tool", tool: "call_connection_tool" });
+    });
+    expect(ends[0]?.text.startsWith(HOST_RUN_MARK)).toBe(true);
+    expect(ends[1]?.text).toMatch(/^（沙箱里：免沙箱开着，但这一次没有用——这一轮用 call_connection_tool 读了外部内容/);
+    expect(wrap).toHaveBeenCalledTimes(1);
+    expect(wrap.mock.calls[0]?.[0]).toBe("echo second-sandbox");
+    expect(started()).toEqual([expect.objectContaining({
+      turnId: null, turnOrigin: "system_event", wokenBy: { origin: "system:blocker", kinds: ["run.finished"] }, via: "bash", command: "echo first-host",
+    })]);
+  }, 90_000);
+
+  it("keeps a turn that an external message woke in the sandbox", async () => {
+    turnOn();
+    origin = {
+      external: true, timer: null, externalBy: [{ via: "message", source: "slack" }], externalEvents: [7],
+      wokenBy: { origin: "system:blocker", kinds: ["message.received"] },
+    };
+    const ends = await session([bash("echo from-slack")]);
+    // 外部消息叫醒的一轮里 Fairy 自己不跑命令（handsBlockedInTurn），沙箱里也不跑，沙箱外更不跑。
+    expect(ends[0]?.isError).toBe(true);
+    expect(ends[0]?.text).toMatch(/^这一轮是外部消息/);
+    expect(wrap).not.toHaveBeenCalled();
+    expect(started()).toEqual([]);
+  }, 90_000);
+
+  it("keeps a turn of unknown origin in the sandbox", async () => {
     turnOn();
     const ends = await session([bash("echo system-turn")]);
-    expect(ends[0]?.text).toMatch(/^（沙箱里：免沙箱开着，但这一次没有用——这一轮不是用户的一轮/);
+    expect(ends[0]?.text).toMatch(/^（沙箱里：免沙箱开着，但这一次没有用——这一轮的来源认不出来/);
     expect(ends[0]?.text).toContain("system-turn");
     expect(wrap).toHaveBeenCalledTimes(1);
     expect(started()).toEqual([]);

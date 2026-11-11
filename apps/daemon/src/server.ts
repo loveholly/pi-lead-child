@@ -4148,6 +4148,11 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       runOrigin = {
         ...withExternalEvents(runOrigin, deliveredEvents),
         timer: channelTurn ? null : userTimerOf(deliveredEvents),
+        // 系统事件叫醒的一轮（Lead 的 turn-origin.ts 的 wokenBy）：免沙箱开着时也能在沙箱外跑命令，执行记录写这里的来源和事件 kind。
+        // 只记 daemon 自己发起的系统回合：用户的一轮、aish 的一轮不记。
+        ...(options.system && !channelTurn && !options.aish
+          ? { wokenBy: { origin: options.system, kinds: deliveredEvents.map((event) => event.kind) } }
+          : {}),
       };
       // 交给这一轮的事里有外部的人的消息：有人在等，车道是 L1（lead-scheduler spec D2）。用户的单元不降级。
       if ((runOrigin.externalBy ?? []).some((source) => source.via === "message") && (sched.unit?.lane ?? 0) > 1) {
@@ -5650,6 +5655,9 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     // 插进来的事也算这一轮的输入：带外部原文的，这一轮算读过外部原文；不再是只为用户的跟进开的一轮。
     runOrigin = withExternalEvents(runOrigin, taken.events);
     if (taken.events.length) runOrigin = { ...runOrigin, timer: null };
+    if (taken.events.length && runOrigin.wokenBy) {
+      runOrigin = { ...runOrigin, wokenBy: { ...runOrigin.wokenBy, kinds: [...runOrigin.wokenBy.kinds, ...taken.events.map((event) => event.kind)] } };
+    }
     const text = [
       leadSystemEvent("system", "紧急：下面的事插进了你正在做的这一轮。先看它，再接着做原来的事。", { topic: "interrupt" }),
       taken.text,

@@ -15,7 +15,7 @@ import {
   HOST_BYPASS_ENABLED_KIND, HOST_BYPASS_EXPIRED_KIND, HOST_COMMAND_FINISHED_KIND, HOST_COMMAND_STARTED_KIND,
 } from "@pi-lead-child/protocol";
 import {
-  createLoopbackBinding, getHostBypass, HOST_BYPASS_KEY, listEvents, listInbox, openDb, readStoredHostBypass, recordDecisionModelCall,
+  addLeadFollowUp, createLoopbackBinding, getHostBypass, HOST_BYPASS_KEY, listEvents, listInbox, openDb, readStoredHostBypass, recordDecisionModelCall,
   type Db,
 } from "@pi-lead-child/store";
 import { startDaemon } from "../src/server.js";
@@ -289,6 +289,39 @@ describe("commands outside the sandbox through the daemon", () => {
       await vi.waitFor(() => expect(jobOutput("soft-done")).toBeDefined(), { timeout: 15_000 });
     }, 45_000);
   });
+
+  // 回归（2026-11-11 返工）：系统事件叫醒的一轮（这里是 Fairy 自己设的跟进到点）里，免沙箱一律不生效，推 PR 攒成确认卡。
+  // 现在 daemon 给这一轮记 wokenBy：命令直接跑，记录写 system_event 和 timer.fired；读了连接工具的结果以后退回确认卡。
+  it("runs at once in a turn a system event woke, records system_event, and goes back to the card after a connection result", async () => {
+    const seen: Record<string, any> = {};
+    let step = 0;
+    const { call } = await bootLead(async (fake, live, deps) => {
+      if (step === 0 && fake.inputs.some((input) => input.includes("到点推一下 PR"))) {
+        step = 1;
+        seen.oneBash = bashRoute(deps, "echo system-one");
+        seen.one = await run(live, "echo system-one");
+        return { tools: ["call_connection_tool"] };
+      }
+      if (step === 1) {
+        step = 2;
+        seen.twoBash = bashRoute(deps, "echo system-two");
+        seen.two = await run(live, "echo system-two");
+      }
+      return { say: "NO_REPLY" };
+    });
+    await call("/v1/lead/host-bypass/enable", {});
+    addLeadFollowUp(db, { at: new Date(Date.now() - 1_000), note: "到点推一下 PR" });
+    await vi.waitFor(() => expect(seen.two).toBeDefined(), { timeout: 15_000 });
+    expect(seen.oneBash).toBe("host");
+    expect(seen.one).toMatchObject({ isError: false });
+    expect(seen.one.text).toMatch(/^（沙箱外）/);
+    expect(seen.twoBash).toBe("sandbox");
+    expect(JSON.parse(seen.two.text)).toMatchObject({ kind: "needs_authorization" });
+    expect(started()).toEqual([expect.objectContaining({
+      turnId: null, turnOrigin: "system_event", command: "echo system-one",
+      wokenBy: { origin: expect.stringMatching(/^system:/), kinds: expect.arrayContaining(["timer.fired"]) },
+    })]);
+  }, 45_000);
 
   it("keeps sending the card in a turn that a Slack message woke", async () => {
     const slack = new FakeSlack({ users: { U0MALLORY: { name: "Mallory" } } });

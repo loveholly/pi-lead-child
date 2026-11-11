@@ -27,7 +27,9 @@
 import {
   activePairedUserTurn, CORE_KINDS, getBinding, getHostBypass, SCHEDULED_TURN_PREFIX, type Db, type NoteKind, type PairedUserTurn,
 } from "@pi-lead-child/store";
-import { bindingOriginOf, type HostCommandTurnOrigin, type Scope, type TimerOrigin } from "@pi-lead-child/protocol";
+import {
+  bindingOriginOf, type HostCommandTurnOrigin, type HostCommandWokenBy, type Scope, type TimerOrigin,
+} from "@pi-lead-child/protocol";
 import {
   externalTimerOriginOf, externalTurnWhy, isLiveUserTurn, leadUserTurnOf, requestExternalTimer, requestRuleChangeConfirmation,
   RULE_CHANGE_CONFIRM_NEXT, ruleChangeRefusalText, setTimer,
@@ -41,6 +43,10 @@ export interface LeadTurnOrigin {
   externalBy?: readonly ExternalContentSource[];
   // 交给这一轮的外部事件（消息事件、外部来源的定时器到点）的编号。daemon 记，Lead 改不了。
   externalEvents?: readonly number[];
+  // daemon 自己发起的系统回合（执行或核查结束、后台检查有结果、跟进到点、命令结果回来这类）：发起它的系统来源
+  // （system:blocker 这类）和交给它的事件 kind。用户的一轮、外部通道开的一轮没有。daemon 记，Lead 改不了。
+  // 免沙箱据此放行这一轮（hostBypassActive），执行记录写 system_event 和这里的来源。
+  wokenBy?: { origin: string | null; kinds: readonly string[] };
 }
 
 export interface TurnOriginDeps {
@@ -156,13 +162,14 @@ export function ruleChangeRefusal(
   };
 }
 
-// 免沙箱（docs/ticket-246-user-turn-bypass.md 3.1、3.2，实施单 C）。和改规则的拒绝用同一份数据：这一轮是不是用户的一轮
-// （activePairedUserTurn）、这一轮带没带外部内容（externalContentOf）。和改规则不同的有两点：用户让 Fairy 设的跟进到点的一轮
-// 也能免沙箱（改规则只认用户本人正在说话的一轮）；读过外部内容以后用户本人的一轮也不放开
+// 免沙箱（docs/ticket-246-user-turn-bypass.md 3.1、3.2，实施单 C；第 10 节）。和改规则的拒绝用同一份数据：这一轮是谁的
+// （activePairedUserTurn、wokenBy）、这一轮带没带外部内容（externalContentOf）。和改规则不同：用户让 Fairy 设的跟进到点的一轮、
+// 系统事件叫醒的一轮也能免沙箱（改规则只认用户本人正在说话的一轮）。读过外部内容以后哪一种都不放开
 // （沿用 2.3 的「收紧」档）：在沙箱外跑错的命令改不回来，而注入的路正是「用户让 Fairy 读 Slack，Slack 里写着请运行 X」。
 // 每一次 bash、run_on_host 调用都重新算：同一轮里 externalBy 会变，开关也可能被关掉。
 export type HostBypassDecision =
-  | { active: true; turnId: string; turnOrigin: HostCommandTurnOrigin }
+  // turnId：用户的一轮的编号（timer:<编号> 也算）；系统事件叫醒的一轮没有，为 null。wokenBy 只在 system_event 时有。
+  | { active: true; turnId: string | null; turnOrigin: HostCommandTurnOrigin; wokenBy?: HostCommandWokenBy }
   // off：开关关着，一切照旧，结果里也不写原因。另外两种开关开着，结果里写明为什么这一次没有免沙箱。
   | { active: false; code: "off" | "not_user_turn" | "external_content"; why: string | null };
 
@@ -175,34 +182,45 @@ function liveTurnOrigin(db: Db, bindingId: number): HostCommandTurnOrigin {
   return origin === "cli" ? "live_user_plc" : "live_user_companion";
 }
 
-const NOT_USER_TURN_WHY = "这一轮不是用户的一轮（Fairy 自己设的跟进、提醒、外部消息或系统叫醒的），"
-  + "免沙箱只在用户本人发话的一轮和用户让 Fairy 设的跟进到点的一轮生效";
+const NOT_USER_TURN_WHY = "这一轮的来源认不出来（不是用户的一轮，也不是系统事件叫醒的一轮），免沙箱不生效";
 
 /**
- * 这一次能不能在沙箱外跑：开关开着、用户的一轮、这一轮没有外部内容。不能时给出原因。
- * 用户的一轮有两种：用户本人正在说话的一轮（Slack 里给自己发的私信开的一轮也算，3.3），和用户让 Fairy 设的跟进到点、
- * 只为它开的一轮（timer:<编号>，用户 2026-11-11：「我不是给你设置了 bypass 吗，如果 bypass 都还要我审批，那 bypass 有啥意义呢」）。
- * 跟进到点的一轮记成设它那一轮的凭证来源（live_user_*），turnId 是 timer:<编号>。改规则仍然不认跟进到点的一轮（规则 4）。
+ * 这一次能不能在沙箱外跑：开关开着、这一轮是用户的或者系统事件叫醒的、这一轮没有外部内容。不能时给出原因。
+ *   - 用户的一轮：用户本人正在说话的一轮（Slack 里给自己发的私信开的一轮也算，3.3），和用户让 Fairy 设的跟进到点、只为它开的
+ *     一轮（timer:<编号>）。记成那一轮凭证的来源（live_user_*）。
+ *   - 系统事件叫醒的一轮（wokenBy，daemon 记）：执行或核查结束、后台检查有结果、Fairy 自己设的跟进到点、命令结果回来这类
+ *     （用户 2026-11-11：「当然要免 bypass 啊，而且先前的任务也不是我设置的跟进吧」）。记成 system_event 和叫醒它的事件，
+ *     不冒充用户。外部消息叫醒的一轮、和外部消息混在一起的一轮带着外部内容，不放开。
+ * 改规则仍然只认用户本人正在说话的一轮（规则 4）。
  */
 export function hostBypassActive(db: Db, deps: TurnOriginDeps, now: Date = new Date()): HostBypassDecision {
   if (!getHostBypass(db, now).enabled) return { active: false, code: "off", why: null };
   const origin = turnOriginOf(deps);
   // 跟进到点的一轮读了外部内容以后，authorityTurnId 不再给 timer:<编号>；这里照样认出它，原因写成读了外部内容。
   const turnId = authorityTurnId(deps) ?? (origin.timer !== null ? `${SCHEDULED_TURN_PREFIX}${origin.timer}` : null);
-  let user: PairedUserTurn;
+  let user: PairedUserTurn | null = null;
   try {
     user = activePairedUserTurn(db, turnId, "host_bypass", "tickets:create");
   } catch {
-    return { active: false, code: "not_user_turn", why: NOT_USER_TURN_WHY };
+    user = null;
   }
+  // 系统事件叫醒的一轮：没有用户的这一轮，daemon 记了 wokenBy。用户正在说话的一轮不会走到这里。
+  const systemTurn = !user && origin.wokenBy !== undefined && !deps.currentTurnId?.();
+  if (!user && !systemTurn) return { active: false, code: "not_user_turn", why: NOT_USER_TURN_WHY };
   const sources = externalContentOf(deps);
   if (sources !== null) {
     return {
       active: false, code: "external_content",
-      why: `${externalTurnWhy(sources)}，从那以后这一轮的命令不在沙箱外跑。用户在新的一条消息里再说一句，新的一轮又能免沙箱`,
+      why: `${externalTurnWhy(sources)}，从那以后这一轮的命令不在沙箱外跑。`
+        + (user ? "用户在新的一条消息里再说一句，新的一轮又能免沙箱" : "下一个系统事件叫醒的新的一轮、或者用户本人的一轮又能免沙箱"),
     };
   }
-  return { active: true, turnId: user.id, turnOrigin: liveTurnOrigin(db, user.origin_binding_id) };
+  if (user) return { active: true, turnId: user.id, turnOrigin: liveTurnOrigin(db, user.origin_binding_id) };
+  const wokenBy = origin.wokenBy!;
+  return {
+    active: true, turnId: null, turnOrigin: "system_event",
+    wokenBy: { origin: wokenBy.origin, kinds: [...new Set(wokenBy.kinds)] },
+  };
 }
 
 /**
