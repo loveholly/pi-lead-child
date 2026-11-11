@@ -3160,7 +3160,7 @@ export function createLeadTools(deps: LeadDeps): ToolDefinition<any>[] {
         + `和他的终端一样；不超过 ${HOST_COMMAND_LIMITS.command} 个字符（卡上要能看全），长的先写成你临时目录里的脚本，命令写 bash <脚本>。`
         + "cwd 是绝对路径（缺省是 home）。reason 写清为什么要跑、为什么沙箱里做不了，会显示在卡上。"
         + "通常结果是一张确认卡（user_action）：用 render_ui 发给用户；用户确认后命令才跑，跑完以后结果进你的收件箱。"
-        + "用户在设置里打开了免沙箱、而且这一轮没有外部消息、也没读过外部内容时（用户本人发话的一轮、跟进到点、执行结束这类系统事件叫醒的一轮都算），命令马上跑：20 秒内跑完的，结果直接给你；"
+        + "用户在设置里打开了免沙箱时，只读、查询、普通推送、在仓库里提交、只写工作目录和临时目录的命令马上跑（哪一轮都一样）：20 秒内跑完的，结果直接给你；"
         + "跑得更久的（下载、升级）转到后台，你拿到作业编号，命令结束时系统叫醒你、把输出交给你，这期间你可以接着处理别的消息。"
         + "timeout_seconds 是命令最多跑多久，到点停掉。完整输出在你的临时目录里。",
       parameters: Type.Object({
@@ -3180,7 +3180,7 @@ export function createLeadTools(deps: LeadDeps): ToolDefinition<any>[] {
       ) => {
         // 免沙箱直接跑时不发卡，命令可以比卡上能显示的长；要发卡时再按卡的长度查（下面）。
         const input = hostCommandInputOf(params, HOST_COMMAND_LIMITS.screenedCommand);
-        // 免沙箱开着、用户的一轮或系统事件叫醒的一轮（hostBypassActive）、没读过外部内容、筛查器放行时直接跑，不发卡（docs/ticket-246-user-turn-bypass.md 3.1）。
+        // 免沙箱开着、命令是筛查器的第一档时直接跑（不管这一轮是谁叫醒的、读没读过外部内容），不发卡（docs/ticket-246-user-turn-bypass.md 3.1）。
         const route = hostCommandRoute(db, deps, {
           command: input.command, cwd: input.cwd, via: "run_on_host", spendsMoney: input.spends_money === true, dataDir: deps.dataDir,
         });

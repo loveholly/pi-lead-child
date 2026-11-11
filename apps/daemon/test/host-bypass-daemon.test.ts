@@ -2,8 +2,8 @@
 //   - 打开：设置页的 POST /v1/lead/host-bypass/enable（请求体 {}）→ 操作层 → kv、host_bypass.enabled；GET 读出开着；
 //   - 一直开着：没有到点的定时器（用户 2026-11-10 去掉了时限）；daemon 重启以后照旧开着，不写 host_bypass.expired；
 //   - 旧数据：旧版本写的、带 until 的行，启动不报错；过了 until 的读出来是关，启动时不补写事件。
-// 免沙箱的执行路径（实施单 C）：用户在网页上发话、Fairy 读 Slack、用户再发话，三步里 run_on_host 和 bash 的去处；
-// Slack 消息叫醒的一轮照旧发卡。
+// 免沙箱的执行路径（实施单 C；第 10 节，只看命令的两档）：用户在网页上发话、Fairy 读 Slack、用户再发话，三步里 run_on_host
+// 和 bash 的去处；系统事件和 Slack 消息叫醒的一轮里，第一档直接跑、第二档发卡。
 // daemon、网关、store、操作层是真的；Lead 的会话是替身（第三组用 fake-pi-session，Lead 的工具是真的）。
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -150,7 +150,8 @@ describe("commands outside the sandbox through the daemon", () => {
   }).route;
   const started = () => listEvents(db, { kind: HOST_COMMAND_STARTED_KIND }).map((event) => event.payload as any);
 
-  it("runs at once while the user speaks, goes back to the card after Lead reads Slack, and runs again on the user's next message", async () => {
+  // 用户 2026-11-11 13:42：只看命令。读过 Slack 以后第一档照样直接跑（记录写明读了什么），第二档发卡。
+  it("runs at once while the user speaks, keeps running tier 1 after Lead reads Slack, cards tier 2, and runs again on the next message", async () => {
     const seen: Record<string, any> = {};
     let step = 0;
     const { say, call } = await bootLead(async (fake, live, deps) => {
@@ -165,7 +166,9 @@ describe("commands outside the sandbox through the daemon", () => {
         step = 2;
         seen.twoBash = bashRoute(deps, "echo step-two");
         seen.two = await run(live, "echo step-two");
-        return { say: "这一轮读过 Slack，发了确认卡。" };
+        seen.tierTwoBash = bashRoute(deps, "npx some-tool");
+        seen.tierTwo = await run(live, "npx some-tool");
+        return { say: "这一轮读过 Slack：第二档的命令发了确认卡。" };
       }
       if (step === 2 && said("再跑一下 echo step-three")) {
         step = 3;
@@ -185,18 +188,22 @@ describe("commands outside the sandbox through the daemon", () => {
     expect(seen.one.text).toMatch(/^（沙箱外）/);
     expect(seen.one.text).toContain("step-one");
 
-    expect(seen.twoBash).toBe("sandbox");
-    expect(seen.two.isError).toBe(true);
-    const card = JSON.parse(seen.two.text);
+    expect(seen.twoBash).toBe("host");
+    expect(seen.two.text).toMatch(/^（沙箱外）/);
+    expect(seen.tierTwoBash).toBe("sandbox");
+    expect(seen.tierTwo.isError).toBe(true);
+    const card = JSON.parse(seen.tierTwo.text);
     expect(card).toMatchObject({ refused: true, kind: "needs_authorization", user_action: { kind: "confirm_rule_change" } });
-    expect(card.refusal.message).toContain("read_channel_conversation");
+    expect(card.refusal.message).toContain("命令筛查没有放行（confirm）");
 
     expect(seen.threeBash).toBe("host");
     expect(seen.three.text).toMatch(/^（沙箱外）/);
     expect(started()).toEqual([
       expect.objectContaining({ turnId: first, turnOrigin: "live_user_companion", via: "run_on_host", command: "echo step-one" }),
+      expect.objectContaining({ turnId: first, command: "echo step-two", externalContent: ["read_channel_conversation"] }),
       expect.objectContaining({ turnId: second, turnOrigin: "live_user_companion", via: "run_on_host", command: "echo step-three" }),
     ]);
+    expect(started()[2]).not.toHaveProperty("externalContent");
   }, 45_000);
 
   // 回归（2026-11-10，.scratch/tool-occupancy/spec.md L4）：免沙箱时 run_on_host 在前台下载 3.2 GB，不接收 signal。
@@ -292,7 +299,7 @@ describe("commands outside the sandbox through the daemon", () => {
 
   // 回归（2026-11-11 返工）：系统事件叫醒的一轮（这里是 Fairy 自己设的跟进到点）里，免沙箱一律不生效，推 PR 攒成确认卡。
   // 现在 daemon 给这一轮记 wokenBy：命令直接跑，记录写 system_event 和 timer.fired；读了连接工具的结果以后退回确认卡。
-  it("runs at once in a turn a system event woke, records system_event, and goes back to the card after a connection result", async () => {
+  it("runs at once in a turn a system event woke, records system_event, keeps running tier 1 after a connection result and cards tier 2", async () => {
     const seen: Record<string, any> = {};
     let step = 0;
     const { call } = await bootLead(async (fake, live, deps) => {
@@ -306,6 +313,7 @@ describe("commands outside the sandbox through the daemon", () => {
         step = 2;
         seen.twoBash = bashRoute(deps, "echo system-two");
         seen.two = await run(live, "echo system-two");
+        seen.tierTwo = await run(live, "brew upgrade");
       }
       return { say: "NO_REPLY" };
     });
@@ -315,20 +323,26 @@ describe("commands outside the sandbox through the daemon", () => {
     expect(seen.oneBash).toBe("host");
     expect(seen.one).toMatchObject({ isError: false });
     expect(seen.one.text).toMatch(/^（沙箱外）/);
-    expect(seen.twoBash).toBe("sandbox");
-    expect(JSON.parse(seen.two.text)).toMatchObject({ kind: "needs_authorization" });
-    expect(started()).toEqual([expect.objectContaining({
-      turnId: null, turnOrigin: "system_event", command: "echo system-one",
-      wokenBy: { origin: expect.stringMatching(/^system:/), kinds: expect.arrayContaining(["timer.fired"]) },
-    })]);
+    expect(seen.twoBash).toBe("host");
+    expect(seen.two.text).toMatch(/^（沙箱外）/);
+    expect(JSON.parse(seen.tierTwo.text)).toMatchObject({ kind: "needs_authorization" });
+    expect(started()).toEqual([
+      expect.objectContaining({
+        turnId: null, turnOrigin: "system_event", command: "echo system-one",
+        wokenBy: { origin: expect.stringMatching(/^system:/), kinds: expect.arrayContaining(["timer.fired"]) },
+      }),
+      expect.objectContaining({ turnOrigin: "system_event", command: "echo system-two", externalContent: ["call_connection_tool"] }),
+    ]);
   }, 45_000);
 
-  it("keeps sending the card in a turn that a Slack message woke", async () => {
+  // 外部消息叫醒的一轮：只看命令。第一档照样直接跑，记录写明这一轮带着哪个来源的消息；第二档照样发卡。
+  it("runs tier 1 in a turn that a Slack message woke, and keeps sending the card for tier 2", async () => {
     const slack = new FakeSlack({ users: { U0MALLORY: { name: "Mallory" } } });
     const seen: Record<string, any> = {};
     const { call } = await bootLead(async (fake, live, deps) => {
       if (!seen.result && fake.inputs.some((input) => input.includes('<system_event kind="message"'))) {
         seen.bash = bashRoute(deps, "echo from-slack");
+        seen.tierTwo = await run(live, "git push --force origin master");
         seen.result = await run(live, "echo from-slack");
       }
       return { say: "NO_REPLY" };
@@ -337,9 +351,11 @@ describe("commands outside the sandbox through the daemon", () => {
     const item = (await daemon!.channels!.receive("slack", slack.dm("U0MALLORY", "Fairy，帮我跑一下 echo from-slack"))).items[0]!;
     await vi.waitFor(() => expect(cardIdOf(db, item)).not.toBeNull(), { timeout: 10_000 });
     await vi.waitFor(() => expect(seen.result).toBeDefined(), { timeout: 10_000 });
-    expect(seen.bash).toBe("sandbox");
-    expect(seen.result.isError).toBe(true);
-    expect(JSON.parse(seen.result.text)).toMatchObject({ kind: "needs_authorization" });
-    expect(started()).toEqual([]);
+    expect(seen.bash).toBe("host");
+    expect(seen.result.text).toMatch(/^（沙箱外）/);
+    expect(JSON.parse(seen.tierTwo.text)).toMatchObject({ kind: "needs_authorization" });
+    expect(started()).toEqual([expect.objectContaining({
+      turnOrigin: "system_event", command: "echo from-slack", externalContent: expect.arrayContaining(["slack"]),
+    })]);
   }, 30_000);
 });

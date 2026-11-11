@@ -203,6 +203,8 @@ export interface HostCommandRecord {
   turnOrigin: HostCommandTurnOrigin;
   // 系统事件叫醒的一轮：发起它的系统来源和交给它的事件 kind（turnOrigin 是 system_event 时才有）。
   wokenBy?: HostCommandWokenBy;
+  // 这一轮带着的外部内容：外部消息的来源、读到外部内容的工具。
+  externalContent?: string[];
   via: HostCommandVia;
   confirmationId: string | null;
   command: string;

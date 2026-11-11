@@ -205,7 +205,8 @@ describe("core memory goes into Lead's system prompt", () => {
   });
 });
 
-// 免沙箱（docs/ticket-246-user-turn-bypass.md 3.1、3.2，实施单 C）：开关开着、用户本人正在发话、这一轮没读过外部内容。
+// 免沙箱（docs/ticket-246-user-turn-bypass.md 3.1、3.2，实施单 C；第 10 节）：开关开着时只看命令本身（筛查器的两档），
+// hostBypassActive 只看开关，再如实记下这一轮的来历和带着的外部内容。
 describe("hostBypassActive", () => {
   const turnOn = () => enableHostBypass(db, { bindingId: null, resolvedBy: "user via Mac 网页", reason: "test", now: new Date() });
 
@@ -230,18 +231,19 @@ describe("hostBypassActive", () => {
     expect(hostBypassActive(db, deps)).toMatchObject({ active: true, turnOrigin: "live_user_slack_self_dm" });
   });
 
-  it("turns off for the rest of the user's turn once it reads external content", () => {
+  // 回归（2026-11-11 13:38、13:42）：读过外部内容以后整轮退回沙箱，查完 PR 状态再推送也要点卡。现在外部内容不让整轮退回：
+  // 开关照样开着，记录写明这一轮读了什么；命令能不能跑由筛查器的两档定。
+  it("stays on after the user's turn reads external content, and records what it read", () => {
     turnOn();
     userTurn("turn-read");
     turnId = "turn-read";
-    expect(hostBypassActive(db, deps).active).toBe(true);
     origin = withExternalContent(origin, { via: "tool", tool: "read_channel_conversation" });
-    const decision = hostBypassActive(db, deps);
-    expect(decision).toMatchObject({ active: false, code: "external_content" });
-    expect(decision.active ? "" : decision.why).toContain("read_channel_conversation");
-    // 没有声明的工具也按外部内容算。
+    expect(hostBypassActive(db, deps)).toEqual({
+      active: true, turnId: "turn-read", turnOrigin: "live_user_companion", externalContent: ["read_channel_conversation"],
+    });
+    // 没有声明的工具也按外部内容记。
     origin = withExternalContent({ external: false, timer: null }, { via: "tool", tool: "some_new_tool" });
-    expect(hostBypassActive(db, deps)).toMatchObject({ active: false, code: "external_content" });
+    expect(hostBypassActive(db, deps)).toMatchObject({ active: true, externalContent: ["some_new_tool"] });
   });
 
   // 回归（2026-11-11）：用户让 Fairy 设的跟进到点、只为它开的一轮，系统说它「算用户的一轮」，免沙箱却一律不生效，
@@ -256,18 +258,15 @@ describe("hostBypassActive", () => {
     completeTurn(db, "turn-set");
     origin = { external: false, timer: followUp };
     expect(hostBypassActive(db, deps)).toEqual({ active: true, turnId: `timer:${followUp}`, turnOrigin: "live_user_companion" });
-    // 那一轮读了外部内容以后照样退回，原因写读了什么。
+    // 那一轮读了外部内容以后照样记成用户的一轮，另外写明读了什么。
     origin = withExternalContent(origin, { via: "tool", tool: "call_connection_tool" });
-    const decision = hostBypassActive(db, deps);
-    expect(decision).toMatchObject({ active: false, code: "external_content" });
-    expect(decision.active ? "" : decision.why).toContain("call_connection_tool");
-    // 和外部消息混在同一轮时也不算。
-    origin = { external: true, timer: followUp, externalBy: [{ via: "message", source: "slack" }], externalEvents: [7] };
-    expect(hostBypassActive(db, deps)).toMatchObject({ active: false, code: "external_content" });
+    expect(hostBypassActive(db, deps)).toEqual({
+      active: true, turnId: `timer:${followUp}`, turnOrigin: "live_user_companion", externalContent: ["call_connection_tool"],
+    });
   });
 
   // 回归（2026-11-11 返工）：用户 13:35「当然要免 bypass 啊，而且先前的任务也不是我设置的跟进吧」。上午被拦的多是系统叫醒的一轮：
-  // 执行结束的通知、后台检查有结果、Fairy 自己设的跟进到点。daemon 给这种一轮记 wokenBy，免沙箱照样生效，记录写 system_event。
+  // 执行结束的通知、后台检查有结果、Fairy 自己设的跟进到点。daemon 给这种一轮记 wokenBy，记录写 system_event，不冒充用户。
   it("is on in a turn a system event woke, recorded as system_event with the event kinds", () => {
     turnOn();
     origin = { external: false, timer: null, wokenBy: { origin: "system:blocker", kinds: ["run.finished", "run.finished"] } };
@@ -280,48 +279,43 @@ describe("hostBypassActive", () => {
     expect(hostBypassActive(db, deps)).toMatchObject({ active: true, turnId: null, turnOrigin: "system_event" });
   });
 
-  it("turns off in a system turn once it reads a connection result, and in a turn an external message woke", () => {
+  it("records the external content of a system turn that read a connection result, and of a turn an external message woke", () => {
     turnOn();
-    origin = { external: false, timer: null, wokenBy: { origin: "system:blocker", kinds: ["run.finished"] } };
-    expect(hostBypassActive(db, deps).active).toBe(true);
-    origin = withExternalContent(origin, { via: "tool", tool: "call_connection_tool" });
-    const decision = hostBypassActive(db, deps);
-    expect(decision).toMatchObject({ active: false, code: "external_content" });
-    expect(decision.active ? "" : decision.why).toContain("call_connection_tool");
-    // 外部消息叫醒的一轮，和外部消息混在一起的系统回合。
+    origin = withExternalContent(
+      { external: false, timer: null, wokenBy: { origin: "system:blocker", kinds: ["run.finished"] } },
+      { via: "tool", tool: "call_connection_tool" },
+    );
+    expect(hostBypassActive(db, deps)).toMatchObject({ active: true, turnOrigin: "system_event", externalContent: ["call_connection_tool"] });
     origin = {
       external: true, timer: null, externalBy: [{ via: "message", source: "slack" }], externalEvents: [7],
       wokenBy: { origin: "system:blocker", kinds: ["message.received"] },
     };
-    expect(hostBypassActive(db, deps)).toMatchObject({ active: false, code: "external_content" });
-    origin = withExternalContent({ external: false, timer: null, wokenBy: { origin: "system:blocker", kinds: ["run.finished"] } }, { via: "message", source: "slack" });
-    expect(hostBypassActive(db, deps)).toMatchObject({ active: false, code: "external_content" });
+    expect(hostBypassActive(db, deps)).toEqual({
+      active: true, turnId: null, turnOrigin: "system_event", wokenBy: { origin: "system:blocker", kinds: ["message.received"] },
+      externalContent: ["slack"],
+    });
   });
 
-  it("stays off when the turn's origin is unknown, Fairy's own follow-up without a system mark, an external message's turn, a finished turn and after the end time", () => {
+  it("records unattributed when the turn is neither the user's nor marked by a system event, and has no end time", () => {
     turnOn();
     // 没有 channel turn、daemon 也没记 wokenBy：来源认不出来。
-    expect(hostBypassActive(db, deps)).toMatchObject({ active: false, code: "not_user_turn" });
-    // Fairy 自己设的跟进：没有 setBy，不算用户的一轮；没有 wokenBy 时也不算系统回合。
+    expect(hostBypassActive(db, deps)).toEqual({ active: true, turnId: null, turnOrigin: "unattributed" });
+    // Fairy 自己设的跟进、没有 wokenBy；还没到点的用户的跟进：都不是用户的一轮。
     const own = addLeadFollowUp(db, { at: new Date(Date.now() - 1_000), note: "我自己看一下" });
     origin = { external: false, timer: own };
-    expect(hostBypassActive(db, deps)).toMatchObject({ active: false, code: "not_user_turn" });
-    // 还没到点的、取消了的跟进也不算。
+    expect(hostBypassActive(db, deps)).toMatchObject({ turnOrigin: "unattributed" });
     const bindingId = userTurn("turn-set");
     const notDue = addLeadFollowUp(db, {
       at: new Date(Date.now() + 60_000), note: "以后",
       setBy: { turnId: "turn-set", bindingId, startedAt: new Date().toISOString() },
     });
     origin = { external: false, timer: notDue };
-    expect(hostBypassActive(db, deps)).toMatchObject({ active: false, code: "not_user_turn" });
-    // 外部消息叫醒的一轮。
-    origin = { external: true, timer: null, externalBy: [{ via: "message", source: "slack" }], externalEvents: [7] };
-    expect(hostBypassActive(db, deps)).toMatchObject({ active: false, code: "not_user_turn" });
+    expect(hostBypassActive(db, deps)).toMatchObject({ turnOrigin: "unattributed" });
     // 结束了的一轮。
     origin = { external: false, timer: null };
     turnId = "turn-set";
     completeTurn(db, "turn-set");
-    expect(hostBypassActive(db, deps)).toMatchObject({ active: false, code: "not_user_turn" });
+    expect(hostBypassActive(db, deps)).toMatchObject({ turnId: null, turnOrigin: "unattributed" });
     // 打开很久以后照旧生效：没有到点的时间（用户 2026-11-10 去掉了时限）。
     userTurn("turn-late");
     turnId = "turn-late";
@@ -329,7 +323,7 @@ describe("hostBypassActive", () => {
   });
 });
 
-// run_on_host 在免沙箱开着时（实施单 C 验收 1、2、4、5）：用户本人的一轮直接跑、不发卡；读过外部内容、筛查不放行时发卡。
+// run_on_host 在免沙箱开着时（实施单 C；第 10 节）：第一档的命令在哪一轮都直接跑、不发卡；筛查不放行（第二档、底线、读不懂）时发卡。
 describe("run_on_host with the sandbox bypass on", () => {
   const turnOn = () => enableHostBypass(db, { bindingId: null, resolvedBy: "user via Mac 网页", reason: "test", now: new Date() });
   const cards = () => listEvents(db, { kind: "rule_change.requested" });
@@ -361,19 +355,26 @@ describe("run_on_host with the sandbox bypass on", () => {
     expect(finished?.entityKey).toBe(started?.entityKey);
   });
 
-  it("sends the confirm card with the reason once the turn read external content, and runs nothing", async () => {
+  // 回归（2026-11-11 13:38、13:42）：用户让 Fairy 查一下 PR 的状态，读回结果以后推送照样要点确认卡。现在只看命令：
+  // 读过外部内容的一轮里，第一档照常直接跑，记录写明读了什么；第二档发卡。
+  it("runs a tier-1 command at once after the turn read external content, and sends the card for a tier-2 command", async () => {
     turnOn();
     userTurn("turn-read-slack");
     turnId = "turn-read-slack";
     origin = withExternalContent(origin, { via: "tool", tool: "read_channel_conversation" });
-    const result = await tool("run_on_host").execute("t", { command: "echo nope", cwd: deps.dataDir, reason: "test" });
+    const ran = await tool("run_on_host").execute("t", { command: "echo after-reading", cwd: deps.dataDir, reason: "test" });
+    expect(ran.isError).toBeFalsy();
+    expect(ran.content[0].text).toMatch(/^（沙箱外）/);
+    expect(hostEvents("started")[0]?.payload).toMatchObject({
+      turnId: "turn-read-slack", turnOrigin: "live_user_companion", externalContent: ["read_channel_conversation"],
+    });
+    const result = await tool("run_on_host").execute("t", { command: "npx some-tool", cwd: deps.dataDir, reason: "test" });
     expect(result.isError).toBe(true);
     const body = JSON.parse(result.content[0].text);
     expect(body).toMatchObject({ refused: true, kind: "needs_authorization", user_action: { kind: "confirm_rule_change" } });
-    expect(body.refusal.message).toContain("免沙箱开着，但这一次没有直接跑");
-    expect(body.refusal.message).toContain("read_channel_conversation");
+    expect(body.refusal.message).toContain("命令筛查没有放行（confirm）");
     expect(cards().length).toBe(1);
-    expect(hostEvents("started")).toEqual([]);
+    expect(hostEvents("started")).toHaveLength(1);
   });
 
   it("sends the confirm card when the screen says floor or unknown, or the command spends money", async () => {
@@ -427,9 +428,8 @@ describe("run_on_host with the sandbox bypass on", () => {
     expect(result.content[0].text).toMatch(/^（沙箱外）/);
     expect(result.content[0].text).toContain("long-xxx");
     expect(hostEvents("started")[0]?.payload).toMatchObject({ screen: { verdict: "allow", rule: null } });
-    // 要发卡时（这一轮读过外部内容）还是 400 个字：卡上要显示整条命令。
-    origin = withExternalContent(origin, { via: "tool", tool: "read_channel_conversation" });
-    await expect(tool("run_on_host").execute("t", { command, cwd: deps.dataDir, reason: "test" }))
+    // 要发卡的命令（第二档）还是 400 个字：卡上要显示整条命令。
+    await expect(tool("run_on_host").execute("t", { command: `npx some-${"x".repeat(450)}`, cwd: deps.dataDir, reason: "test" }))
       .rejects.toThrow(/命令超过 400 个字符，卡上显示不全/);
     expect(cards()).toEqual([]);
   });
@@ -445,9 +445,29 @@ describe("run_on_host with the sandbox bypass on", () => {
     expect(hostEvents("started")[0]?.payload).toMatchObject({
       turnId: null, turnOrigin: "system_event", wokenBy: { origin: "system:blocker", kinds: ["run.finished"] }, via: "run_on_host", confirmationId: null,
     });
-    // 读了连接工具的结果以后：发卡，不跑。
+    // 读了连接工具的结果以后：第一档照常跑，第二档发卡。
     origin = withExternalContent(origin, { via: "tool", tool: "call_connection_tool" });
-    const carded = await tool("run_on_host").execute("t", { command: "echo nope", cwd: deps.dataDir, reason: "test" });
+    const again = await tool("run_on_host").execute("t", { command: "echo after-connection", cwd: deps.dataDir, reason: "test" });
+    expect(again.content[0].text).toMatch(/^（沙箱外）/);
+    expect(hostEvents("started")[1]?.payload).toMatchObject({ turnOrigin: "system_event", externalContent: ["call_connection_tool"] });
+    const carded = await tool("run_on_host").execute("t", { command: "brew upgrade", cwd: deps.dataDir, reason: "test" });
+    expect(JSON.parse(carded.content[0].text)).toMatchObject({ kind: "needs_authorization" });
+    expect(hostEvents("started")).toHaveLength(2);
+  });
+
+  // 外部消息叫醒的一轮：第一档照样直接跑，记录写明这一轮带着哪个来源的消息；第二档发卡。
+  it("runs a tier-1 command in a turn an external message woke, and sends the card for a tier-2 command", async () => {
+    turnOn();
+    origin = {
+      external: true, timer: null, externalBy: [{ via: "message", source: "slack" }], externalEvents: [7],
+      wokenBy: { origin: "system:blocker", kinds: ["message.received"] },
+    };
+    const ran = await tool("run_on_host").execute("t", { command: "echo from-slack-turn", cwd: deps.dataDir, reason: "test" });
+    expect(ran.content[0].text).toMatch(/^（沙箱外）/);
+    expect(hostEvents("started")[0]?.payload).toMatchObject({
+      turnId: null, turnOrigin: "system_event", wokenBy: { kinds: ["message.received"] }, externalContent: ["slack"],
+    });
+    const carded = await tool("run_on_host").execute("t", { command: "git push --force origin master", cwd: deps.dataDir, reason: "test" });
     expect(JSON.parse(carded.content[0].text)).toMatchObject({ kind: "needs_authorization" });
     expect(hostEvents("started")).toHaveLength(1);
   });

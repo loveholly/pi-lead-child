@@ -98,24 +98,27 @@ async function session(steps: Step[], afterEnd: (index: number) => void = () => 
 const started = () => listEvents(db, { kind: HOST_COMMAND_STARTED_KIND }).map((event) => event.payload as Record<string, unknown>);
 
 describe("bash with the sandbox bypass on", () => {
-  it("runs outside the sandbox in the user's own turn, then back in the sandbox once the turn reads external content", async () => {
+  // 回归（2026-11-11 13:42）：读过外部内容以后整轮退回沙箱。现在只看命令：第一档照常在沙箱外跑，第二档回沙箱。
+  it("keeps running tier-1 commands outside the sandbox after the user's turn reads external content, and sends tier 2 to the sandbox", async () => {
     turnOn();
     companionTurn("turn-live");
-    const ends = await session([bash("echo first-host"), bash("echo second-sandbox")], (index) => {
+    const ends = await session([bash("echo first-host"), bash("echo second-host"), bash("make --version")], (index) => {
       // 第一条跑完以后，这一轮用 read_channel_conversation 读了 Slack。
       if (index === 1) origin = withExternalContent(origin, { via: "tool", tool: "read_channel_conversation" });
     });
     expect(ends[0]?.isError).toBe(false);
     expect(ends[0]?.text.startsWith(HOST_RUN_MARK)).toBe(true);
     expect(ends[0]?.text).toContain("first-host");
-    expect(ends[1]?.text).toMatch(/^（沙箱里：免沙箱开着，但这一次没有用——这一轮用 read_channel_conversation 读了外部内容/);
-    expect(ends[1]?.text).toContain("second-sandbox");
-    // 只有第二条经过 sandbox-exec。
+    expect(ends[1]?.text.startsWith(HOST_RUN_MARK)).toBe(true);
+    expect(ends[2]?.text).toMatch(/^（沙箱里：免沙箱开着，但这一次没有用——命令筛查没有放行（confirm）/);
+    // 只有第二档的那条经过 sandbox-exec。
     expect(wrap).toHaveBeenCalledTimes(1);
-    expect(wrap.mock.calls[0]?.[0]).toBe("echo second-sandbox");
-    expect(started()).toEqual([expect.objectContaining({
-      turnId: "turn-live", turnOrigin: "live_user_companion", via: "bash", command: "echo first-host", spendsMoney: false,
-    })]);
+    expect(wrap.mock.calls[0]?.[0]).toBe("make --version");
+    expect(started()).toEqual([
+      expect.objectContaining({ turnId: "turn-live", turnOrigin: "live_user_companion", via: "bash", command: "echo first-host", spendsMoney: false }),
+      expect.objectContaining({ command: "echo second-host", externalContent: ["read_channel_conversation"] }),
+    ]);
+    expect(started()[0]).not.toHaveProperty("externalContent");
   }, 90_000);
 
   it("treats the user's Slack DM to themselves like Companion", async () => {
@@ -170,19 +173,23 @@ describe("bash with the sandbox bypass on", () => {
   }, 90_000);
 
   // 回归（2026-11-11 返工）：执行结束的通知叫醒的一轮里，bash 一律退回沙箱。现在免沙箱，读了连接结果以后才退回。
-  it("runs outside the sandbox in a turn that run.finished woke, then back in the sandbox after a connection result", async () => {
+  it("runs outside the sandbox in a turn that run.finished woke, also after a connection result, and sends tier 2 to the sandbox", async () => {
     turnOn();
     origin = { external: false, timer: null, wokenBy: { origin: "system:blocker", kinds: ["run.finished"] } };
-    const ends = await session([bash("echo first-host"), bash("echo second-sandbox")], (index) => {
+    const ends = await session([bash("echo first-host"), bash("echo second-host"), bash("make --version")], (index) => {
       if (index === 1) origin = withExternalContent(origin, { via: "tool", tool: "call_connection_tool" });
     });
     expect(ends[0]?.text.startsWith(HOST_RUN_MARK)).toBe(true);
-    expect(ends[1]?.text).toMatch(/^（沙箱里：免沙箱开着，但这一次没有用——这一轮用 call_connection_tool 读了外部内容/);
+    expect(ends[1]?.text.startsWith(HOST_RUN_MARK)).toBe(true);
+    expect(ends[2]?.text).toMatch(/^（沙箱里：免沙箱开着，但这一次没有用——命令筛查没有放行（confirm）/);
     expect(wrap).toHaveBeenCalledTimes(1);
-    expect(wrap.mock.calls[0]?.[0]).toBe("echo second-sandbox");
-    expect(started()).toEqual([expect.objectContaining({
-      turnId: null, turnOrigin: "system_event", wokenBy: { origin: "system:blocker", kinds: ["run.finished"] }, via: "bash", command: "echo first-host",
-    })]);
+    expect(wrap.mock.calls[0]?.[0]).toBe("make --version");
+    expect(started()).toEqual([
+      expect.objectContaining({
+        turnId: null, turnOrigin: "system_event", wokenBy: { origin: "system:blocker", kinds: ["run.finished"] }, via: "bash", command: "echo first-host",
+      }),
+      expect.objectContaining({ command: "echo second-host", turnOrigin: "system_event", externalContent: ["call_connection_tool"] }),
+    ]);
   }, 90_000);
 
   it("keeps a turn that an external message woke in the sandbox", async () => {
@@ -199,13 +206,12 @@ describe("bash with the sandbox bypass on", () => {
     expect(started()).toEqual([]);
   }, 90_000);
 
-  it("keeps a turn of unknown origin in the sandbox", async () => {
+  it("runs a tier-1 command when the turn's origin is unknown, and records it as unattributed", async () => {
     turnOn();
-    const ends = await session([bash("echo system-turn")]);
-    expect(ends[0]?.text).toMatch(/^（沙箱里：免沙箱开着，但这一次没有用——这一轮的来源认不出来/);
-    expect(ends[0]?.text).toContain("system-turn");
-    expect(wrap).toHaveBeenCalledTimes(1);
-    expect(started()).toEqual([]);
+    const ends = await session([bash("echo unknown-turn")]);
+    expect(ends[0]?.text.startsWith(HOST_RUN_MARK)).toBe(true);
+    expect(wrap).not.toHaveBeenCalled();
+    expect(started()).toEqual([expect.objectContaining({ turnId: null, turnOrigin: "unattributed", command: "echo unknown-turn" })]);
   }, 90_000);
 
   it("adds nothing to the result and stays in the sandbox when the switch is off", async () => {

@@ -1,6 +1,7 @@
-// 命令筛查器（docs/ticket-246-user-turn-bypass.md 第 4 节）。免沙箱开关打开时，bash 和 run_on_host 要在沙箱外跑的命令
-// 先过这里。结果三种：allow 直接在沙箱外跑；floor 碰到底线；unknown 筛查器读不懂。floor 和 unknown 都退回今天的做法
-// （bash 回沙箱，run_on_host 发确认卡），所以这里宁可多拦：拦错的代价是多一张卡，放错的代价改不回来。
+// 命令筛查器（docs/ticket-246-user-turn-bypass.md 第 4 节、第 10 节）。免沙箱开关打开时，bash 和 run_on_host 要在沙箱外跑的命令
+// 先过这里。结果四种：allow（第一档）直接在沙箱外跑；confirm（第二档，破坏性或不可逆的形状，tierTwoHit）；floor 碰到底线；
+// unknown 筛查器读不懂。后三种都退回今天的做法（bash 回沙箱，run_on_host 发确认卡），所以这里宁可多拦：拦错的代价是多一张卡，
+// 放错的代价改不回来。用户 2026-11-11 13:42 定了只看命令本身：这一轮是谁叫醒的、读没读过外部内容，都不改变结果。
 //
 // 怎么读一条命令（4.1）：
 //   1. 按 shell 的词法拆：;、&&、||、|、&、换行和括号分开简单命令，每个简单命令取程序名和参数，去掉引号。
@@ -21,7 +22,7 @@
 //
 // 沙箱的清单直接 import（sandbox-policy.ts），不另写一份，免得两边漂开；只有程序名的清单是这里自己的。
 import { mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import {
   DATA_DIR_ALWAYS_DENY_WRITE, DATA_DIR_DENY_READ, SANDBOX_DENY_READ_HOME, SANDBOX_DENY_WRITE_HOME, SANDBOX_SECRET_HOSTS,
@@ -30,7 +31,8 @@ import type { Locale } from "@pi-lead-child/protocol";
 import { HOST_COMMAND_LIMITS } from "../ui-actions/host-commands.js";
 import { screenMessages } from "./screen.messages.js";
 
-export type ScreenVerdict = "allow" | "floor" | "unknown";
+// confirm：第二档，破坏性或不可逆的形状（用户 2026-11-11 13:42）。和 floor、unknown 一样退回今天的做法。
+export type ScreenVerdict = "allow" | "confirm" | "floor" | "unknown";
 
 export const SCREEN_RULES = {
   // 五条底线（4.2）
@@ -57,6 +59,15 @@ export const SCREEN_RULES = {
   "script-outside-scratch": "unknown",
   "script-not-screened": "unknown",
   unterminated: "unknown",
+  // 第二档（tierTwoHit）：只看命令的形状，不管这一轮是谁叫醒的、读没读过外部内容。
+  delete: "confirm",
+  "git-discard": "confirm",
+  "force-push": "confirm",
+  "push-target": "confirm",
+  "system-change": "confirm",
+  "unscreened-code": "confirm",
+  "write-outside-roots": "confirm",
+  upload: "confirm",
 } as const satisfies Record<string, Exclude<ScreenVerdict, "allow">>;
 
 export type ScreenRule = keyof typeof SCREEN_RULES;
@@ -125,6 +136,8 @@ export interface ScreenInput {
   home?: string;
   /** Fairy 自报这条命令会花钱（工具参数 spends_money）。 */
   spendsMoney?: boolean;
+  /** 系统的临时目录：在这里写和删算第一档。缺省是 os.tmpdir() 和 /tmp。 */
+  tempDirs?: readonly string[];
   /** lead 的 credential-guard.ts 的 credentialPathReason：一个路径为什么是凭证，不是时为 null。 */
   credentialPathReason: (path: string, context: { home: string; cwd: string }) => string | null;
   fs?: ScreenFs;
@@ -142,6 +155,7 @@ export function screenHostCommand(input: ScreenInput): ScreenResult {
     dataDir,
     scratch: join(dataDir, "lead-scratch"),
     roots: input.allowedRoots.map((root) => fs.realPath(resolve(root))),
+    temp: [...new Set((input.tempDirs ?? [tmpdir(), "/tmp"]).map((dir) => fs.realPath(resolve(dir))))],
     credentialPathReason: input.credentialPathReason,
     protectedRead: [
       join(home, "Library", "Keychains"),
@@ -192,6 +206,14 @@ export function screenReason(result: ScreenResult, locale: Locale): string | nul
     "script-outside-scratch": () => m.scriptOutsideScratch(detail),
     "script-not-screened": () => m.scriptNotScreened(detail),
     unterminated: () => m.unterminated(detail),
+    delete: () => m.delete(detail),
+    "git-discard": () => m.gitDiscard(detail),
+    "force-push": () => m.forcePush(detail),
+    "push-target": () => m.pushTarget(detail),
+    "system-change": () => m.systemChange(detail),
+    "unscreened-code": () => m.unscreenedCode(detail),
+    "write-outside-roots": () => m.writeOutsideRoots(detail),
+    upload: () => m.upload(detail),
   };
   const reason = reasons[result.rule]();
   return result.script && result.line ? m.atScriptLine(reason, result.script, result.line) : reason;
@@ -633,6 +655,8 @@ interface ScreenEnv {
   dataDir: string;
   scratch: string;
   roots: string[];
+  // 系统的临时目录（realpath 以后）。
+  temp: string[];
   credentialPathReason: ScreenInput["credentialPathReason"];
   protectedRead: string[];
   ledger: string[];
@@ -802,6 +826,16 @@ function screenCommand(command: SimpleCommand, context: ScreenContext, env: Scre
     }
   }
 
+  // curl -d @文件、-F x=@文件 这类写法读的本机文件：是凭证时按底线拦。
+  if (HTTP_CLIENTS.has(name)) {
+    for (const arg of argTexts) {
+      const at_ = /(?:^|=)[@<]([^-].*)$/.exec(arg);
+      if (!at_) continue;
+      const credential = credentialHit(pathRef(at_[1]!.replace(/;.*$/, ""), cwd, env), env, cwd);
+      if (credential) return at("credentials", credential);
+    }
+  }
+
   // 删除。
   const deleted = deletedPaths(name, args, gitSubcommand, gitArgs, cwd);
   for (const arg of deleted) {
@@ -815,6 +849,10 @@ function screenCommand(command: SimpleCommand, context: ScreenContext, env: Scre
       if (hit) return at(hit.rule, hit.detail);
     }
   }
+
+  // 第二档：破坏性或不可逆的形状。
+  const tierTwo = tierTwoHit(name, program, args, gitSubcommand, gitArgs, cwd, env);
+  if (tierTwo) return at(tierTwo.rule, tierTwo.detail);
 
   // cd 改后面命令的 cwd。
   if (name === "cd") {
@@ -1092,7 +1130,7 @@ function protectedHit(path: PathRef, locations: readonly string[]): string | nul
 
 function outsideRoots(path: PathRef, env: ScreenEnv): string | null {
   const candidates = path.glob ? [path.glob.dir] : [path.real, path.link];
-  const outside = candidates.find((candidate) => !env.roots.some((root) => within(candidate, root)));
+  const outside = candidates.find((candidate) => ![...env.roots, ...env.temp].some((root) => within(candidate, root)));
   return outside ?? null;
 }
 
@@ -1138,6 +1176,8 @@ function writeTargetHit(path: PathRef, op: string, env: ScreenEnv): { rule: Scre
     const outside = outsideRoots(path, env);
     if (outside) return { rule: "delete-outside-roots", detail: `> ${outside}` };
   }
+  // 追加写到工作目录和临时目录以外：第二档。
+  if (!writable(path, env)) return { rule: "write-outside-roots", detail: `${op} ${path.raw}` };
   return null;
 }
 
@@ -1162,6 +1202,268 @@ function screenRedirects(
     if (hit) return at(hit.rule, hit.detail);
   }
   return null;
+}
+
+// ——— 第二档：破坏性或不可逆的形状（用户 2026-11-11 13:42）———
+// 免沙箱开着时，一条命令能不能在沙箱外直接跑，只看命令本身：不管这一轮是谁叫醒的、读没读过外部内容。第一档（只读、查询、
+// 普通推送、在仓库里提交、只写到工作目录和临时目录）直接跑；第二档（下面这些形状）要确认：bash 回沙箱，run_on_host 发卡。
+// 只认命令的形状和通用的程序，不认任何平台、也不认 Lead 的工具名。
+
+// 读写都只在这些地方时算「写到已经授权的位置」：Lead 能写的根（lead-scratch、隔离 worktree、工单目录）和系统的临时目录。
+function writable(path: PathRef, env: ScreenEnv): boolean {
+  const candidates = path.glob ? [path.glob.dir] : [path.real, path.link];
+  return candidates.every((candidate) => [...env.roots, ...env.temp].some((root) => within(candidate, root)));
+}
+
+// 删除只在 lead-scratch 和临时目录里算第一档：那是 Lead 自己的草稿。删工作目录里的东西要确认，删别处是底线。
+function scratchLike(path: PathRef, env: ScreenEnv): boolean {
+  const candidates = path.glob ? [path.glob.dir] : [path.real, path.link];
+  return candidates.every((candidate) => [env.scratch, ...env.temp].some((root) => within(candidate, root)));
+}
+
+// 任何命令行工具的这些子命令都是删除或者撤不回的发布（docker rm、kubectl delete、某个 CLI 的 repo delete、npm publish）。
+const DESTRUCTIVE_VERBS = new Set([
+  "delete", "del", "rm", "remove", "destroy", "drop", "purge", "prune", "uninstall", "wipe", "erase", "terminate",
+  "unpublish", "publish", "deprovision",
+]);
+// HTTP 方法写在参数里时（-X DELETE、--method=DELETE）也算删除。
+const DELETE_METHOD = /^(-X|--request|--method)=?(DELETE|PURGE)$/i;
+
+// 会跑筛查器读不到的代码的程序：解释器跑脚本文件、包管理器跑下载回来的脚本或者包里写的命令、构建工具。
+const INTERPRETERS = /^(python[0-9.]*|node|nodejs|ruby|perl|php|deno|tsx|ts-node|swift|java|lua|Rscript)$/;
+// awk 的程序写在命令里：只取字段、打印的照常放行；能跑命令、写文件、读脚本文件的（system、管道、重定向、-f）读不到。
+const AWKS = new Set(["awk", "gawk", "nawk", "mawk"]);
+const VERSION_ONLY = /^(-v|-V|--version|-version|--help|-h)$/;
+const PACKAGE_RUNNERS = new Set(["npx", "pnpx", "bunx", "uvx", "make", "gmake", "ninja", "gradle", "gradlew", "mvn", "rake"]);
+// 包管理器：只读的子命令放行；装到全局、装系统软件是改系统；别的（装依赖、跑脚本）都会跑下载回来的代码。
+const PACKAGE_MANAGERS = new Set(["npm", "pnpm", "yarn", "bun", "pip", "pip3", "pipx", "uv", "gem", "cargo", "go", "brew", "port", "apt", "apt-get", "dnf", "yum", "mas"]);
+const SYSTEM_PACKAGE_MANAGERS = new Set(["brew", "port", "apt", "apt-get", "dnf", "yum", "mas", "pipx"]);
+const PACKAGE_READ_VERBS = new Set([
+  "list", "ls", "view", "info", "show", "search", "outdated", "why", "explain", "audit", "doctor", "config", "env", "version",
+  "whoami", "help", "deps", "uses", "leaves", "desc", "home", "prefix", "root", "bin", "licenses", "check", "freeze", "tree",
+  "--version", "-v", "-V", "--help", "-h", "--prefix", "--cellar", "--repository",
+]);
+const GLOBAL_FLAGS = new Set(["-g", "--global", "--location=global", "--user", "--system", "--break-system-packages"]);
+// 改系统设置的程序。只读的写法（例如 crontab -l、pmset -g）放行。
+const SYSTEM_PROGRAMS: Record<string, (args: readonly string[]) => boolean> = {
+  crontab: (args) => args.length > 0 && args.every((arg) => arg === "-l" || arg.startsWith("-u")),
+  diskutil: (args) => ["list", "info", "activity"].includes(args[0] ?? ""),
+  sysctl: (args) => !args.some((arg) => arg === "-w" || arg.includes("=")),
+  scutil: (args) => args[0] === "--get" || args[0] === "--dns" || args[0] === "--proxy",
+  networksetup: (args) => /^-(get|list)/.test(args[0] ?? ""),
+  pmset: (args) => args[0] === "-g",
+  nvram: (args) => args[0] === "-p" || (args.length === 1 && !args[0]!.includes("=") && !args[0]!.startsWith("-")),
+  csrutil: (args) => args[0] === "status",
+  spctl: (args) => args[0] === "--status" || args[0] === "-a" || args[0] === "--assess",
+  tmutil: (args) => /^(list|status|version|latestbackup|machinedirectory|destinationinfo)/.test(args[0] ?? ""),
+  dscl: (args) => args.some((arg) => /^-(read|list|search)$/.test(arg)),
+  softwareupdate: (args) => args.every((arg) => arg === "-l" || arg === "--list" || arg === "--history"),
+  systemsetup: (args) => (args[0] ?? "").startsWith("-get"),
+  profiles: (args) => ["list", "show", "status"].includes(args[0] ?? ""),
+  chsh: () => false,
+  fdesetup: (args) => ["status", "list", "isactive"].includes(args[0] ?? ""),
+  kextload: () => false,
+  kextunload: () => false,
+};
+// 直接用路径跑的程序：系统和包管理器装程序的目录里的照常认程序名，别处的文件（例如下载回来的）读不到。
+const SYSTEM_BIN_DIRS = ["/bin", "/usr/bin", "/usr/sbin", "/sbin", "/usr/local/bin", "/opt/homebrew/bin", "/opt/homebrew/sbin"];
+// 往指定位置写的程序：值是写的目标的选项，和「最后一个路径参数是目标」的程序。
+const DESTINATION_WRITERS = new Set(["cp", "ln", "install", "ditto", "rsync", "scp"]);
+const ALL_PATH_WRITERS = new Set(["touch", "mkdir", "chmod", "chown", "chgrp", "xattr", "truncate", "setfile", "chflags"]);
+
+/** 第二档的命中。第一档时为 null。git 的推送和丢弃改动单独看（gitTierTwo）。 */
+function tierTwoHit(
+  name: string, program: Word, args: readonly Word[], gitSubcommand: string | null, gitArgs: readonly Word[], cwd: string, env: ScreenEnv,
+): { rule: ScreenRule; detail: string } | null {
+  const argTexts = args.map((arg) => arg.text);
+  const positional = argTexts.filter((arg) => !arg.startsWith("-"));
+  const ref = (text: string, glob = false) => pathRef(text, cwd, env, glob);
+  const outside = (path: PathRef) => (writable(path, env) ? null : path.raw);
+
+  // 用路径直接跑的文件（lead-scratch 里的前面已经拦了）。
+  if (program.text.includes("/") && !SYSTEM_BIN_DIRS.some((dir) => within(ref(program.text).real, dir) || within(ref(program.text).absolute, dir))) {
+    return { rule: "unscreened-code", detail: program.text };
+  }
+  if (name === "git") return gitTierTwo(gitSubcommand, gitArgs, cwd, env);
+
+  // 删除：工作目录里的要确认（工作目录以外的前面已经按底线拦了）。
+  for (const arg of deletedPaths(name, args, gitSubcommand, gitArgs, cwd)) {
+    if (!scratchLike(ref(arg.text, arg.glob), env)) return { rule: "delete", detail: `${name} ${arg.text}` };
+  }
+  if (name === "mv") {
+    const paths = pathArguments(args);
+    for (const arg of paths.slice(0, -1)) {
+      if (!scratchLike(ref(arg.text, arg.glob), env)) return { rule: "delete", detail: `mv ${arg.text}` };
+    }
+    const target = paths.at(-1);
+    if (target && outside(ref(target.text, target.glob))) return { rule: "write-outside-roots", detail: `mv → ${target.text}` };
+  }
+  if (!READ_ONLY_PROGRAMS.has(name) && !DYNAMIC_PRINTERS.has(name)) {
+    const verb = positional.slice(0, 3).find((word) => DESTRUCTIVE_VERBS.has(word.toLowerCase()));
+    if (verb) return { rule: "delete", detail: `${name} ${verb}` };
+    const method = argTexts.find((arg, index) => DELETE_METHOD.test(arg) || (/^(-X|--request|--method)$/.test(arg) && /^(DELETE|PURGE)$/i.test(argTexts[index + 1] ?? "")));
+    if (method) return { rule: "delete", detail: `${name} DELETE` };
+  }
+
+  // 改系统：系统设置、装系统软件、装到全局。
+  const system = SYSTEM_PROGRAMS[name];
+  if (system && !system(argTexts)) return { rule: "system-change", detail: [name, ...argTexts].join(" ").slice(0, 80) };
+  if (PACKAGE_MANAGERS.has(name)) {
+    const verb = positional[0] ?? argTexts[0] ?? "";
+    // 不带子命令的 yarn、bun 是装依赖。
+    if (!verb) return name === "yarn" || name === "bun" ? { rule: "unscreened-code", detail: name } : null;
+    if (PACKAGE_READ_VERBS.has(verb)) return null;
+    if (SYSTEM_PACKAGE_MANAGERS.has(name) || argTexts.some((arg) => GLOBAL_FLAGS.has(arg))
+      || ((name === "cargo" || name === "go") && verb === "install")) {
+      return { rule: "system-change", detail: `${name} ${verb}` };
+    }
+    return { rule: "unscreened-code", detail: `${name} ${verb}` };
+  }
+
+  // 跑读不到的代码。
+  if (PACKAGE_RUNNERS.has(name)) return { rule: "unscreened-code", detail: name };
+  if (AWKS.has(name)) {
+    const programText = argTexts.find((arg, index) => !arg.startsWith("-") && !["-F", "-v"].includes(argTexts[index - 1] ?? "")) ?? "";
+    if (argTexts.includes("-f") || /system|getline|[|>]/.test(programText)) return { rule: "unscreened-code", detail: `${name} ${programText.slice(0, 40)}` };
+  }
+  if (INTERPRETERS.test(name) && !(args.length > 0 && args.every((arg) => VERSION_ONLY.test(arg.text)))) {
+    return { rule: "unscreened-code", detail: [name, ...argTexts].join(" ").slice(0, 60) };
+  }
+
+  // 把本机的文件发出去：curl -T、-d @文件、-F x=@文件，wget --post-file，rsync、scp 发到远端。
+  if (HTTP_CLIENTS.has(name)) {
+    const upload = argTexts.find((arg, index) => ["-T", "--upload-file"].includes(argTexts[index - 1] ?? "")
+      || /^--(post|body)-file=/.test(arg) || ["--post-file", "--body-file"].includes(argTexts[index - 1] ?? "")
+      || /^@[^-]/.test(arg) || /=@[^-]/.test(arg) || /=<[^-]/.test(arg));
+    if (upload) return { rule: "upload", detail: `${name} ${upload.slice(0, 60)}` };
+  }
+  if ((name === "rsync" || name === "scp") && positional.length > 0 && /^[^/]*:/.test(positional.at(-1)!)) {
+    return { rule: "upload", detail: `${name} → ${positional.at(-1)}` };
+  }
+
+  // 写到工作目录和临时目录以外。
+  for (const target of writeTargets(name, args, cwd)) {
+    const hit = outside(ref(target.text, target.glob));
+    if (hit) return { rule: "write-outside-roots", detail: `${name} → ${hit}` };
+  }
+  return null;
+}
+
+/** 这条命令要写的路径（重定向另外看）。只认常见的写法，宁可多算。 */
+function writeTargets(name: string, args: readonly Word[], cwd: string): PathArgument[] {
+  const texts = args.map((arg) => arg.text);
+  const valueOf = (...options: string[]) => {
+    for (let index = 0; index < texts.length; index += 1) {
+      const text = texts[index]!;
+      if (options.includes(text) && index + 1 < texts.length) return { text: texts[index + 1]!, glob: false };
+      const option = options.find((candidate) => candidate.startsWith("--") && text.startsWith(`${candidate}=`));
+      if (option) return { text: text.slice(option.length + 1), glob: false };
+    }
+    return null;
+  };
+  const here = { text: cwd, glob: false };
+  if (DESTINATION_WRITERS.has(name)) {
+    const target = valueOf("-t", "--target-directory") ?? pathArguments(args).filter((arg) => !/^[^/]*:/.test(arg.text)).at(-1);
+    return target ? [target] : [];
+  }
+  if (ALL_PATH_WRITERS.has(name)) {
+    // chmod 755 x、chown user x：第一个位置参数是模式或者用户。
+    const paths = pathArguments(args);
+    return ["chmod", "chown", "chgrp", "chflags"].includes(name) ? paths.slice(1) : paths;
+  }
+  if ((name === "sed" || name === "perl") && texts.some((text) => text.startsWith("-i") || text === "--in-place" || /^-[a-z]*i/.test(text))) {
+    const paths = pathArguments(args);
+    const scriptGiven = texts.some((text) => text === "-e" || text === "-f" || text === "--expression");
+    return scriptGiven ? paths : paths.slice(1);
+  }
+  if (name === "curl") {
+    const output = valueOf("-o", "--output", "--output-dir");
+    if (output) return [output];
+    return texts.some((text) => text === "-O" || text === "--remote-name" || text === "--remote-name-all") ? [here] : [];
+  }
+  if (name === "wget") return [valueOf("-O", "--output-document", "-P", "--directory-prefix") ?? here];
+  if (name === "unzip") return [valueOf("-d") ?? here];
+  if (name === "tar" && texts.some((text) => /^-?[a-zA-Z]*x/.test(text) || text === "--extract")) return [valueOf("-C", "--directory") ?? here];
+  if (name === "dd") {
+    const output = texts.find((text) => text.startsWith("of="));
+    return output ? [{ text: output.slice(3), glob: false }] : [];
+  }
+  return [];
+}
+
+// git 的远端分支名里算默认分支的。没有写分支时按当前分支算，当前分支可能就是默认分支，也要确认。
+const DEFAULT_BRANCHES = new Set(["main", "master", "HEAD"]);
+const GIT_PUSH_VALUE_OPTIONS = new Set(["-o", "--push-option", "--repo", "--receive-pack", "--exec", "--signed"]);
+
+function gitTierTwo(subcommand: string | null, args: readonly Word[], cwd: string, env: ScreenEnv): { rule: ScreenRule; detail: string } | null {
+  const texts = args.map((arg) => arg.text);
+  const has = (...flags: string[]) => texts.some((text) => flags.includes(text) || flags.some((flag) => flag.startsWith("--") && text.startsWith(`${flag}=`)));
+  switch (subcommand) {
+    case "push": return gitPushHit(texts);
+    case "remote": {
+      const verb = texts.find((text) => !text.startsWith("-"));
+      return verb && ["add", "set-url", "rename", "remove", "rm", "set-head", "prune"].includes(verb)
+        ? { rule: "push-target", detail: `git remote ${verb}` } : null;
+    }
+    case "config":
+      return texts.some((text) => /^(--get|--get-all|--get-regexp|--list|-l|--show-origin|--show-scope)$/.test(text))
+        || texts.filter((text) => !text.startsWith("-")).length < 2
+        ? null : { rule: "system-change", detail: "git config" };
+    case "reset": return has("--hard", "--merge", "--keep") ? { rule: "git-discard", detail: "git reset --hard" } : null;
+    case "checkout":
+      return has("--", ".", "-f", "--force", "-p", "--patch") ? { rule: "git-discard", detail: "git checkout 丢掉工作区的改动" } : null;
+    case "restore": return has("--staged", "-S") && !has("--worktree", "-W") ? null : { rule: "git-discard", detail: "git restore" };
+    case "branch": return has("-D") || (has("-d", "--delete") && has("-f", "--force")) ? { rule: "git-discard", detail: "git branch -D" } : null;
+    case "stash": return ["drop", "clear"].includes(texts[0] ?? "") ? { rule: "git-discard", detail: `git stash ${texts[0]}` } : null;
+    case "tag": return has("-d", "--delete") ? { rule: "git-discard", detail: "git tag -d" } : null;
+    case "reflog": return ["expire", "delete"].includes(texts[0] ?? "") ? { rule: "git-discard", detail: `git reflog ${texts[0]}` } : null;
+    case "gc": return texts.some((text) => text.startsWith("--prune")) ? { rule: "git-discard", detail: "git gc --prune" } : null;
+    case "update-ref": return has("-d") ? { rule: "git-discard", detail: "git update-ref -d" } : null;
+    case "worktree": return ["remove", "prune"].includes(texts[0] ?? "") ? { rule: "git-discard", detail: `git worktree ${texts[0]}` } : null;
+    case "prune": case "filter-branch": case "filter-repo": return { rule: "git-discard", detail: `git ${subcommand}` };
+    case "clean": {
+      const paths = pathArguments(args.filter((arg) => !arg.text.startsWith("-")));
+      const targets = paths.length ? paths : [{ text: cwd, glob: false }];
+      return targets.every((arg) => scratchLike(pathRef(arg.text, cwd, env, arg.glob), env)) ? null : { rule: "delete", detail: "git clean" };
+    }
+    case "clone": {
+      const positional = texts.filter((text) => !text.startsWith("-"));
+      const target = positional.length >= 2 ? positional.at(-1)! : cwd;
+      return writable(pathRef(target, cwd, env), env) ? null : { rule: "write-outside-roots", detail: `git clone → ${target}` };
+    }
+    default: return null;
+  }
+}
+
+/** git push 的第二档：推到没有配置过的远端，强推或删除默认分支（或者没写分支），镜像推送。普通推送和强推功能分支是第一档。 */
+function gitPushHit(texts: readonly string[]): { rule: ScreenRule; detail: string } | null {
+  const positional: string[] = [];
+  let force = false;
+  for (let index = 0; index < texts.length; index += 1) {
+    const text = texts[index]!;
+    if (GIT_PUSH_VALUE_OPTIONS.has(text)) {
+      if (text === "--repo") positional.unshift(texts[index + 1] ?? "");
+      if (text === "--receive-pack" || text === "--exec") return { rule: "unscreened-code", detail: `git push ${text}` };
+      index += 1;
+      continue;
+    }
+    if (text.startsWith("--repo=")) { positional.unshift(text.slice(7)); continue; }
+    if (text.startsWith("--receive-pack=") || text.startsWith("--exec=")) return { rule: "unscreened-code", detail: "git push --receive-pack" };
+    if (["--mirror", "--delete", "-d", "--prune"].includes(text)) return { rule: "force-push", detail: `git push ${text}` };
+    if (text === "-f" || text === "--force" || text.startsWith("--force-with-lease") || text === "--force-if-includes") { force = true; continue; }
+    if (/^-[a-zA-Z]+$/.test(text) && text.includes("f")) { force = true; continue; }
+    if (text.startsWith("-")) continue;
+    positional.push(text);
+  }
+  const [remote, ...refspecs] = positional;
+  if (remote && /(:\/\/|^[^/]+@[^/:]+:|^\.{0,2}\/|^~)/.test(remote)) return { rule: "push-target", detail: `git push ${remote}` };
+  if (refspecs.some((spec) => spec.startsWith(":"))) return { rule: "force-push", detail: "git push :分支（删除远端分支）" };
+  if (!force && !refspecs.some((spec) => spec.startsWith("+"))) return null;
+  const forced = force ? refspecs : refspecs.filter((spec) => spec.startsWith("+"));
+  if (!forced.length) return { rule: "force-push", detail: "git push --force（没写分支，按当前分支算）" };
+  const dst = (spec: string) => spec.replace(/^\+/, "").split(":").at(-1)!.replace(/^refs\/heads\//, "");
+  const hit = forced.find((spec) => DEFAULT_BRANCHES.has(dst(spec)) || dst(spec) === "");
+  return hit ? { rule: "force-push", detail: `git push --force ${hit}` } : null;
 }
 
 // ——— 路径比较 ———
