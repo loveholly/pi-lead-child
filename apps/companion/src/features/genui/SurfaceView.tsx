@@ -13,6 +13,7 @@ import { useCompanionRuntime, useControlPlaneStore, useWorkspaceStore } from '..
 import { useConnectionState, useReloadApp, useServedWebVersion, useTicketInterventions } from '../../state/hooks';
 import { ChannelCardSlot } from '../chat/ChannelMessageCard';
 import { InterventionSlot } from '../chat/InterventionSlot';
+import { MarkdownMessage } from '../chat/MarkdownMessage';
 import { ReminderCard } from '../chat/ReminderCard';
 import { useOpenTicket } from '../chat/useOpenTicket';
 import { ConnectionConfirmCard, ConnectionConnectCard } from './ConnectionCards';
@@ -555,6 +556,7 @@ function TicketHead({ ticketId }: { ticketId: number }) {
 // 引用的原文（2026-10-19）：服务端从工单正文或 checkpoint 里取出来的原话，照原样显示，上面写出处，点出处打开工单。
 // Lead 转述时编造过文件路径，所以转述改成引用：这里没有一个字是 Lead 打的。
 // 生成中（还没定稿）没有 text：只写「正在取原文…」。
+// The original is Markdown written by agents (ticket body, checkpoint): render it with MarkdownMessage like the ticket body, at the card body size.
 function SourceQuote({ ticketId, text, label, truncated }: { ticketId: number; text: string | null; label: string | null; truncated: boolean }) {
   const openTicket = useOpenTicket();
   const m = useMessages(genuiMessages).surface;
@@ -569,7 +571,7 @@ function SourceQuote({ ticketId, text, label, truncated }: { ticketId: number; t
       >
         <Text size="meta" tone="secondary">{label ? m.sourceLabel(label) : m.sourceTicket(ticketId)}</Text>
       </Pressable>
-      <Text size="body">{text ?? m.sourceLoading}</Text>
+      {text === null ? <Text size="body">{m.sourceLoading}</Text> : <MarkdownMessage markdown={text} size="body" />}
       {truncated ? <Text size="note" tone="secondary">{m.truncated}</Text> : null}
     </Column>
   );

@@ -94,7 +94,19 @@ export function resolveSourceQuote(db: Db, location: SourceQuoteLocation): Resol
   }
   const clean = redactSecretText(text);
   const truncated = clean.length > SOURCE_QUOTE_MAX;
-  return { text: truncated ? `${clean.slice(0, SOURCE_QUOTE_MAX - 1)}…` : clean, label, truncated };
+  return { text: truncated ? truncateQuote(clean) : clean, label, truncated };
+}
+
+// The app renders the quote as Markdown. A cut inside a line leaves half a table row or an unclosed ` or **,
+// which then shows as raw symbols. So a long quote ends after its last whole line, and the ellipsis is a paragraph
+// of its own (the blank line ends a table, so the ellipsis is not read as a table row). Only when whole lines
+// would keep less than half the limit does the cut fall inside a line.
+const TRUNCATED_TAIL = "\n\n…";
+function truncateQuote(text: string): string {
+  const room = SOURCE_QUOTE_MAX - TRUNCATED_TAIL.length;
+  const lineEnd = text.lastIndexOf("\n", room);
+  if (lineEnd >= SOURCE_QUOTE_MAX / 2) return `${text.slice(0, lineEnd).trimEnd()}${TRUNCATED_TAIL}`;
+  return `${text.slice(0, SOURCE_QUOTE_MAX - 1)}…`;
 }
 
 /** 不能显示卡片的地方（plc、Slack、推送）看到的文字：Lead 写的 fallback 后面加上引用的原文，不超过 max。 */

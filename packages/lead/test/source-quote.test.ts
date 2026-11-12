@@ -7,6 +7,7 @@ import { tempDir } from "@pi-lead-child/core/testing";
 import { appendBody, createItem, openDb, type Db } from "@pi-lead-child/store";
 import { partialUiSurface } from "@pi-lead-child/protocol";
 import { createLeadTools, type LeadDeps } from "../src/tools.js";
+import { resolveSourceQuote, SOURCE_QUOTE_MAX } from "../src/credibility/source-quote.js";
 
 let db: Db;
 let deps: LeadDeps;
@@ -51,6 +52,32 @@ describe("SourceQuote", () => {
     ).run(ticket, "完成 PR #101 评审", "发现 3 项 Blocking Issues。").lastInsertRowid);
     const props = quoteOf(await renderUi().execute("c3", card({ source: "checkpoint", checkpoint })));
     expect(props).toMatchObject({ text: "完成 PR #101 评审\n发现 3 项 Blocking Issues。", label: `工单 #${ticket} · checkpoint #${checkpoint}` });
+  });
+
+  // The app renders the quote as Markdown. A cut in the middle of a line leaves half a table row or an open
+  // `code` / **bold** marker, which then shows as raw symbols. A long quote stops at the end of a whole line.
+  it("cuts a long quote at a line boundary, so its Markdown stays whole", async () => {
+    const rows = Array.from({ length: 80 }, (_, index) => `| check ${index} | passed | see \`lib/check-${index}.ts\` and **notes** |`);
+    const longTicket = createItem(db, { title: "Long report", brief: "b", createdBy: "lead" });
+    appendBody(db, longTicket, ["【Report】", "", "| Check | Result | Evidence |", "|---|---|---|", ...rows].join("\n"));
+    const props = quoteOf(await renderUi().execute("c7", {
+      root: "q", fallback_text: "Report below.",
+      nodes: [{ id: "q", type: "SourceQuote", props: { ticket: longTicket, source: "body", heading: "【Report】" } }],
+    }));
+    expect(props.truncated).toBe(true);
+    expect(props.text.length).toBeLessThanOrEqual(SOURCE_QUOTE_MAX);
+    expect(props.text.endsWith("\n\n…")).toBe(true);
+    const lines = props.text.slice(0, -"\n\n…".length).split("\n");
+    expect(lines.slice(4).every((line: string) => rows.includes(line))).toBe(true);
+  });
+
+  it("cuts in the middle when the first lines are too long to keep whole", () => {
+    const long = `${"a".repeat(SOURCE_QUOTE_MAX * 2)}\nshort`;
+    const longTicket = createItem(db, { title: "One long line", brief: "b", createdBy: "lead" });
+    appendBody(db, longTicket, long);
+    const quote = resolveSourceQuote(db, { ticket: longTicket, source: "body" });
+    expect(quote.truncated).toBe(true);
+    expect(quote.text).toBe(`${"a".repeat(SOURCE_QUOTE_MAX - 1)}…`);
   });
 
   it("refuses a location the ledger does not have, so Lead finds the real one", async () => {

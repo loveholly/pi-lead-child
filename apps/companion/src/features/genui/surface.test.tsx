@@ -805,6 +805,38 @@ describe('a quoted source', () => {
     expect(screen.getByText(/wrapper\.ts 的参数可以绕过/)).toBeTruthy();
   });
 
+  // The quoted text is the ticket body or a checkpoint, which agents write in Markdown. It used to show as plain text,
+  // so bold markers, backticks and table pipes appeared verbatim.
+  it('renders the Markdown of the original like the ticket body does', () => {
+    renderSurface(quote({
+      text: [
+        '【Review report】',
+        '',
+        '**Verdict: passed.** Delivered to `tools/watch/`.',
+        '',
+        '| Check | Result |',
+        '|---|---|',
+        '| Unit tests | passed |',
+      ].join('\n'),
+      label: 'Ticket #98 body',
+    }));
+    const box = screen.getByTestId('surface-source-quote-98');
+    const text = box.textContent ?? '';
+    expect(text).toContain('Verdict: passed.');
+    expect(text).toContain('tools/watch/');
+    expect(text).not.toContain('**');
+    expect(text).not.toContain('`');
+    expect(text).not.toContain('|---|');
+    expect(within(box).getByTestId('markdown-table')).toBeTruthy();
+    expect(within(box).getByText('Unit tests')).toBeTruthy();
+  });
+
+  // A checkpoint quote joins its title and summary with one newline: each stays on its own line.
+  it('keeps single line breaks of the original', () => {
+    renderSurface(quote({ text: 'Review of PR #101 finished\nFound 3 blocking issues.', label: 'Ticket #98 · checkpoint #5' }));
+    expect(screen.getByTestId('surface-source-quote-98').textContent).toContain('Review of PR #101 finished\nFound 3 blocking issues.');
+  });
+
   it('says it is still fetching the original while the card is generated', () => {
     renderSurface(quote({}));
     expect(screen.getByText('Loading the original text…')).toBeTruthy();
