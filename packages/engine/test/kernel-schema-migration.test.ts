@@ -1038,8 +1038,10 @@ describe("schema version", () => {
     // v63（2026-11-02，Lead 自己装本地 MCP）：connections.launch_json（store/test/connection-launch-migration.test.ts）。
     // v64（2026-11-06，token 按计费拆开）：items 的 uncached_input_tokens、cache_write_tokens、cache_read_tokens、output_tokens
     // （store/test/item-usage-parts-migration.test.ts）。
-    expect(LATEST_SCHEMA_VERSION).toBe(65);
-    expect(db.prepare("SELECT MAX(version) AS version FROM schema_migrations").get()).toEqual({ version: 65 });
+    // v65 (2026-11-11, host-run watches): watches.host_run (store/test/watch-host-run-migration.test.ts).
+    // v66 (2026-11-12, external agenda feeds): agenda_entries (store/test/agenda-feeds.test.ts).
+    expect(LATEST_SCHEMA_VERSION).toBe(66);
+    expect(db.prepare("SELECT MAX(version) AS version FROM schema_migrations").get()).toEqual({ version: 66 });
   });
 });
 

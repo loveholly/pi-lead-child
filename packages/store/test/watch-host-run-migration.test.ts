@@ -13,7 +13,7 @@ describe("the v65 watch host_run migration", () => {
     const db = openDb(join(tempDir("plc-v65-fresh-"), "plc.db"));
     expect(columns(db)).toContain("host_run");
     expect(db.prepare("SELECT name FROM schema_migrations WHERE version = 65").get()).toEqual({ name: "watch-host-run-v1" });
-    expect(LATEST_SCHEMA_VERSION).toBe(65);
+    expect(LATEST_SCHEMA_VERSION).toBeGreaterThanOrEqual(65);
     expect(SCHEMA_MIGRATION_VERSIONS).toContain(65);
     const plain = createWatch(db, { label: "a", check: command("true"), mode: "repeat", everySeconds: 60, origin: { kind: "system" } });
     const host = createWatch(db, { label: "b", check: command("true"), mode: "repeat", everySeconds: 60, origin: { kind: "system" }, hostRun: true });

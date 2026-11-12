@@ -81,6 +81,7 @@ export * from "./design-preferences.js";
 export * from "./reply-style.js";
 export * from "./host-bypass.js";
 export * from "./signal-sources.js";
+export * from "./agenda-feeds.js";
 export * from "./busy-placement.js";
 export * from "./channel-connections.js";
 export * from "./channel-catch-up.js";

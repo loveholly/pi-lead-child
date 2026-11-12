@@ -61,9 +61,11 @@ export const TASK_STAGE_EDGES: StageEdgeTable = {
 
 export const REMINDER_STAGE_EDGES: StageEdgeTable = {
   "scheduled->fired": ["system"],
-  "scheduled->cancelled": ["user", "lead"],
+  // system: an external agenda entry was cancelled, removed or muted, so its pre-created reminder goes too
+  // (store agenda-feeds.ts reconciliation).
+  "scheduled->cancelled": ["user", "lead", "system"],
   "fired->acked": ["user", "lead"],
-  "fired->cancelled": ["user", "lead"],
+  "fired->cancelled": ["user", "lead", "system"],
   // 只有 system，而且只有一种触发方式：用户（「10 分钟后再提醒」「改时间」）或 Lead（reschedule_reminder）给一条已经到点的提醒
   // 定了新的时间（工单 07，store 的 rescheduleReminder）。这是改时间，不是生命周期的决定：提醒回到等待，到新的时间再响。
   // 终态 acked、cancelled 不能这样拉回来。谁定的新时间记在 stage.changed 的 reason 里。

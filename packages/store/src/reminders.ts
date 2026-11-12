@@ -328,7 +328,7 @@ export type ReminderTimeSetter = "user" | "lead";
 /** 记下这条提醒的时间是谁定的。sourceTurnId：你在哪一轮里让 Lead 定的。origin：谁要求的（不给时按 setBy 算）。 */
 export function recordReminderTimeSetter(
   db: Db, itemId: number,
-  input: { remindAt: string; setBy: ReminderTimeSetter; actor: "user" | "lead"; sourceTurnId?: string | null; origin?: TimerOrigin | null },
+  input: { remindAt: string; setBy: ReminderTimeSetter; actor: "user" | "lead" | "system"; sourceTurnId?: string | null; origin?: TimerOrigin | null },
 ): void {
   addActivity(db, {
     itemId, actor: input.actor, kind: "decision",

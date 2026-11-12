@@ -75,6 +75,12 @@ describe("reminder stage machine", () => {
     expect(canTransition("reminder", "fired", "acked", "system")).toBe(false);
   });
 
+  it("lets system cancel a reminder whose external agenda entry went away", () => {
+    expect(canTransition("reminder", "scheduled", "cancelled", "system")).toBe(true);
+    expect(canTransition("reminder", "fired", "cancelled", "system")).toBe(true);
+    expect(canTransition("reminder", "acked", "cancelled", "system")).toBe(false);
+  });
+
   it("does not share the task enum", () => {
     expect(canTransition("reminder", "scheduled", "ready", "user")).toBe(false);
     expect(allowedNext("reminder", "acked")).toEqual([]);

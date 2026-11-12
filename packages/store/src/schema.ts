@@ -1392,6 +1392,38 @@ CREATE TABLE IF NOT EXISTS widget_sources (
 CREATE INDEX IF NOT EXISTS idx_widget_sources_due ON widget_sources(paused, next_run_at);
 `;
 
+// External agenda entries (protocol agenda-feeds.ts, migration v66). One row per (feed, key). Feeds themselves live in kv.
+// muted / minutes_before are the user's own settings and a sync never overwrites them. reminder_item_id is the
+// pre-created reminder this entry carries now; reminder_planned_at is the time the system last planned for it, so a
+// reconcile can tell a user's own reschedule (the item's time differs from the plan) from a stale plan.
+export const AGENDA_ENTRIES_SCHEMA = `
+CREATE TABLE IF NOT EXISTS agenda_entries (
+  id                     INTEGER PRIMARY KEY AUTOINCREMENT,
+  feed                   TEXT NOT NULL,
+  key                    TEXT NOT NULL,
+  title                  TEXT NOT NULL,
+  starts_at              TEXT NOT NULL,
+  ends_at                TEXT,
+  all_day                INTEGER NOT NULL DEFAULT 0 CHECK (all_day IN (0, 1)),
+  status                 TEXT NOT NULL CHECK (status IN ('confirmed','tentative','cancelled')),
+  location               TEXT,
+  url                    TEXT,
+  source_skip            INTEGER NOT NULL DEFAULT 0 CHECK (source_skip IN (0, 1)),
+  source_minutes_before  INTEGER,
+  muted                  INTEGER NOT NULL DEFAULT 0 CHECK (muted IN (0, 1)),
+  minutes_before         INTEGER,
+  reminder_item_id       INTEGER REFERENCES items(id),
+  reminder_planned_at    TEXT,
+  content_hash           TEXT NOT NULL,
+  first_seen_at          TEXT NOT NULL,
+  updated_at             TEXT NOT NULL,
+  removed_at             TEXT,
+  UNIQUE (feed, key)
+);
+CREATE INDEX IF NOT EXISTS idx_agenda_entries_starts ON agenda_entries(starts_at);
+CREATE INDEX IF NOT EXISTS idx_agenda_entries_reminder ON agenda_entries(reminder_item_id) WHERE reminder_item_id IS NOT NULL;
+`;
+
 // 会话卡片上做成了的按钮（工单 #263，protocol 的 surface-actions.ts）：一行是一张卡（render_ui 调用）上的一个 Action 按钮。
 // 按钮的操作成功以后写；同一个按钮再做成一次时更新时刻。卡片打开时按 call_id 读，显示「已完成」。
 // 老库靠 CREATE IF NOT EXISTS 自然获得，无需 migrate。
@@ -1865,6 +1897,7 @@ ${MEMORY_SYNC_SCHEMA}
 ${WIDGETS_SCHEMA}
 ${WIDGET_SOURCES_SCHEMA}
 ${SURFACE_ACTIONS_SCHEMA}
+${AGENDA_ENTRIES_SCHEMA}
 `;
 
 export const CHECKPOINT_CONTROL_PLANE_SCHEMA = `
