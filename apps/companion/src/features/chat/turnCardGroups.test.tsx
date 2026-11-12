@@ -11,7 +11,8 @@ import { CompanionRuntimeProvider } from '../../state/CompanionStateProvider';
 import { createCompanionStateRuntime, type CompanionRuntimeDependencies } from '../../state/runtime';
 import type { ConversationCardEntity } from '../../state/types';
 import { LeadConversation } from './LeadConversation';
-import { groupTurnCards, type TurnCardFacts } from './turnCardGroups';
+import { applyControlPlaneMutation } from '../../state/control-plane/actions';
+import { groupTicketParts, groupTurnCards, type TurnCardFacts } from './turnCardGroups';
 
 vi.mock('expo-crypto', () => ({ getRandomBytesAsync: vi.fn(), digest: vi.fn(), CryptoDigestAlgorithm: {} }));
 vi.mock('expo-router', () => ({ useRouter: () => ({ push: vi.fn() }) }));
@@ -77,6 +78,19 @@ describe('groupTurnCards', () => {
   });
 });
 
+describe('groupTicketParts', () => {
+  it('merges three created reminders of one reply, leaves a due one and an unknown one on their own', () => {
+    const parts = [11, 12, 13, 14, 15].map((ticketId) => ({ partId: `t:ticket:${ticketId}`, ticketId }));
+    const slots = groupTicketParts(parts, {
+      itemKind: (id) => (id === 15 ? null : 'reminder'),
+      stage: (id) => (id === 14 ? 'fired' : 'scheduled'),
+    });
+    expect(slots.map((slot) => (slot.kind === 'group' ? `${slot.group.kind}:${slot.group.ticketIds.join(',')}` : slot.cardId)))
+      .toEqual(['reminder:11,12,13', 't:ticket:14', 't:ticket:15']);
+    expect(slots[0]).toMatchObject({ group: { actions: { created: 3 } } });
+  });
+});
+
 const SESSION = 'lead-session';
 
 function reminderSummary(id: number, stage: TicketSummary['stage'] = 'scheduled'): TicketSummary {
@@ -135,3 +149,29 @@ describe('a turn that set many reminders', () => {
     expect(within(list).getByText('11-12 09:55')).toBeTruthy();
   });
 });
+
+describe('a reply that created many reminders with create_ticket', () => {
+  it('shows the ticket parts as one line too, not a card per reminder', async () => {
+    const ids = [100, 101, 102, 103];
+    const runtime = createCompanionStateRuntime({
+      client: { getTicket: vi.fn(async (id: number) => reminderDetail(id)) } as unknown as CompanionRuntimeDependencies['client'],
+      credentials: {} as CompanionRuntimeDependencies['credentials'],
+      scheduler: { schedule: () => 0, cancel: () => {}, now: () => 0 },
+    });
+    runtime.control.setState({ phase: 'ready', connectionState: 'connected' });
+    runtime.control.getState().replaceConversation(SESSION, [turn('turn-parts', {})]);
+    for (const id of ids) {
+      applyControlPlaneMutation(runtime.control, SESSION, {
+        type: 'lead.upsert-ticket-part', turnId: 'turn-parts', partId: `turn-parts:ticket:${id}`, ticketId: id,
+      });
+    }
+    runtime.workspace.setState({ hydrated: true });
+    renderUI(<CompanionRuntimeProvider runtime={runtime}><LeadConversation /></CompanionRuntimeProvider>);
+
+    const group = await screen.findByTestId('turn-card-group-reminder');
+    expect(screen.queryAllByTestId(/^reminder-card-\d+$/)).toHaveLength(0);
+    expect(within(group).getByText('Set reminders')).toBeTruthy();
+    expect(await within(group).findByText(/^4 items · /)).toBeTruthy();
+  });
+});
+

@@ -57,41 +57,38 @@ export function turnCardGroupKind(card: ConversationCardEntity, cardId: string, 
   return null;
 }
 
-/** Split one turn's cards into single cards and groups (see the file header). */
-export function groupTurnCards(
-  cardIds: readonly string[],
-  cardsById: Readonly<Record<string, ConversationCardEntity | undefined>>,
-  facts: TurnCardFacts,
-  min: number = TURN_CARD_GROUP_MIN,
-): TurnCardSlot[] {
-  const members = new Map<TurnCardGroupKind, string[]>();
-  for (const cardId of cardIds) {
-    const card = cardsById[cardId];
-    if (!card) continue;
-    const kind = turnCardGroupKind(card, cardId, facts);
-    if (!kind) continue;
-    members.set(kind, [...(members.get(kind) ?? []), cardId]);
+/** One thing in a turn that may join a group: a conversation card, or a ticket part of the reply. */
+export type GroupMember = {
+  id: string;
+  ticketId: number;
+  kind: TurnCardGroupKind | null;
+  action: ReminderGroupAction;
+};
+
+/** The shared rule: three or more members of one kind become a group that sits where its first member was. */
+export function groupMembers(members: readonly GroupMember[], min: number = TURN_CARD_GROUP_MIN): TurnCardSlot[] {
+  const byKind = new Map<TurnCardGroupKind, GroupMember[]>();
+  for (const member of members) {
+    if (member.kind) byKind.set(member.kind, [...(byKind.get(member.kind) ?? []), member]);
   }
   const grouped = new Map<string, TurnCardGroup>();
-  for (const [kind, ids] of members) {
-    if (ids.length < min) continue;
+  for (const [kind, list] of byKind) {
+    if (list.length < min) continue;
     const actions: Record<ReminderGroupAction, number> = { created: 0, rescheduled: 0, cancelled: 0, acknowledged: 0, other: 0 };
-    const ticketIds: number[] = [];
-    for (const id of ids) {
-      const card = cardsById[id] as TicketCard;
-      ticketIds.push(card.ticketId);
-      if (kind === 'reminder') actions[reminderAction(card.operations.at(-1)!.name)] += 1;
-    }
-    const group: TurnCardGroup = { key: `group:${kind}:${ids[0]}`, kind, cardIds: ids, ticketIds, actions };
-    for (const id of ids) grouped.set(id, group);
+    if (kind === 'reminder') for (const member of list) actions[member.action] += 1;
+    const group: TurnCardGroup = {
+      key: `group:${kind}:${list[0]!.id}`, kind, cardIds: list.map((member) => member.id),
+      ticketIds: list.map((member) => member.ticketId), actions,
+    };
+    for (const member of list) grouped.set(member.id, group);
   }
   const slots: TurnCardSlot[] = [];
   const placed = new Set<string>();
-  // Cards that stay on their own keep their place; each group sits where its first card was.
-  for (const cardId of cardIds) {
-    const group = grouped.get(cardId);
+  // Members that stay on their own keep their place; each group sits where its first member was.
+  for (const member of members) {
+    const group = grouped.get(member.id);
     if (!group) {
-      slots.push({ kind: 'card', cardId });
+      slots.push({ kind: 'card', cardId: member.id });
       continue;
     }
     if (placed.has(group.key)) continue;
@@ -99,4 +96,37 @@ export function groupTurnCards(
     slots.push({ kind: 'group', group });
   }
   return slots;
+}
+
+/** Split one turn's cards into single cards and groups (see the file header). */
+export function groupTurnCards(
+  cardIds: readonly string[],
+  cardsById: Readonly<Record<string, ConversationCardEntity | undefined>>,
+  facts: TurnCardFacts,
+  min: number = TURN_CARD_GROUP_MIN,
+): TurnCardSlot[] {
+  const members = cardIds.flatMap((cardId): GroupMember[] => {
+    const card = cardsById[cardId];
+    if (!card) return [];
+    const kind = turnCardGroupKind(card, cardId, facts);
+    const last = card.kind === 'ticket_execution' ? (card as TicketCard).operations.at(-1) : undefined;
+    return [{ id: cardId, ticketId: card.ticketId, kind, action: last ? reminderAction(last.name) : 'other' }];
+  });
+  return groupMembers(members, min);
+}
+
+/**
+ * The ticket parts of one reply (MessagePartView: an item Lead created with create_ticket). A part is a newly created
+ * task or reminder, so it joins by its item kind once the client knows it; a reminder that is due stays on its own.
+ */
+export function groupTicketParts(
+  parts: ReadonlyArray<{ partId: string; ticketId: number }>,
+  facts: Pick<TurnCardFacts, 'itemKind' | 'stage'>,
+  min: number = TURN_CARD_GROUP_MIN,
+): TurnCardSlot[] {
+  return groupMembers(parts.map(({ partId, ticketId }): GroupMember => {
+    const kind = facts.itemKind(ticketId);
+    const due = kind === 'reminder' && facts.stage(ticketId) === 'fired';
+    return { id: partId, ticketId, kind: due ? null : kind, action: 'created' };
+  }), min);
 }

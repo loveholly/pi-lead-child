@@ -10,6 +10,8 @@ import type { MessageEntity } from '../../state/types';
 
 import { useNow } from '../tickets/useNow';
 import { buildAssistantTurn } from './assistantTurn';
+import { TurnCardGroupView } from './TurnCardGroupView';
+import { groupTicketParts, TURN_CARD_GROUP_MIN, type TurnCardSlot } from './turnCardGroups';
 import { ProvenanceChips } from './ProvenanceChips';
 import { MessagePartView } from './MessagePartView';
 import { turnStatusMessages } from './turnStatus.messages';
@@ -58,6 +60,7 @@ export function AssistantTurnView({
     () => buildAssistantTurn({ messageId, messageState, failure, text, parts, startedAt, endedAt, now }),
     [messageId, messageState, failure, parts, text, startedAt, endedAt, now],
   );
+  const attachmentSlots = useTicketPartSlots(turn.attachmentPartIds, parts, suppressedTicketIds);
   const cardKey = `${messageId}:task`;
   // 这一步在等模型、等过了 30 秒（lead-scheduler spec D11）：还在想的这一轮写「模型回复慢」，不写「Thinking」。
   // 推送里的轮次对得上这一轮时才写；系统回合还没落成一轮时推送不带轮次，那时写在正在跑的那一轮上。
@@ -123,13 +126,16 @@ export function AssistantTurnView({
       ))}
       {/* 依据（方案 A）：这一轮实际读过的东西，由 UI 按工具记录生成，不是 Lead 写的话。点开看具体读了什么。只在主会话里画。 */}
       {inline ? <ProvenanceChips parts={parts} /> : null}
-      {turn.attachmentPartIds.map((partId) => (
+      {/* Three or more created reminders or tickets in one reply show as one line (P9.10, turnCardGroups.ts). */}
+      {attachmentSlots.map((slot) => slot.kind === 'group' ? (
+        <TurnCardGroupView key={slot.group.key} group={slot.group} />
+      ) : (
         <MessagePartView
-          key={partId}
+          key={slot.cardId}
           compact={compact}
           messageId={messageId}
           messageState={messageState}
-          partId={partId}
+          partId={slot.cardId}
           role="assistant"
           suppressedApprovalIds={suppressedApprovalIds}
           suppressedTicketIds={suppressedTicketIds}
@@ -138,3 +144,48 @@ export function AssistantTurnView({
     </>
   );
 }
+
+// Group the reply's ticket parts. The kind and stage come from the same TicketSummary / TicketDetail the single cards
+// read; the selector returns a flat string so unrelated store changes do not re-render. Suppressed parts draw nothing,
+// so they do not count.
+function useTicketPartSlots(
+  partIds: readonly string[],
+  parts: ReturnType<typeof useMessageParts>,
+  suppressedTicketIds: readonly number[] | undefined,
+): TurnCardSlot[] {
+  const ticketParts = useMemo(() => {
+    const byId = new Map(parts.map((part) => [part.id, part]));
+    return partIds.flatMap((partId) => {
+      const part = byId.get(partId);
+      return part?.kind === 'ticket' && !(suppressedTicketIds ?? []).includes(part.ticketId) ? [{ partId, ticketId: part.ticketId }] : [];
+    });
+  }, [partIds, parts, suppressedTicketIds]);
+  const known = useControlPlaneStore((state) => ticketParts.map(({ ticketId }) => {
+    const summary = state.ticketsById[ticketId] ?? state.ticketDetailsById[ticketId]?.ticket;
+    return `${ticketId}:${summary?.kind ?? ''}:${summary?.stage ?? ''}`;
+  }).join('|'));
+  return useMemo(() => {
+    const plain = partIds.map((partId) => ({ kind: 'card' as const, cardId: partId }));
+    if (ticketParts.length < TURN_CARD_GROUP_MIN) return plain;
+    const facts = new Map(known.split('|').filter(Boolean).map((entry) => {
+      const [id, kind, stage] = entry.split(':');
+      return [Number(id), { kind: kind === 'task' || kind === 'reminder' ? kind : null, stage: stage || null }] as const;
+    }));
+    const grouped = groupTicketParts(ticketParts, {
+      itemKind: (ticketId) => facts.get(ticketId)?.kind ?? null,
+      stage: (ticketId) => facts.get(ticketId)?.stage ?? null,
+    });
+    const groupOf = new Map<string, TurnCardSlot>();
+    for (const slot of grouped) if (slot.kind === 'group') for (const id of slot.group.cardIds) groupOf.set(id, slot);
+    // Keep every other attachment (approvals, artifacts, single ticket parts) in its place; a group sits at its first part.
+    const placed = new Set<string>();
+    return plain.flatMap((slot): TurnCardSlot[] => {
+      const group = groupOf.get(slot.cardId);
+      if (!group || group.kind !== 'group') return [slot];
+      if (placed.has(group.group.key)) return [];
+      placed.add(group.group.key);
+      return [group];
+    });
+  }, [known, partIds, ticketParts]);
+}
+
