@@ -194,6 +194,17 @@ describe("reminder reconciliation", () => {
     db.close();
   });
 
+  it("does not remind again after an ack when only the lead time changes into the past", () => {
+    const db = fresh();
+    syncAgendaFeed(db, "work", { entries: [entry("a", "2026-11-12T08:04:00Z")] }, NOW);
+    const first = reminderOf(db, "a").item!;
+    transition(db, { itemId: first.id, to: "fired", actor: "system", reason: "remind_at reached" });
+    transition(db, { itemId: first.id, to: "acked", actor: "user", reason: "seen" });
+    updateAgendaFeed(db, "work", { remind: { minutesBefore: 10 } }, NOW);
+    expect(reminderOf(db, "a").item!.id).toBe(first.id);
+    db.close();
+  });
+
   it("follows the feed: a new default lead time moves reminders, turning reminders off cancels them", () => {
     const db = fresh();
     syncAgendaFeed(db, "work", { entries: [entry("a", "2026-11-12T10:00:00Z")] }, NOW);

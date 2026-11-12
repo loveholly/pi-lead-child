@@ -345,7 +345,9 @@ function reconcileEntry(db: Db, feed: AgendaFeedDto, entry: AgendaEntryDto, now:
   }
   const desiredIso = desired.toISOString();
   const planned = entry.reminderPlannedAt;
-  if (!linked || (linked.stage === "acked" && planned !== desiredIso)) {
+  // After an ack only a later time (the meeting moved later) earns a new reminder: a lead-time change that lands in the
+  // past must not fire an acknowledged reminder again.
+  if (!linked || (linked.stage === "acked" && planned !== desiredIso && desired.getTime() > nowMs)) {
     const id = createReminderFor(db, feed, entry, new Date(Math.max(desired.getTime(), nowMs)));
     link(db, entry.id, id, desiredIso, now);
     publishGatewayEvent(db, itemUpdatedEvent(id, now));
