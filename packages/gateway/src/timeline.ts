@@ -78,8 +78,11 @@ function risk(summary: TicketSummary, at: string, now: Date, locale: Locale): Ti
 
 function externalEntry(entry: AgendaEntryDto, feedLabel: string, reminder: Item | null, nowIso: string): TimelineEntry {
   const remindAt = reminder ? iso(reminder.remind_at) : null;
-  const status: TimelineEntry["status"] = reminder?.stage === "fired" ? "unacked"
-    : entry.startsAt < nowIso ? "done" : "upcoming";
+  // A timed entry is over once it starts; an all-day entry only after its day (or its end) has passed.
+  const over = entry.allDay
+    ? (entry.endsAt ?? new Date(Date.parse(entry.startsAt) + 24 * 60 * 60_000).toISOString()) <= nowIso
+    : entry.startsAt < nowIso;
+  const status: TimelineEntry["status"] = reminder?.stage === "fired" ? "unacked" : over ? "done" : "upcoming";
   return {
     id: `external:${entry.id}`,
     kind: "external",

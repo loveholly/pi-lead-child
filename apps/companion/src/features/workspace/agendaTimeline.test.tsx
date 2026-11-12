@@ -140,7 +140,9 @@ describe('calendar entries in the agenda', () => {
     expect(rowOf(calendar({ status: 'cancelled' }))).toMatchObject({ sub: 'Cancelled in the calendar', muted: true, external: { canToggle: false } });
     expect(rowOf(calendar({ reminder: { id: 9, at: '2026-10-15T08:55:00.000Z', level: 'tell', stage: 'acked' } }, 'done')))
       .toMatchObject({ sub: 'Reminded', external: { canToggle: false } });
-    expect(rowOf(calendar({}))).toMatchObject({ tag: { label: 'Calendar' }, opensTicket: false, sub: 'No reminder' });
+    expect(rowOf(calendar({}))).toMatchObject({ tag: { label: 'Calendar' }, opensTicket: false, sub: 'No reminder', external: { canToggle: false } });
+    expect(rowOf(calendar({ reminder: { id: 9, at: '2026-10-15T08:55:00.000Z', level: 'interrupt', stage: 'scheduled' } })))
+      .toMatchObject({ external: { canToggle: true } });
   });
 });
 

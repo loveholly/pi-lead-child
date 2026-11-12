@@ -162,8 +162,10 @@ function row(entry: TimelineEntry, now: Date, locale: Locale, inOverdue = false)
       ? {
         entryId: entry.external.entryId,
         muted: entry.external.muted,
-        // Muting only makes sense before the meeting starts and while the calendar still lists it as on.
-        canToggle: entry.status === 'upcoming' && entry.external.status !== 'cancelled',
+        // Muting only makes sense before the meeting starts, while the calendar still lists it as on, and when there is
+        // a reminder to mute (or a mute to undo): a tentative meeting the feed does not remind about has nothing to mute.
+        canToggle: entry.status === 'upcoming' && entry.external.status !== 'cancelled'
+          && (entry.external.muted || entry.external.reminder?.stage === 'scheduled'),
       }
       : null,
   };

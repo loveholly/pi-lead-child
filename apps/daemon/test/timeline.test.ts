@@ -147,4 +147,14 @@ describe("external agenda entries through the gateway", () => {
     expect(getItem(db, m1!.reminderItemId!)!.remind_at).toBe(external[0]!.external!.reminder!.at);
     expect(external[1]!.external).toMatchObject({ status: "cancelled", reminder: null });
   });
+
+  it("keeps today's all-day entry upcoming until its day is over", async () => {
+    createAgendaFeed(db, { name: "work", label: "Work calendar" }, { by: "lead", now: new Date() });
+    const today = new Date();
+    const pad = (value: number) => String(value).padStart(2, "0");
+    const date = `${today.getFullYear()}-${pad(today.getMonth() + 1)}-${pad(today.getDate())}`;
+    syncAgendaFeed(db, "work", { entries: [{ key: "d1", title: "Offsite", startsAt: date }] }, new Date());
+    const timeline = await readGatewayTimeline(db, { ...range(), include: "external" });
+    expect(timeline.entries.find((entry) => entry.kind === "external")).toMatchObject({ allDay: true, status: "upcoming" });
+  });
 });
