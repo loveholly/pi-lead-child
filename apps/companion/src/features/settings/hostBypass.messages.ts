@@ -1,4 +1,4 @@
-// 设置 → 免沙箱（工单 #246，主题 11.17）的文案。输入框上方的标记在 chat 的 hostBypassBar.messages.ts。
+// Text for Settings → Sandbox bypass (theme 11.17). The settings page is the only place that shows this switch; the conversation has no marker above the composer.
 // 和「Lead 忙时你发的消息」（busyPlacement.messages.ts，主题 11.19）同一种写法：标题、每个选项一句说明、最后一行写什么时候生效。
 import { defineMessages } from '@/i18n';
 

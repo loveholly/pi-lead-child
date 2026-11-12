@@ -65,7 +65,6 @@ import { TicketExecutionConversationCard } from './ConversationTicketCard';
 import { canFoldCheckpoint, foldTicketDispatches, type DispatchWindow } from './dispatchCards';
 import { DispatchTicketCard } from './DispatchTicketCard';
 import { LeadActivityBlock, TurnActivity } from './LeadActivityBlock';
-import { HostBypassBar } from './HostBypassBar';
 import { InterruptBanner } from './InterruptBanner';
 import { LeadQueueBar } from './LeadQueueBar';
 import { useComposerQueueTray } from './ComposerQueueTray';
@@ -442,8 +441,6 @@ export function LeadConversation({ compact = false, railOpen = true, onOpenRail,
       >
         <ConversationColumn testID="conversation-footer-column" gap={compact ? 0 : 11}>
         {/* interrupt 级的事（工单 06，spec D10）：输入框上方的横幅，用户点「知道了」之前一直在。 */}
-        {/* 免沙箱开着时的标记（工单 #246 设计 5.3）：一行，带「关闭」。 */}
-        <HostBypassBar />
         <InterruptBanner />
         <MessageComposer
           compact={compact}
