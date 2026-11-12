@@ -57,6 +57,8 @@ export const EXTERNAL_TEXT_TOOLS: ReadonlySet<string> = new Set([
   "read_channel_conversation", "read_channel_file", "read_ticket_attachment", "call_connection_tool", "read_connection_result",
   // 信号源交来的内容（2026-11-12）：邮件、日历这类来源里别人写的标题和正文。
   "read_signal_items",
+  // External agenda entries (2026-11-12): meeting titles and locations are written by other people.
+  "read_agenda_entries",
 ]);
 
 // 输出不算外部内容的工具。用户 2026-10-27：笔记、本机文件、工单状态、child 和子 agent 的报告、账本记录都不算；

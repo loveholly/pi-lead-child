@@ -27,6 +27,7 @@ import { ReminderRescheduleRequestSchema } from "./reminders.ts";
 import { ReplyStyleExtractRequestSchema, ReplyStyleUpdateRequestSchema } from "./reply-style.ts";
 import { DisableHostBypassRequestSchema, EnableHostBypassRequestSchema } from "./host-bypass.ts";
 import { SignalSourceInputSchema, SignalSourceUpdateSchema } from "./signal-sources.ts";
+import { AgendaEntryPatchSchema, AgendaFeedInputSchema, AgendaFeedUpdateSchema, AgendaSnapshotSchema } from "./agenda-feeds.ts";
 import { SetBusyPlacementRequestSchema } from "./busy-placement.ts";
 import { RuleChangeDecisionSchema } from "./rule-change-confirmations.ts";
 import { SurfaceActionOriginSchema } from "./surface-actions.ts";
@@ -97,12 +98,15 @@ export const ActionPermissionSchema = Type.Union([
 //   busy_placement  Lead 忙时你发的消息怎么放：排队或插话（设置 → Lead → 身份与风格，2026-11-09，busy-placement.ts）。编号只有 lead。
 //   signal_sources  信号源的清单（用户 2026-11-12，signal-sources.ts）：通过对话把一个连接接进事件体系。建、试跑。编号只有 signals。
 //   signal_source  一个信号源：改（规则、策略、间隔、命令）、暂停、恢复、马上跑一次、删。编号是信号源的名字。
+//   agenda_feeds  External agenda feeds (agenda-feeds.ts): create one. The id is always "agenda".
+//   agenda_feed  One feed: update, pause, resume, delete, sync a snapshot (Lead only). The id is the feed name.
+//   agenda_entry  One external entry: mute it or change its lead time. The id is the entry id.
 export const UI_ACTION_TARGET_TYPES = [
   "runtime", "device", "approval", "decision", "channel_card", "channel_conversation", "channel_policy", "channel_handbook", "lead_model",
   "reminder", "workspace", "milestone", "rule_change", "lead_queue", "timer", "timer_request", "follow_up", "reply_style",
   "model_settings", "memory_settings", "core_memory", "core_memory_change", "memory_fact", "setup_hint",
   "widget_board", "widget", "channel_connection", "connections", "connection", "skills", "skill", "host_bypass",
-  "busy_placement", "signal_sources", "signal_source",
+  "busy_placement", "signal_sources", "signal_source", "agenda_feeds", "agenda_feed", "agenda_entry",
 ] as const;
 export type UiActionTargetType = typeof UI_ACTION_TARGET_TYPES[number];
 
@@ -410,6 +414,23 @@ export const UI_ACTION_INPUT_SCHEMAS = {
     run: Empty,
     // 删掉这个信号源。它以前交来的事件留着。
     delete: Empty,
+  },
+  // External agenda feeds (agenda-feeds.ts): mirror an outside calendar and pre-create reminders.
+  agenda_feeds: {
+    create: AgendaFeedInputSchema,
+  },
+  agenda_feed: {
+    // Merge into the label, window or reminder rule; pre-created reminders follow right away.
+    update: AgendaFeedUpdateSchema,
+    pause: Empty,
+    resume: Empty,
+    delete: Empty,
+    // A snapshot of the feed's window. Only Lead submits one.
+    sync: AgendaSnapshotSchema,
+  },
+  agenda_entry: {
+    // Mute one entry or change its lead time.
+    update: AgendaEntryPatchSchema,
   },
 } as const satisfies Record<UiActionTargetType, Record<string, TSchema>>;
 

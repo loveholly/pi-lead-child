@@ -44,6 +44,7 @@ function parse(name: string, raw: string): SignalSourceDto | null {
     lastError: typeof stored.lastError === "string" ? stored.lastError : null,
     consecutiveErrors: typeof stored.consecutiveErrors === "number" && stored.consecutiveErrors > 0 ? Math.trunc(stored.consecutiveErrors) : 0,
     emitted: typeof stored.emitted === "number" && stored.emitted > 0 ? Math.trunc(stored.emitted) : 0,
+    agendaFeed: typeof stored.agendaFeed === "string" && NAME.test(stored.agendaFeed) ? stored.agendaFeed : null,
   };
 }
 
@@ -77,7 +78,7 @@ export function createSignalSource(db: Db, input: SignalSourceInput, args: { by:
       everySeconds: input.everySeconds ?? SIGNAL_SOURCE_LIMITS.defaultEverySeconds, rules: input.rules ?? [],
       policy: input.policy ?? "", actForUser: input.actForUser === true, enabled: true,
       createdBy: args.by, createdAt: args.now.toISOString(), nextRunAt: args.now.toISOString(), lastRunAt: null, baselinedAt: null,
-      lastStatus: null, lastError: null, consecutiveErrors: 0, emitted: 0,
+      lastStatus: null, lastError: null, consecutiveErrors: 0, emitted: 0, agendaFeed: input.agendaFeed ?? null,
     };
     write(db, source);
     return source;
@@ -88,7 +89,8 @@ export function createSignalSource(db: Db, input: SignalSourceInput, args: { by:
 export function updateSignalSource(
   db: Db, name: string,
   patch: Partial<Pick<SignalSourceDto,
-    "enabled" | "rules" | "policy" | "actForUser" | "everySeconds" | "label" | "nextRunAt" | "fetch" | "command" | "baselinedAt">>,
+    "enabled" | "rules" | "policy" | "actForUser" | "everySeconds" | "label" | "nextRunAt" | "fetch" | "command" | "baselinedAt"
+    | "agendaFeed">>,
 ): SignalSourceDto | null {
   return db.transaction((): SignalSourceDto | null => {
     const current = getSignalSource(db, name);

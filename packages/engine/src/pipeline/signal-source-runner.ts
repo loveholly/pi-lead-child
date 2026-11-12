@@ -13,11 +13,12 @@ import type { BashOperations } from "@earendil-works/pi-coding-agent";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
-  SIGNAL_EVENT_LEVELS, SIGNAL_EVENT_SOURCE, SIGNAL_RECEIVED_KIND, SIGNAL_SOURCE_LIMITS,
-  type SignalItem, type SignalRule, type SignalSourceDto,
+  AGENDA_FEED_LIMITS, SIGNAL_EVENT_LEVELS, SIGNAL_EVENT_SOURCE, SIGNAL_RECEIVED_KIND, SIGNAL_SOURCE_LIMITS,
+  type AgendaSnapshot, type SignalItem, type SignalRule, type SignalSourceDto,
 } from "@pi-lead-child/protocol";
 import {
-  addInbox, appendEvent, dueSignalSources, getSignalSource, recordSignalSourceRun, type Db,
+  addInbox, appendEvent, dueSignalSources, getAgendaFeed, getSignalSource, recordAgendaFeedError, recordSignalSourceRun,
+  syncAgendaFeed, type Db,
 } from "@pi-lead-child/store";
 
 export interface SignalCommandResult {
@@ -78,7 +79,8 @@ export interface SignalCollectDeps {
   now?: () => Date;
 }
 
-export type SignalCollectResult = { ok: true; items: SignalItem[] } | { ok: false; error: string };
+// agenda: the command's `agenda` output (entries are checked by the feed's sync), present only when the command gave one.
+export type SignalCollectResult = { ok: true; items: SignalItem[]; agenda?: AgendaSnapshot } | { ok: false; error: string };
 
 const shellQuote = (value: string): string => `'${value.replace(/'/gu, `'\\''`)}'`;
 const clip = (value: string, max: number): string => (value.length > max ? `${value.slice(0, max)}…` : value);
@@ -93,7 +95,17 @@ function parseItems(output: string): SignalCollectResult {
   } catch {
     return { ok: false, error: `命令的输出不是 JSON：${clip(output.trim().replace(/\s+/gu, " "), 200) || "（空的）"}` };
   }
-  const list = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as { items?: unknown }).items : undefined;
+  const object = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Record<string, unknown> : undefined;
+  // An agenda feed's command may output only `agenda` (and `agendaComplete`); items then default to none.
+  const agendaList = object?.agenda;
+  if (agendaList !== undefined && !Array.isArray(agendaList)) return { ok: false, error: "agenda 要是一个数组" };
+  if (Array.isArray(agendaList) && agendaList.length > AGENDA_FEED_LIMITS.maxEntries) {
+    return { ok: false, error: `agenda 一次输出了 ${agendaList.length} 条，最多 ${AGENDA_FEED_LIMITS.maxEntries} 条：缩短同步窗口` };
+  }
+  const agenda: AgendaSnapshot | undefined = Array.isArray(agendaList)
+    ? { entries: agendaList, ...(typeof object?.agendaComplete === "boolean" ? { complete: object.agendaComplete } : {}) }
+    : undefined;
+  const list = object?.items ?? (agenda ? [] : undefined);
   if (!Array.isArray(list)) return { ok: false, error: "命令的输出要是一个 JSON 对象，里面有 items 数组" };
   if (list.length > SIGNAL_SOURCE_LIMITS.maxItems) {
     return { ok: false, error: `一次输出了 ${list.length} 条，最多 ${SIGNAL_SOURCE_LIMITS.maxItems} 条：只输出最近的条目` };
@@ -122,7 +134,7 @@ function parseItems(output: string): SignalCollectResult {
       ...(at ? { at } : {}), ...(Object.keys(fields).length ? { fields } : {}),
     });
   }
-  return { ok: true, items };
+  return { ok: true, items, ...(agenda ? { agenda } : {}) };
 }
 
 /**
@@ -218,6 +230,20 @@ export function createSignalSourceRunner(db: Db, options: SignalSourceRunnerOpti
       const recorded = recordSignalSourceRun(db, source.name, { ok: false, error: collected.error }, at);
       if (recorded?.paused) wakeLeadForPause(db, recorded.source);
       return collected;
+    }
+    // An agenda feed takes the whole snapshot on every run, the first one included: reminders for meetings that are
+    // already on the calendar are what the user wants. A feed that went away, or output without `agenda`, is a run error.
+    if (source.agendaFeed !== null) {
+      const problem = !getAgendaFeed(db, source.agendaFeed)
+        ? `外部日程 ${source.agendaFeed} 不在了：建它（agenda_feeds 的 create），或者把信号源的 agendaFeed 改成 null`
+        : !collected.agenda ? "这个信号源接着外部日程，命令的输出要有 agenda 数组" : null;
+      if (problem) {
+        recordAgendaFeedError(db, source.agendaFeed, problem, at);
+        const recorded = recordSignalSourceRun(db, source.name, { ok: false, error: problem }, at);
+        if (recorded?.paused) wakeLeadForPause(db, recorded.source);
+        return { ok: false, error: problem };
+      }
+      syncAgendaFeed(db, source.agendaFeed, collected.agenda!, at);
     }
     // 第一次成功的运行：看到的都是已有的内容，只记基线。
     const baseline = source.baselinedAt === null;

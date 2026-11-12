@@ -173,6 +173,8 @@ describe("the rule-change flag in the catalog", () => {
       "busy_placement.set",
       // 信号源（2026-11-12）：开、改、停、删一个订阅，以及能不能代用户处理。试跑和马上跑一次不改规则。
       "signal_sources.create", "signal_source.update", "signal_source.pause", "signal_source.resume", "signal_source.delete",
+      // External agenda feeds (2026-11-12): create, change, pause, resume, delete a feed. Snapshots and per-entry mutes do not.
+      "agenda_feeds.create", "agenda_feed.update", "agenda_feed.pause", "agenda_feed.resume", "agenda_feed.delete",
     ]);
   });
 
@@ -199,6 +201,8 @@ describe("the rule-change flag in the catalog", () => {
       "connections.add_remote", "connections.add_local", "connection.authorize", "connection.disconnect", "skills.install", "skill.uninstall",
       // 信号源（2026-11-12）：同上，只拒绝，用户本人正在说话的一轮不受限制。
       "signal_sources.create", "signal_source.update", "signal_source.pause", "signal_source.resume", "signal_source.delete",
+      // External agenda feeds (2026-11-12): the same, refuse only, the user's own live turn is exempt.
+      "agenda_feeds.create", "agenda_feed.update", "agenda_feed.pause", "agenda_feed.resume", "agenda_feed.delete",
     ]);
   });
 

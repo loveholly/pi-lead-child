@@ -15,7 +15,7 @@ const RULES: SignalRule[] = [
 const source = (rules = RULES): SignalSourceDto => ({
   name: "work-mail", label: "Work mail", fetch: [{ connection: "workspace", tool: "list_messages" }], command: "node tidy.mjs",
   everySeconds: 300, rules, policy: "", actForUser: false, enabled: true, createdBy: "lead", createdAt: "2026-11-12T00:00:00.000Z",
-  nextRunAt: null, lastRunAt: null, baselinedAt: null, lastStatus: null, lastError: null, consecutiveErrors: 0, emitted: 0,
+  nextRunAt: null, lastRunAt: null, baselinedAt: null, lastStatus: null, lastError: null, consecutiveErrors: 0, emitted: 0, agendaFeed: null,
 });
 
 const item: SignalItem = {

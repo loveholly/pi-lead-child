@@ -11,7 +11,9 @@
 import {
   SIGNAL_DEFAULT_POLICY, SIGNAL_SOURCE_LIMITS, type SignalItem, type SignalSourceDto, type SignalSourceInput, type SignalSourceUpdate,
 } from "@pi-lead-child/protocol";
-import { createSignalSource, deleteSignalSource, getSignalSource, listSignalSources, updateSignalSource } from "@pi-lead-child/store";
+import {
+  createSignalSource, deleteSignalSource, getAgendaFeed, getSignalSource, listSignalSources, updateSignalSource,
+} from "@pi-lead-child/store";
 import { AVAILABLE } from "../ticket-actions/types.js";
 import { UiActionError, type SignalSourceService, type UiActionDefinition, type UiActionEnv, type UiActionTargetKind } from "./types.js";
 
@@ -34,13 +36,15 @@ function sourceView(source: SignalSourceDto) {
     policy: source.policy || SIGNAL_DEFAULT_POLICY, actForUser: source.actForUser,
     lastRunAt: source.lastRunAt, lastStatus: source.lastStatus, lastError: source.lastError,
     consecutiveErrors: source.consecutiveErrors, emitted: source.emitted, nextRunAt: source.enabled ? source.nextRunAt : null,
+    agendaFeed: source.agendaFeed,
   };
 }
 
 // 条目的形状，不带原文。
-function shapeOf(items: SignalItem[]) {
+function shapeOf(items: TryOut) {
   return {
     items: items.length,
+    ...(items.agenda ? { agendaEntries: items.agenda.entries.length } : {}),
     samples: items.slice(0, 3).map((item) => ({
       keyChars: item.key.length, titleChars: item.title.length, textChars: item.text.length,
       hasTime: item.at !== undefined, fields: Object.keys(item.fields ?? {}).slice(0, 12).map((name) => name.slice(0, 40)),
@@ -54,7 +58,20 @@ function serviceOf(env: UiActionEnv): SignalSourceService {
   return service;
 }
 
-async function tryOut(env: UiActionEnv, source: Pick<SignalSourceDto, "name" | "fetch" | "command">): Promise<SignalItem[]> {
+// A source handing its output to an agenda feed: the feed must exist and the try-out must give an `agenda` array.
+function checkAgendaFeed(env: UiActionEnv, feed: string | null | undefined, tried: TryOut): void {
+  if (!feed) return;
+  if (!getAgendaFeed(env.db, feed)) {
+    throw new UiActionError("invalid_input", `没有外部日程 ${feed}：先用 agenda_feeds 的 create 建它`);
+  }
+  if (!tried.agenda) {
+    throw new UiActionError("invalid_input", "接外部日程的信号源，命令的输出要有 agenda 数组（每条 key、title、startsAt），可以没有 items");
+  }
+}
+
+type TryOut = SignalItem[] & { agenda?: { entries: unknown[] } };
+
+async function tryOut(env: UiActionEnv, source: Pick<SignalSourceDto, "name" | "fetch" | "command">): Promise<TryOut> {
   const result = await serviceOf(env).collect(source);
   if (!result.ok) {
     throw new UiActionError(
@@ -63,7 +80,7 @@ async function tryOut(env: UiActionEnv, source: Pick<SignalSourceDto, "name" | "
         + "标准输出只能有一个 JSON 对象 {\"items\": [{\"key\", \"title\", \"text\", \"fields\"?, \"at\"?}]}。先在 bash 里把命令跑通",
     );
   }
-  return result.items;
+  return Object.assign([...result.items], result.agenda ? { agenda: result.agenda } : {});
 }
 
 export const SIGNAL_SOURCES_TARGET: UiActionTargetKind<SignalSourcesTarget> = {
@@ -84,13 +101,15 @@ export const SIGNAL_SOURCES_ACTIONS = {
     hint: "把一个连接接进事件体系：input.fetch 写定时调哪几个连接的只读工具（connection、tool、arguments），command 写把结果整理成条目的命令"
       + "（脚本放在你的工作目录里），rules 写用户说的哪些要马上告诉他（level now）、哪些进汇总（digest）、哪些不用管（ignore），"
       + "每句用用户的原话。policy 写用户说的能不能代他处理的原话；只有用户明确说了可以代他处理，才写 actForUser: true。"
-      + "系统先试跑一次，跑通了才建。第一次定时运行只记基线，以后每条新内容交给你一个事件。先读 skill signal-sources。",
+      + "系统先试跑一次，跑通了才建。第一次定时运行只记基线，以后每条新内容交给你一个事件。"
+      + "接日历、要会前提醒时，先建外部日程（agenda_feeds 的 create），再写 agendaFeed，命令输出 agenda 数组。先读 skill signal-sources。",
     defaultReason: "建了信号源",
     available: () => AVAILABLE,
     run: async (run) => {
       const input = run.input as SignalSourceInput;
       if (getSignalSource(run.db, input.name)) throw new UiActionError("invalid_input", `已经有信号源 ${input.name}：改它用 signal_source 的 update，或者换一个名字`);
       const items = await tryOut(run.env, input);
+      checkAgendaFeed(run.env, input.agendaFeed, items);
       const source = createSignalSource(run.db, input, { by: run.by.actor === "lead" ? "lead" : "user", now: run.env.now });
       if (!source) throw new UiActionError("invalid_input", `已经有信号源 ${input.name}`);
       return { source, items };
@@ -147,8 +166,10 @@ export const SIGNAL_SOURCE_ACTIONS = {
     run: async (run) => {
       const input = run.input as SignalSourceUpdate;
       const reshaped = input.fetch !== undefined || input.command !== undefined;
-      if (reshaped) {
-        await tryOut(run.env, { name: run.target.name, fetch: input.fetch ?? run.target.fetch, command: input.command ?? run.target.command });
+      const feed = input.agendaFeed === undefined ? run.target.agendaFeed : input.agendaFeed;
+      if (reshaped || (input.agendaFeed !== undefined && input.agendaFeed !== null)) {
+        const tried = await tryOut(run.env, { name: run.target.name, fetch: input.fetch ?? run.target.fetch, command: input.command ?? run.target.command });
+        checkAgendaFeed(run.env, feed, tried);
       }
       // 间隔变了：下一次运行从上一次运行的时刻按新的间隔重排（没跑过的马上到点）。不改时下一次还按旧的间隔排着。
       const respaced = input.everySeconds !== undefined && input.everySeconds !== run.target.everySeconds;
@@ -156,6 +177,7 @@ export const SIGNAL_SOURCE_ACTIONS = {
       return changed(run, {
         label: input.label, fetch: input.fetch, command: input.command, everySeconds: input.everySeconds,
         rules: input.rules, policy: input.policy, actForUser: input.actForUser,
+        ...(input.agendaFeed !== undefined ? { agendaFeed: input.agendaFeed } : {}),
         ...(respaced ? { nextRunAt: new Date(lastRun === null ? run.env.now.getTime() : lastRun + input.everySeconds! * 1000).toISOString() } : {}),
         ...(reshaped ? { baselinedAt: null, nextRunAt: run.env.now.toISOString() } : {}),
       });

@@ -77,6 +77,8 @@ export const SignalSourceInputSchema = StrictObject({
   // 用户说的能不能代他处理（原话）。actForUser 只在用户明确说了可以时为 true；缺省是先问用户。
   policy: Type.Optional(Type.String({ maxLength: SIGNAL_SOURCE_LIMITS.policy })),
   actForUser: Type.Optional(Type.Boolean()),
+  // An external agenda feed (agenda-feeds.ts) that takes the command's `agenda` output on every run.
+  agendaFeed: Type.Optional(Type.String({ pattern: "^[a-z][a-z0-9-]{1,39}$" })),
 });
 export type SignalSourceInput = Static<typeof SignalSourceInputSchema>;
 
@@ -89,6 +91,8 @@ export const SignalSourceUpdateSchema = Type.Object({
   rules: SignalSourceInputSchema.properties.rules,
   policy: SignalSourceInputSchema.properties.policy,
   actForUser: SignalSourceInputSchema.properties.actForUser,
+  // null stops handing the output to a feed.
+  agendaFeed: Type.Optional(Type.Union([Type.String({ pattern: "^[a-z][a-z0-9-]{1,39}$" }), Type.Null()])),
 }, { additionalProperties: false, minProperties: 1 });
 export type SignalSourceUpdate = Static<typeof SignalSourceUpdateSchema>;
 
@@ -125,6 +129,8 @@ export interface SignalSourceDto {
   consecutiveErrors: number;
   // 到现在一共写了几个事件。
   emitted: number;
+  // The external agenda feed this source hands its `agenda` output to, or null.
+  agendaFeed: string | null;
 }
 
 /** 缺省的策略，Lead 建完信号源照着告诉用户（用户建的时候没有说能不能代他处理时）。 */

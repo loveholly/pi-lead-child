@@ -34,6 +34,7 @@ const INSTANT_READS = [
   // 账本、收件箱、通知、以前的回合、笔记、设置。
   "query_events", "read_inbox", "read_notifications", "get_triage_shadow_report", "read_lead_turns", "search_notes",
   "get_system_usage", "get_environment", "suggest_route", "list_connections", "read_connection_result", "read_signal_items",
+  "read_agenda_entries",
 ] as const;
 
 const INSTANT_WRITES = [
