@@ -62,6 +62,8 @@ import { AssistantTurnView } from './AssistantTurnView';
 import { MessagePartView } from './MessagePartView';
 import { MarkdownMessage } from './MarkdownMessage';
 import { TicketExecutionConversationCard } from './ConversationTicketCard';
+import { TurnCardGroupView } from './TurnCardGroupView';
+import { groupTurnCards, TURN_CARD_GROUP_MIN, type TurnCardSlot } from './turnCardGroups';
 import { canFoldCheckpoint, foldTicketDispatches, type DispatchWindow } from './dispatchCards';
 import { DispatchTicketCard } from './DispatchTicketCard';
 import { LeadActivityBlock, TurnActivity } from './LeadActivityBlock';
@@ -596,6 +598,7 @@ function ConversationMessage({
       && !isDaemonNoticeOrigin(other.originKind)
       && other.state === 'completed' && other.createdAt > turn.createdAt)));
   const delivered = useControlPlaneStore((state) => Boolean(message?.turnId && state.deliveredTurnIds[message.turnId]));
+  const cardSlots = useTurnCardSlots(cardIds, cardsById, dispatchScopes);
   if (!message) return null;
   if (isHiddenUserMessage(message)) return null;
 
@@ -763,13 +766,16 @@ function ConversationMessage({
         <AbsenceTail testID="interrupted-by-steer" text={m.steered.interruptedBySteer} />
       ) : null}
       {!user && activityIds?.length ? <TurnActivity ids={activityIds} /> : null}
-      {!user && cardIds.map((cardId) => cardsById[cardId] ? (
+      {/* Three or more same-kind cards of this turn (reminders, new tickets) show as one line (P9.10, turnCardGroups.ts). */}
+      {!user && cardSlots.map((slot) => slot.kind === 'group' ? (
+        <TurnCardGroupView key={slot.group.key} group={slot.group} />
+      ) : cardsById[slot.cardId] ? (
         <ConversationCardView
-          key={cardId}
-          card={cardsById[cardId]!}
-          collapsed={collapsedCardIds.has(cardId)}
+          key={slot.cardId}
+          card={cardsById[slot.cardId]!}
+          collapsed={collapsedCardIds.has(slot.cardId)}
           compact={compact}
-          dispatchScope={dispatchScopes[cardId]}
+          dispatchScope={dispatchScopes[slot.cardId]}
           selectedTicketId={selectedTicketId}
         />
       ) : null)}
@@ -1023,6 +1029,35 @@ function TicketDirectNotice({ turnId }: { turnId: string; compact: boolean }) {
       </Pressable>
     </Box>
   );
+}
+
+// Group this turn's cards (turnCardGroups.ts). The facts come from the same TicketSummary / TicketDetail the cards read;
+// the selector returns a flat string so the store does not re-render on unrelated changes.
+function useTurnCardSlots(
+  cardIds: readonly string[],
+  cardsById: Readonly<Record<string, ConversationCardEntity>>,
+  dispatchScopes: Readonly<Record<string, DispatchWindow>>,
+): TurnCardSlot[] {
+  const ticketIds = useMemo(() => [...new Set(cardIds.flatMap((cardId) => {
+    const card = cardsById[cardId];
+    return card?.kind === 'ticket_execution' ? [card.ticketId] : [];
+  }))], [cardIds, cardsById]);
+  const known = useControlPlaneStore((state) => ticketIds.map((ticketId) => {
+    const summary = state.ticketsById[ticketId] ?? state.ticketDetailsById[ticketId]?.ticket;
+    return `${ticketId}:${summary?.kind ?? ''}:${summary?.stage ?? ''}`;
+  }).join('|'));
+  return useMemo(() => {
+    const facts = new Map(known.split('|').filter(Boolean).map((entry) => {
+      const [id, kind, stage] = entry.split(':');
+      return [Number(id), { kind: kind === 'task' || kind === 'reminder' ? kind : null, stage: stage || null }] as const;
+    }));
+    if (cardIds.length < TURN_CARD_GROUP_MIN) return cardIds.map((cardId) => ({ kind: 'card' as const, cardId }));
+    return groupTurnCards(cardIds, cardsById, {
+      itemKind: (ticketId) => facts.get(ticketId)?.kind ?? null,
+      stage: (ticketId) => facts.get(ticketId)?.stage ?? null,
+      isDispatch: (cardId) => dispatchScopes[cardId] !== undefined,
+    });
+  }, [cardIds, cardsById, dispatchScopes, known]);
 }
 
 function ConversationCardView({ card, collapsed = false, compact, dispatchScope, selectedTicketId }: {
