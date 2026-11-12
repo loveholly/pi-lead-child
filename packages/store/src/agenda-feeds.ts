@@ -26,8 +26,8 @@ import {
 import type { Db } from "./db.js";
 import { appendEvent } from "./events.js";
 import { itemUpdatedEvent, publishGatewayEvent } from "./gateway-events.js";
-import { createItem, getItem, setItemTime, transition } from "./items.js";
-import { recordReminderTimeSetter } from "./reminders.js";
+import { createItem, getItem, transition } from "./items.js";
+import { recordReminderTimeSetter, rescheduleReminder } from "./reminders.js";
 
 const PREFIX = "agenda-feed:";
 const NAME = new RegExp(AGENDA_FEED_NAME_PATTERN);
@@ -358,15 +358,16 @@ function reconcileEntry(db: Db, feed: AgendaFeedDto, entry: AgendaEntryDto, now:
   const base = linked.remind_at ? Date.parse(linked.remind_at) : Date.parse(planned ?? desiredIso);
   const delta = planned === null ? desired.getTime() - base : desired.getTime() - Date.parse(planned);
   const shifted = new Date(base + delta);
-  if (linked.stage === "scheduled") {
-    setItemTime(db, linked.id, { remindAt: new Date(Math.max(shifted.getTime(), nowMs)).toISOString() });
-  } else if (shifted.getTime() > nowMs) {
-    // Fired already, and the meeting moved later: wait again for the new time.
-    db.prepare("UPDATE items SET remind_at = ?, updated_at = ? WHERE id = ?").run(shifted.toISOString(), now.toISOString(), linked.id);
-    transition(db, { itemId: linked.id, to: "scheduled", actor: "system", reason: "agenda entry moved", now });
+  // A scheduled reminder moves (never into the past); a fired one waits again only for a time still ahead.
+  // Both go through the same reschedule as a user's or Lead's change, and the time change is recorded as the system's
+  // for this external source.
+  const target = linked.stage === "scheduled" ? new Date(Math.max(shifted.getTime(), nowMs))
+    : shifted.getTime() > nowMs ? shifted : null;
+  if (target && target.toISOString() !== linked.remind_at) {
+    rescheduleReminder(db, linked.id, target, { by: "system", now, reason: "agenda entry moved" });
+    recordReminderTimeSetter(db, linked.id, { remindAt: target.toISOString(), setBy: "lead", actor: "system", origin: originOf(feed) });
   }
   link(db, entry.id, linked.id, desiredIso, now);
-  publishGatewayEvent(db, itemUpdatedEvent(linked.id, now));
   return "moved";
 }
 

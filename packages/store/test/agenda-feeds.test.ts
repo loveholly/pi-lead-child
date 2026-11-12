@@ -109,6 +109,11 @@ describe("reminder reconciliation", () => {
     expect(result.reminders.moved).toBe(2);
     expect(reminderOf(db, "a").item!.remind_at).toBe("2026-11-12T10:55:00.000Z");
     expect(getItem(db, b.id)!.remind_at).toBe("2026-11-12T12:30:00.000Z");
+    const lastSetter = db.prepare(
+      "SELECT actor, payload FROM activities WHERE item_id = ? AND kind = 'decision' ORDER BY id DESC LIMIT 1",
+    ).get(reminderOf(db, "a").item!.id) as { actor: string; payload: string };
+    expect(lastSetter.actor).toBe("system");
+    expect(JSON.parse(lastSetter.payload).remindAt).toBe("2026-11-12T10:55:00.000Z");
     expect(reminderOf(db, "b").item!.id).toBe(b.id);
     db.close();
   });
@@ -187,6 +192,15 @@ describe("reminder reconciliation", () => {
 
     syncAgendaFeed(db, "work", { entries: [entry("a", "2026-11-12T12:00:00Z"), entry("b", "2026-11-12T13:00:00Z")] }, NOW);
     expect(getItem(db, a.id)).toMatchObject({ stage: "scheduled", remind_at: "2026-11-12T11:55:00.000Z" });
+    // The move is on record as the system's, for the external source, like any other reschedule.
+    const activities = db.prepare("SELECT actor, kind, payload FROM activities WHERE item_id = ? ORDER BY id").all(a.id) as
+      Array<{ actor: string; kind: string; payload: string }>;
+    const back = activities.find((row) => row.kind === "transition" && JSON.parse(row.payload).to === "scheduled")!;
+    expect(back.actor).toBe("system");
+    expect(JSON.parse(back.payload).reason).toContain("agenda entry moved");
+    const setter = activities.filter((row) => row.kind === "decision").at(-1)!;
+    expect(setter.actor).toBe("system");
+    expect(JSON.parse(setter.payload)).toMatchObject({ remindAt: "2026-11-12T11:55:00.000Z", origin: { kind: "external", source: "agenda" } });
     expect(getItem(db, b.id)!.stage).toBe("acked");
     const again = reminderOf(db, "b").item!;
     expect(again.id).not.toBe(b.id);

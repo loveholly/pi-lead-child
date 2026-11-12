@@ -284,7 +284,8 @@ const PAST_TOLERANCE_MS = 60_000;
  * 发一条 ticket.updated。返回改完的提醒。
  */
 export function rescheduleReminder(
-  db: Db, id: number, remindAt: Date, args: { by: "user" | "lead"; now?: Date },
+  // by=system: the system moved the time for an external agenda entry (agenda-feeds.ts); reason says why.
+  db: Db, id: number, remindAt: Date, args: { by: "user" | "lead" | "system"; now?: Date; reason?: string },
 ): Item {
   return db.transaction((): Item => {
     const now = args.now ?? new Date();
@@ -305,8 +306,8 @@ export function rescheduleReminder(
     if (item.stage === "fired") {
       db.prepare("UPDATE items SET remind_at = ?, updated_at = ? WHERE id = ?").run(iso, now.toISOString(), id);
       transition(db, {
-        itemId: id, to: "scheduled", actor: "system", requestedBy: args.by,
-        reason: `rescheduled by ${args.by} to ${iso}`, now,
+        itemId: id, to: "scheduled", actor: "system", ...(args.by !== "system" ? { requestedBy: args.by } : {}),
+        reason: args.reason ? `${args.reason}: rescheduled to ${iso}` : `rescheduled by ${args.by} to ${iso}`, now,
       });
     } else {
       setItemTime(db, id, { remindAt: iso });
