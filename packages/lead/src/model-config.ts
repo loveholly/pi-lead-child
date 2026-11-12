@@ -9,7 +9,8 @@ import {
   type EnvSpec,
   type PlcConfigFile,
 } from "@pi-lead-child/core";
-import { MODEL_MAX_CHAIN } from "@pi-lead-child/protocol";
+import { DEFAULT_LEAD_CONTEXT_WINDOW, MODEL_MAX_CHAIN } from "@pi-lead-child/protocol";
+import { getBuiltinModels, getBuiltinProviders } from "@earendil-works/pi-ai/providers/all";
 
 export const DEFAULT_LEAD_MODEL = "openai/gpt-5.5";
 
@@ -52,6 +53,9 @@ export interface LeadProviderConfig {
   accountPrefix?: boolean;
   // 能不能看图从哪里读。没写时是 auto。
   capabilities?: LeadCapabilitySource;
+  // Send the Lead session id as prompt_cache_key to this OpenAI-compatible endpoint (prompt-cache.ts). Default: on.
+  // Set it to false when the endpoint rejects the field.
+  promptCacheKey?: boolean;
 }
 
 export interface LeadModelConfig {
@@ -180,7 +184,48 @@ export interface LeadCatalogModel {
 // 窗口比 500K 小的模型按它自己的窗口算。以前不读目录，一律按 128K 注册：Claude 的系统提示词、工具定义加上压缩摘要
 // 就有 122K，pi 把回答的长度压到 1 个 token，回答以 stopReason length 结束（2026-10-26，as4/claude-sonnet-5-5）。
 export const LEAD_CONTEXT_WINDOW_LIMIT = 500_000;
-const DEFAULT_CONTEXT_WINDOW = 128_000;
+// The window Lead assumes when neither config.json, the provider's catalog nor pi's built-in catalog knows it.
+// The settings page says so next to such a model (protocol's DEFAULT_LEAD_CONTEXT_WINDOW).
+const DEFAULT_CONTEXT_WINDOW = DEFAULT_LEAD_CONTEXT_WINDOW;
+
+// Known windows (2026-11-12, prompt cache): a gateway (DeepSeek behind Azure or a self-hosted proxy) often lists a model
+// without its window, and Lead then assumed 128K and compacted about every 20K tokens. pi's built-in catalog knows the
+// real windows of the first-party models (DeepSeek V4: 1M), so a model id that matches one of them gets that window.
+// Only first-party catalogs: aggregators list the same ids with their own, often smaller, limits.
+const FIRST_PARTY_CATALOGS = [
+  "deepseek", "anthropic", "openai", "google", "xai", "mistral", "moonshotai", "zai", "minimax", "xiaomi",
+];
+// Windows the built-in catalog does not list (yet). deepseek-v4-flash: DeepSeek's pricing page, 1M context.
+const EXTRA_KNOWN_WINDOWS: Record<string, number> = { "deepseek-v4-flash": 1_000_000 };
+let knownWindows: Map<string, number> | null = null;
+
+function builtinWindows(): Map<string, number> {
+  if (knownWindows) return knownWindows;
+  const windows = new Map<string, number>(Object.entries(EXTRA_KNOWN_WINDOWS));
+  const providers = new Set<string>(getBuiltinProviders());
+  for (const provider of FIRST_PARTY_CATALOGS) {
+    if (!providers.has(provider)) continue;
+    for (const model of getBuiltinModels(provider as Parameters<typeof getBuiltinModels>[0])) {
+      const id = model.id.toLowerCase();
+      if (!windows.has(id) && positiveInteger(model.contextWindow)) windows.set(id, model.contextWindow);
+    }
+  }
+  return (knownWindows = windows);
+}
+
+/**
+ * The known context window of a model id, or null. Matches the last part of the id (after a gateway or account prefix
+ * such as auto/ or as4/, without the effort suffix) against pi's built-in first-party catalogs.
+ */
+export function knownContextWindow(id: string): number | null {
+  const base = splitLeadModelEffort(id).base;
+  const name = base.slice(base.lastIndexOf("/") + 1).toLowerCase();
+  try {
+    return builtinWindows().get(name) ?? null;
+  } catch {
+    return null;
+  }
+}
 const ANTHROPIC_VERSION = "2023-06-01";
 const ANTHROPIC_HOST = "api.anthropic.com";
 const DEFAULT_MAX_TOKENS = 16_384;
@@ -379,7 +424,14 @@ async function providerCatalog(
     accountPrefix: effectiveAccountPrefix(provider, detailed),
     capabilities: effectiveCapabilities(provider, detailed),
   };
-  const models = [...byId.values()].map((model) => ({ ...model, group: info.accountPrefix ? modelGroup(model.id) : null }));
+  // The window the settings page shows: config.json's, the catalog's, or the known one; null when none knows it.
+  const configuredWindow = new Map(configured.flatMap((model) => (model.contextWindow ? [[model.id, model.contextWindow] as const] : [])));
+  const models = [...byId.values()].map((model) => ({
+    ...model,
+    group: info.accountPrefix ? modelGroup(model.id) : null,
+    contextWindow: configuredWindow.get(model.id) ?? configuredWindow.get(splitLeadModelEffort(model.id).base)
+      ?? model.contextWindow ?? knownContextWindow(model.id),
+  }));
   return { models, note, info };
 }
 
@@ -587,7 +639,19 @@ function normalizeLeadProvider(name: string, raw: unknown): LeadProviderConfig {
     discover: value.discover === undefined ? undefined : Boolean(value.discover),
     ...(normalizeAccountPrefix(name, value.accountPrefix)),
     ...(normalizeCapabilities(name, value.capabilities)),
+    ...(normalizePromptCacheKey(name, value.promptCacheKey)),
   };
+}
+
+function normalizePromptCacheKey(name: string, raw: unknown): { promptCacheKey?: boolean } {
+  if (raw === undefined || raw === null) return {};
+  if (typeof raw !== "boolean") throw new Error(`lead.providers.${name}.promptCacheKey 必须是 true 或 false`);
+  return { promptCacheKey: raw };
+}
+
+/** Whether Lead sends prompt_cache_key to this provider (on unless the config turns it off). */
+export function promptCacheKeyEnabled(config: Pick<LeadModelConfig, "providers">, provider: string): boolean {
+  return config.providers[provider]?.promptCacheKey !== false;
 }
 
 function normalizeAccountPrefix(name: string, raw: unknown): { accountPrefix?: boolean } {
@@ -655,8 +719,12 @@ function toProviderConfigInput(
         reasoning: extra?.reasoning ?? false,
         input: extra?.input ?? known?.input ?? ["text"],
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-        // config.json 写了窗口时以它为准，没写时用目录的；都没有时按 128K。都不超过 LEAD_CONTEXT_WINDOW_LIMIT。
-        contextWindow: Math.min(LEAD_CONTEXT_WINDOW_LIMIT, extra?.contextWindow ?? known?.contextWindow ?? DEFAULT_CONTEXT_WINDOW),
+        // config.json 写了窗口时以它为准，没写时用目录的，再没有时用已知的窗口（knownContextWindow）；都没有时按 128K。
+        // 都不超过 LEAD_CONTEXT_WINDOW_LIMIT。
+        contextWindow: Math.min(
+          LEAD_CONTEXT_WINDOW_LIMIT,
+          extra?.contextWindow ?? known?.contextWindow ?? knownContextWindow(base) ?? DEFAULT_CONTEXT_WINDOW,
+        ),
         // 最大输出按调用方要的（Lead 是 16384），只有目录说的更小时用目录的。
         maxTokens: extra?.maxTokens ?? Math.min(maxOutputTokens, known?.maxTokens ?? DEFAULT_MAX_TOKENS),
         ...(provider.compat ? { compat: provider.compat as never } : {}),

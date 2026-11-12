@@ -15,6 +15,7 @@ export const modelMessages = defineMessages({
     // 一个模型的说明
     notInCatalog: 'This model is not in the catalog',
     images: 'Images',
+    defaultWindow: (window: string) => `Window unknown, counted as ${window}`,
     reasoning: (effort: string) => `Reasoning ${effort}`,
     firstSeen: (date: string) => `First seen ${date}`,
     primary: 'Primary',
@@ -158,6 +159,7 @@ export const modelMessages = defineMessages({
     fastUses: '用在：记忆重排、外来消息的信心分、派活建议',
     notInCatalog: '目录里没有这个模型',
     images: '图片',
+    defaultWindow: (window) => `窗口未知，按 ${window} 算`,
     reasoning: (effort) => `推理 ${effort}`,
     firstSeen: (date) => `首见 ${date}`,
     primary: '主用',

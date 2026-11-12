@@ -3,7 +3,7 @@ import type { LeadEngine } from "./engine.js";
 import {
   SOL_PI_ENTRY_ENV, solPiPinnedCommit, solPiSettings, solPiSource, type SolPiSettings,
 } from "@pi-lead-child/engine";
-import { envConfigPath, runtimeAsset } from "@pi-lead-child/core";
+import { envConfigPath, projectRoot, runtimeAsset } from "@pi-lead-child/core";
 import { existsSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import {
@@ -37,16 +37,19 @@ import {
 } from "@pi-lead-child/store";
 import { leadHasCapability } from "@pi-lead-child/store";
 import {
-  collectLeadEnvironment, ENVIRONMENT_SECTION, renderEnvironmentDetails, renderLeadEnvironment, type LeadDaemonEnvironment,
+  collectLeadEnvironment, ENVIRONMENT_SECTION, renderEnvironmentDetails, renderLeadEnvironment, stableCodeRoot, type LeadDaemonEnvironment,
 } from "./environment.js";
-import { hideHomeInPrompt } from "./home-paths.js";
+import { hideHomeInPrompt, stableCodePathsInPrompt } from "./home-paths.js";
 import {
   loadLeadModelConfig,
   parseModelName,
+  promptCacheKeyEnabled,
   registerLeadProviders,
   resolveLeadModel,
   selectedLeadModelSpec,
+  type LeadModelConfig,
 } from "./model-config.js";
+import { promptCacheKeyExtension, RequestPrefixRecorder } from "./prompt-cache.js";
 import { createLeadSmartModel } from "./smart-model.js";
 import { createCredibilityExtension } from "./credibility/extension.js";
 import { LEAD_CODEMODE_TOOL, LEAD_HAND_TOOLS, leadHandsExtension } from "./hands.js";
@@ -278,6 +281,12 @@ export async function createLeadSession(opts: {
     refreshOnCreate: false,
   });
   const leadModels = loadLeadModelConfig(opts.dataDir);
+  // Provider settings as last read from config.json (refreshProviders and switchModel read them again).
+  let providerSettings: Pick<LeadModelConfig, "providers"> = leadModels;
+  const sendPromptCacheKey = (provider: string) => promptCacheKeyEnabled(providerSettings, provider);
+  // The prefix of the last request: compaction writes its summary on it (prompt-cache.ts, compaction-chunks.ts).
+  const requestPrefix = new RequestPrefixRecorder({ promptCacheKey: sendPromptCacheKey });
+  const prefixFor = (current: { provider: string; id: string }) => requestPrefix.snapshot(current);
   for (const note of await registerLeadProviders(modelRuntime, leadModels)) {
     console.error(`[lead] ${note}`);
   }
@@ -348,6 +357,14 @@ export async function createLeadSession(opts: {
   // reply-style 一节（reply-style.ts）：用户的代回复风格。框是空的时候没有这一节（renderReplyStyle 返回 null）。
   // 读不到时沿用上一次的文字。
   let replyStyleText: string | null = null;
+  // The code root, read once (environment.ts stableCodeRoot gives its upgrade-proof form).
+  const codeRoot = (() => {
+    try {
+      return projectRoot();
+    } catch {
+      return null;
+    }
+  })();
   const environmentExtension: ExtensionFactory = (pi) => {
     pi.on("before_agent_start", (event, ctx) => {
       try {
@@ -439,7 +456,7 @@ export async function createLeadSession(opts: {
       },
       // 空闲车道（scheduler/idle-runtime.ts，P4）：pi 在单元中间想压缩时推迟到空闲，或者用子进程写好的摘要。
       // 排在分段压缩之前：它取消时 pi 不再问后面的扩展；它接上时分段压缩跳过（skip）。
-      ...(opts.idleLane ? [{ name: "plc-idle-lane", hidden: true, factory: idleLaneExtension(opts.idleLane) }] : []),
+      ...(opts.idleLane ? [{ name: "plc-idle-lane", hidden: true, factory: idleLaneExtension(opts.idleLane, { prefix: prefixFor }) }] : []),
       // 历史放不进一次摘要请求时分段压缩（compaction-chunks.ts，2026-11-01）。pi 自己触发的压缩也由它来写，
       // 带上删减的标准和「能力不写成规则」（2026-11-02）；daemon 发起、放得进一次请求的压缩照旧交给 pi。
       {
@@ -448,6 +465,7 @@ export async function createLeadSession(opts: {
           ...(opts.onCompactionProgress ? { onProgress: opts.onCompactionProgress } : {}),
           log: (line) => console.error(line),
           instructions: leadAutoCompactionInstructions(),
+          prefix: prefixFor,
           ...(opts.idleLane ? { skip: (event) => opts.idleLane!.claims(event) } : {}),
         }),
       },
@@ -474,11 +492,19 @@ export async function createLeadSession(opts: {
           log: (line) => console.error(line),
         }),
       },
+      // Prompt cache (prompt-cache.ts): the session's prompt_cache_key for OpenAI-compatible endpoints, and the record of
+      // the last request's prefix for compaction.
+      { name: "plc-prompt-cache-key", hidden: true, factory: promptCacheKeyExtension({ enabled: sendPromptCacheKey, log: (line) => console.error(line) }) },
+      { name: "plc-request-prefix", hidden: true, factory: requestPrefix.extension() },
       // 系统提示词里不写用户目录的完整路径（home-paths.ts，用户 2026-10-30）。排在最后：别的扩展改完提示词以后再换。
       {
         name: "plc-home-paths", hidden: true,
         factory: (pi) => {
-          pi.on("before_agent_start", (event) => hideHomeInPrompt(event.systemPromptOptions, homedir()));
+          pi.on("before_agent_start", (event) => {
+            // Versioned code paths (Lead's own skills) as the stable runtime/current link first, then ~ for the home.
+            if (codeRoot) stableCodePathsInPrompt(event.systemPromptOptions, codeRoot, stableCodeRoot(codeRoot));
+            hideHomeInPrompt(event.systemPromptOptions, homedir());
+          });
         },
       },
     ],
@@ -605,7 +631,9 @@ export async function createLeadSession(opts: {
     switchModel: async (next: string) => {
       const { provider, id } = parseModelName(next);
       if (!modelRuntime.getModel(provider, id)) {
-        for (const note of await registerLeadProviders(modelRuntime, loadLeadModelConfig(opts.dataDir))) {
+        const config = loadLeadModelConfig(opts.dataDir);
+        providerSettings = config;
+        for (const note of await registerLeadProviders(modelRuntime, config)) {
           console.error(`[lead] ${note}`);
         }
       }
@@ -620,7 +648,9 @@ export async function createLeadSession(opts: {
     smartModelLlm,
     // 设置 → 模型改了服务商（2026-10-29）：照 config.json 现在的样子重新注册。正在用的模型由 daemon 再挂一次（switchModel）。
     refreshProviders: async () => {
-      for (const note of await registerLeadProviders(modelRuntime, loadLeadModelConfig(opts.dataDir))) {
+      const config = loadLeadModelConfig(opts.dataDir);
+      providerSettings = config;
+      for (const note of await registerLeadProviders(modelRuntime, config)) {
         console.error(`[lead] ${note}`);
       }
     },

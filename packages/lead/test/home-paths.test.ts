@@ -2,7 +2,7 @@
 // 完整的一跳（模型实际收到的系统提示）在 daemon 的 lead-self-knowledge 测试里。
 import { describe, expect, it } from "vitest";
 import type { NormalizedBuildSystemPromptOptions } from "@earendil-works/pi-coding-agent";
-import { hideHomeInPrompt, tildeHome } from "../src/home-paths.js";
+import { hideHomeInPrompt, stableCodePathsInPrompt, tildeHome } from "../src/home-paths.js";
 
 const HOME = "/Users/alice";
 
@@ -44,5 +44,24 @@ describe("hideHomeInPrompt", () => {
     expect(options.skills[0]!.filePath).toBe("~/Workspace/plc/skills/ticket-planning/SKILL.md");
     expect(options.contextFiles[0]).toEqual({ path: "~/.pi-lead-child/AGENTS.md", content: "仓库在 ~/Workspace" });
     expect(options.toolGuidelines.read).toEqual(["别读 ~/.ssh"]);
+  });
+});
+
+// Regression (prompt cache, 2026-11-12): Lead's own skills are listed with their location under the versioned runtime
+// (runtime/versions/<version>/…), so each upgrade changed the system prompt and its cache.
+describe("stableCodePathsInPrompt", () => {
+  it("writes the versioned code root as the stable link in every prompt text", () => {
+    const root = "/Users/alice/Lead/runtime/versions/1.5.0";
+    const stable = "/Users/alice/Lead/runtime/current";
+    const options = {
+      customPrompt: "", selectedTools: [], hiddenTools: [], toolSnippets: {}, toolGuidelines: {}, promptGuidelines: [],
+      appendSystemPrompt: "", sections: { environment: `code in ${root}` }, cwd: "/Users/alice/Lead", contextFiles: [],
+      skills: [{ name: "ticket-planning", description: "d", filePath: `${root}/apps/daemon/dist/assets/lead-skills/ticket-planning/SKILL.md` } as never],
+    } as NormalizedBuildSystemPromptOptions;
+    stableCodePathsInPrompt(options, root, stable);
+    expect(options.skills[0]!.filePath).toBe(`${stable}/apps/daemon/dist/assets/lead-skills/ticket-planning/SKILL.md`);
+    expect(options.sections.environment).toBe(`code in ${stable}`);
+    hideHomeInPrompt(options, HOME);
+    expect(options.skills[0]!.filePath).toBe("~/Lead/runtime/current/apps/daemon/dist/assets/lead-skills/ticket-planning/SKILL.md");
   });
 });

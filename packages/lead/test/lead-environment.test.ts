@@ -12,7 +12,8 @@ import { setModelCatalogForTesting } from "@pi-lead-child/engine";
 import { createItem, HOST_BYPASS_KEY, markRuntimeDegraded, openDb, recordRuntimeHealthFailure } from "@pi-lead-child/store";
 import { typedFailure } from "@pi-lead-child/runtime";
 import {
-  collectLeadEnvironment, ENVIRONMENT_TOKEN_BUDGET, renderEnvironmentDetails, renderLeadEnvironment, type LeadEnvironmentSnapshot,
+  collectLeadEnvironment, ENVIRONMENT_TOKEN_BUDGET, renderEnvironmentDetails, renderLeadEnvironment, stableCodeRoot,
+  type LeadEnvironmentSnapshot,
 } from "../src/environment.js";
 import { LEAD_SYSTEM_PROMPT } from "../src/prompt.js";
 
@@ -88,7 +89,40 @@ describe("renderLeadEnvironment（系统提示里的这一节）", () => {
     ]) {
       expect(text).toContain(line);
     }
-    expect(text).toMatch(/pi-lead-child 自己的代码在 \/.+。回答「系统为什么这样做」时/);
+    // The path itself is not in the system prompt (prompt cache, 2026-11-12): get_environment gives it.
+    expect(text).toContain("pi-lead-child 自己的代码在哪：get_environment。");
+  });
+
+  // Regression (prompt cache, 2026-11-12): the desktop runtime's code root has the version in it
+  // (runtime/versions/<version>). It was in this section, so every upgrade changed the system prompt and the provider
+  // could not serve any of it from cache.
+  it("keeps the code location out of the system prompt and gives it in get_environment", () => {
+    const text = renderLeadEnvironment();
+    expect(text).not.toMatch(/runtime\/versions\//);
+    expect(text).not.toMatch(/pi-lead-child 自己的代码在 \//);
+    const details = renderEnvironmentDetails({
+      lead: { model: "gw/m", models: [], configProblem: null }, smartModel: null, decisionModel: null, memory: null,
+      runtimes: null, connections: null, codeRoot: "/opt/plc/runtime/current",
+    } as LeadEnvironmentSnapshot, {});
+    expect(details).toContain("- pi-lead-child 自己的代码在 /opt/plc/runtime/current。回答「系统为什么这样做」时，用 read、grep 在这里查。");
+  });
+
+  it("names the stable runtime/current link instead of the versioned code root when the link points at it", () => {
+    const links: Record<string, string> = {
+      "/opt/plc/runtime/current": "/opt/plc/runtime/versions/1.5.0",
+      "/opt/plc/runtime/versions/1.5.0": "/opt/plc/runtime/versions/1.5.0",
+      "/opt/plc/runtime/versions/1.4.0": "/opt/plc/runtime/versions/1.4.0",
+    };
+    const realpath = (path: string) => {
+      if (!(path in links)) throw new Error("ENOENT");
+      return links[path]!;
+    };
+    expect(stableCodeRoot("/opt/plc/runtime/versions/1.5.0", realpath)).toBe("/opt/plc/runtime/current");
+    // The link points at another version (an upgrade is installed, this daemon still runs the old one).
+    expect(stableCodeRoot("/opt/plc/runtime/versions/1.4.0", realpath)).toBe("/opt/plc/runtime/versions/1.4.0");
+    // A source checkout has no version in its path.
+    expect(stableCodeRoot("/src/pi-lead-child", realpath)).toBe("/src/pi-lead-child");
+    expect(stableCodeRoot("/x/versions/2.0.0", realpath)).toBe("/x/versions/2.0.0");
   });
 
   // 用户 2026-10-30：用户让 Lead 读 Slack，Lead 读完说「这一轮读了 Slack，不能再跑命令」就停了。代码只在外部消息叫醒的一轮里拦

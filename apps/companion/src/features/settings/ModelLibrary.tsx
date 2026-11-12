@@ -9,7 +9,7 @@ import { endpointProblem, keyHostChange, keyHostChangeNote, memoryNeedsUser, pen
 import { modelMessages } from './model.messages';
 import { useModelAction } from './useModelAction';
 import {
-  accountPrefixOn, advancedChanges, advancedForm, brainIndex, brainInUse, brainModelName, brainRoles, CAPABILITY_SOURCES, capabilitiesNow, contextLabel,
+  accountPrefixOn, advancedChanges, advancedForm, brainIndex, brainInUse, brainModelName, brainRoles, CAPABILITY_SOURCES, capabilitiesNow, contextWindowLabel,
   defaultExpanded, fastFormProblem, fastKeyLabel, fastModelSub, fastRoles, groupUseLabel, providerFormProblem, providerGroup, providerSub,
   releaseLabel, untilLabel, urlHost, type AdvancedForm,
 } from './modelSettingsModel';
@@ -111,7 +111,7 @@ export function ModelLibrary({ dto }: { dto: ModelSettingsDto }) {
                       <Text size="body" weight="semibold" numberOfLines={1}>{brainModelName(model.model, index.get(model.model))}</Text>
                       <Text size="meta" tone="secondary" mono numberOfLines={1}>
                         {/* 手机上右边放不下日期：写进第二行。 */}
-                        {[model.id, model.image ? m.images : null, contextLabel(model.contextWindow), tablet ? null : release].filter(Boolean).join(' · ')}
+                        {[model.id, model.image ? m.images : null, contextWindowLabel(model.contextWindow, locale), tablet ? null : release].filter(Boolean).join(' · ')}
                       </Text>
                     </Column>
                     {model.blockedUntil ? (

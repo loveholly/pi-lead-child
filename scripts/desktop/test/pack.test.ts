@@ -35,7 +35,10 @@ function fakeRepo(o: { sqliteCpu?: number } = {}): string {
     "node_modules/vitest": { version: "4.1.10", dev: true },
     "node_modules/better-sqlite3": { version: "12.11.1", dependencies: { bindings: "^1.5.0" } },
     "node_modules/bindings": { version: "1.5.0" },
-    "node_modules/@earendil-works/pi-coding-agent": { version: "1.1.0", dependencies: { chalk: "6.0.0" }, bin: { pi: "dist/cli.js" } },
+    "node_modules/@earendil-works/pi-coding-agent": {
+      version: "1.1.0", dependencies: { chalk: "6.0.0", "@earendil-works/pi-ai": "^1.1.0" }, bin: { pi: "dist/cli.js" },
+    },
+    "node_modules/@earendil-works/pi-ai": { version: "1.1.0" },
     "node_modules/chalk": { version: "6.0.0" },
     "node_modules/@anthropic-ai/sandbox-runtime": { version: "0.0.81" },
   };
@@ -130,10 +133,11 @@ describe("packRuntime", () => {
     expect(existsSync(join(runtime, "apps/daemon/dist/build-info.json"))).toBe(false);
     expect(existsSync(join(runtime, "apps/daemon/dist/.web-staging-123"))).toBe(false);
 
-    // node_modules 只有三个 external 和它们的依赖，版本和锁文件一致。
+    // node_modules 只有 external 和它们的依赖，版本和锁文件一致。
     const packages = listTree(join(runtime, "node_modules")).filter((path) => path.endsWith("package.json"));
     expect(packages.sort()).toEqual([
       "@anthropic-ai/sandbox-runtime/package.json",
+      "@earendil-works/pi-ai/package.json",
       "@earendil-works/pi-coding-agent/package.json",
       "better-sqlite3/package.json",
       "bindings/package.json",

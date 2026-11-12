@@ -23,6 +23,7 @@ import {
   serializablePreparation, summarizeInChild, type IdleCompactRequest, type SummarizeInChildOptions, type SummarizeInChildResult,
 } from "./idle-compaction.js";
 import type { Lane } from "./lanes.js";
+import type { RequestPrefix } from "../prompt-cache.js";
 
 export const IDLE_PROBE_INSTRUCTIONS = "[plc idle lane: prepare]";
 export const IDLE_APPLY_INSTRUCTIONS = "[plc idle lane: apply]";
@@ -114,7 +115,9 @@ export class IdleLaneRuntime {
   #supplied: string | null = null;
   #cancelled = 0;
   #inlineAction: "allow" | "defer" | "supply" | null = null;
-  #pendingPrep: { event: SessionBeforeCompactEvent; ctx: Pick<ExtensionContext, "model" | "modelRegistry"> } | null = null;
+  #pendingPrep: {
+    event: SessionBeforeCompactEvent; ctx: Pick<ExtensionContext, "model" | "modelRegistry">; prefix: RequestPrefix | null;
+  } | null = null;
   #sweepHeldLogged = false;
   #stopped = false;
 
@@ -267,12 +270,14 @@ export class IdleLaneRuntime {
   // ── 扩展的入口（pi 的 session_before_compact 和压缩结束）────────────────────────
 
   /** pi 想压缩。返回给 pi 的结果：cancel、compaction，或者 undefined（照常）。 */
-  async beforeCompact(event: SessionBeforeCompactEvent, ctx: Pick<ExtensionContext, "model" | "modelRegistry">): Promise<CompactionResult> {
+  async beforeCompact(
+    event: SessionBeforeCompactEvent, ctx: Pick<ExtensionContext, "model" | "modelRegistry">, prefix?: RequestPrefix | null,
+  ): Promise<CompactionResult> {
     const marker = event.customInstructions;
     if (marker === IDLE_PROBE_INSTRUCTIONS) {
       this.#probeReached = true;
       const compact = this.#state.compact;
-      if (compact.phase === "preparing" && compact.id) this.#startChild(compact.id, event, ctx);
+      if (compact.phase === "preparing" && compact.id) this.#startChild(compact.id, event, ctx, prefix ?? null);
       this.#cancelled += 1;
       return { cancel: true };
     }
@@ -310,7 +315,7 @@ export class IdleLaneRuntime {
       return this.#supply(event);
     }
     this.#inlineAction = null;
-    this.#pendingPrep = { event, ctx };
+    this.#pendingPrep = { event, ctx, prefix: prefix ?? null };
     try {
       this.dispatch({ type: "inline", reason: event.reason, ready: valid });
     } finally {
@@ -397,7 +402,7 @@ export class IdleLaneRuntime {
       case "compact.start": {
         const prep = this.#pendingPrep;
         if (prep) {
-          this.#startChild(effect.id, prep.event, prep.ctx);
+          this.#startChild(effect.id, prep.event, prep.ctx, prep.prefix);
           return;
         }
         this.#probe(effect.id);
@@ -472,7 +477,9 @@ export class IdleLaneRuntime {
     });
   }
 
-  #startChild(id: string, event: SessionBeforeCompactEvent, ctx: Pick<ExtensionContext, "model" | "modelRegistry">): void {
+  #startChild(
+    id: string, event: SessionBeforeCompactEvent, ctx: Pick<ExtensionContext, "model" | "modelRegistry">, prefix: RequestPrefix | null,
+  ): void {
     const model = ctx.model;
     if (!model) {
       this.dispatch({ type: "compact.failed", error: "no model", ms: 0 });
@@ -502,6 +509,7 @@ export class IdleLaneRuntime {
             ...(resolved.baseUrl ? { baseUrl: resolved.baseUrl } : {}),
           },
           preparation,
+          ...(prefix ? { prefix } : {}),
         };
         result = await this.#summarize(request, {
           id, timeoutMs: this.#timeoutMs, signal: controller.signal,
@@ -557,9 +565,15 @@ export class IdleLaneRuntime {
   }
 }
 
-/** pi 扩展：pi 想压缩时问空闲车道（session_before_compact）。登记在分段压缩（compaction-chunks.ts）之前。 */
-export function idleLaneExtension(runtime: IdleLaneRuntime): ExtensionFactory {
+/**
+ * pi 扩展：pi 想压缩时问空闲车道（session_before_compact）。登记在分段压缩（compaction-chunks.ts）之前。
+ * prefix gives the prefix of the last Lead request (prompt-cache.ts) for the summary child.
+ */
+export function idleLaneExtension(
+  runtime: IdleLaneRuntime, options: { prefix?: (model: { provider: string; id: string }) => RequestPrefix | null } = {},
+): ExtensionFactory {
   return (pi) => {
-    pi.on("session_before_compact", (event, ctx) => runtime.beforeCompact(event, ctx));
+    pi.on("session_before_compact", (event, ctx) =>
+      runtime.beforeCompact(event, ctx, ctx.model && options.prefix ? options.prefix(ctx.model) : null));
   };
 }

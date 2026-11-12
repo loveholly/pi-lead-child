@@ -8,9 +8,10 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { tempDir } from "@pi-lead-child/core/testing";
 
 import {
-  assertConfiguredLeadModel, LEAD_CONTEXT_WINDOW_LIMIT, leadModelCatalog, normalizeLeadModelConfig, registerLeadProviders,
-  saveLeadProviderInConfig, setLeadModelInConfig, splitLeadModelEffort,
+  assertConfiguredLeadModel, knownContextWindow, LEAD_CONTEXT_WINDOW_LIMIT, leadModelCatalog, normalizeLeadModelConfig,
+  registerLeadProviders, saveLeadProviderInConfig, setLeadModelInConfig, splitLeadModelEffort,
 } from "../src/model-config.js";
+import { DEFAULT_LEAD_CONTEXT_WINDOW } from "@pi-lead-child/protocol";
 import { PRECIPITATE_RATIO } from "../src/precipitate.js";
 
 let dir: string;
@@ -109,8 +110,8 @@ describe("the Lead model catalog", () => {
     expect(window("as4/claude-sonnet-5(high)")).toMatchObject({ contextWindow: LEAD_CONTEXT_WINDOW_LIMIT, maxTokens: 16_384 });
     // 窗口比 500K 小的按它自己的；目录说的最大输出更小时用目录的。
     expect(window("gemini-3.8-flash-high")).toMatchObject({ contextWindow: 200_000, maxTokens: 8_192 });
-    // 目录没说的按 128K；config.json 写了的以它为准。
-    expect(window("as1/claude-sonnet-5")).toMatchObject({ contextWindow: 128_000, maxTokens: 16_384 });
+    // 目录没说的用已知的窗口（pi 内置目录：claude-sonnet-5 是 1M，按 500K 注册）；config.json 写了的以它为准。
+    expect(window("as1/claude-sonnet-5")).toMatchObject({ contextWindow: LEAD_CONTEXT_WINDOW_LIMIT, maxTokens: 16_384 });
     expect(window("claude-sonnet-5")).toMatchObject({ contextWindow: 300_000 });
 
     const lead = window("as4/claude-sonnet-5(high)")!;
@@ -120,6 +121,48 @@ describe("the Lead model catalog", () => {
     expect(shouldCompact(480_000, lead.contextWindow, DEFAULT_COMPACTION_SETTINGS)).toBe(false);
     expect(shouldCompact(490_000, lead.contextWindow, DEFAULT_COMPACTION_SETTINGS)).toBe(true);
     expect(PRECIPITATE_RATIO * lead.contextWindow).toBeLessThan(lead.contextWindow - DEFAULT_COMPACTION_SETTINGS.reserveTokens);
+  });
+
+  // Regression (prompt cache, 2026-11-12): a gateway lists DeepSeek without a window, Lead assumed 128K and compacted
+  // about every 20K tokens. A known model now gets its real window; an unknown one still gets 128K.
+  it("registers the known window of a model the catalog lists without one, and 128K for an unknown model", async () => {
+    const registered: Array<{ id: string; contextWindow: number }> = [];
+    await registerLeadProviders(
+      { registerProvider(_name: string, input: { models?: typeof registered }) { registered.push(...(input.models ?? [])); } } as never,
+      normalizeLeadModelConfig({
+        providers: {
+          gateway: {
+            baseUrl: "http://127.0.0.1:9/v1", apiKey: { value: "k" }, discover: false,
+            models: ["auto/deepseek-flash", "deepseek-v4-pro", "deepseek-v4-flash(high)", "my-private-model"],
+          },
+        },
+        models: ["gateway/auto/deepseek-flash"],
+      }),
+      {},
+    );
+    const window = (id: string) => registered.find((model) => model.id === id)?.contextWindow;
+    expect(window("auto/deepseek-flash")).toBe(LEAD_CONTEXT_WINDOW_LIMIT);
+    expect(window("deepseek-v4-pro")).toBe(LEAD_CONTEXT_WINDOW_LIMIT);
+    expect(window("deepseek-v4-flash(high)")).toBe(LEAD_CONTEXT_WINDOW_LIMIT);
+    expect(window("my-private-model")).toBe(DEFAULT_LEAD_CONTEXT_WINDOW);
+    expect(knownContextWindow("as4/deepseek-flash")).toBe(1_000_000);
+    expect(knownContextWindow("my-private-model")).toBeNull();
+  });
+
+  it("shows the window the settings page can trust: config.json's, the catalog's, the known one, or none", async () => {
+    const { models } = await leadModelCatalog(normalizeLeadModelConfig({
+      providers: {
+        gateway: {
+          baseUrl: "http://127.0.0.1:9/v1", apiKey: { value: "k" }, discover: false,
+          models: [{ id: "deepseek-v4-pro" }, { id: "my-private-model" }, { id: "set-by-hand", contextWindow: 64_000 }],
+        },
+      },
+      models: [],
+    }), {});
+    const window = (id: string) => models.find((model) => model.id === id)?.contextWindow;
+    expect(window("deepseek-v4-pro")).toBe(1_000_000);
+    expect(window("set-by-hand")).toBe(64_000);
+    expect(window("my-private-model")).toBeNull();
   });
 
   // 2026-11-02：子 agent 在一次调用里写整份评审，写满 16384 就被截断（Run #222、#223）。子 agent 的会话另起一个 ModelRuntime，

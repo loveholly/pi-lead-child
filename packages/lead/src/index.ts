@@ -16,6 +16,7 @@ export * from "./precipitate.js";
 export * from "./compaction-settings.js";
 export * from "./compaction-chunks.js";
 export * from "./cost-signals.js";
+export * from "./prompt-cache.js";
 export { renderLeadSystemPrompt } from "./prompt.js";
 export * from "./session.js";
 export * from "./session-slot.js";

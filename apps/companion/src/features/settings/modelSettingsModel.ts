@@ -1,7 +1,7 @@
 // 设置 → 模型（方案 B，2026-10-29，.scratch/model-settings/spec.md）的纯逻辑：分工的格子、模型库的分组和排序、文案。
 // 页面（ModelSection.tsx、ModelPicker.tsx、ModelLibrary.tsx）只管画。
 import {
-  MODEL_MAX_BACKUPS, parseLeadModelSpec, groupModelsByProvider, flatModelSections,
+  DEFAULT_LEAD_CONTEXT_WINDOW, MODEL_MAX_BACKUPS, parseLeadModelSpec, groupModelsByProvider, flatModelSections,
   DEFAULT_LOCALE, fastModelAuthHeaderMessages, fastModelAuthHeaderProblem,
   type BrainModel, type ModelSection, type FastModel, type LeadModelChoice, type Locale, type ModelProvider, type ModelRelease, type ModelSettingsDto,
 } from '@pi-lead-child/protocol';
@@ -57,6 +57,14 @@ export function contextLabel(tokens: number | null): string | null {
   return `${Math.round(tokens / 1000)}K`;
 }
 
+/**
+ * The window part of a model's second line. When nobody knows the window (config.json, the catalog and pi's built-in
+ * catalog do not list it), say that Lead counts it as the default window, so the user knows to set the real one.
+ */
+export function contextWindowLabel(tokens: number | null, locale: Locale): string {
+  return contextLabel(tokens) ?? modelMessages(locale).defaultWindow(contextLabel(DEFAULT_LEAD_CONTEXT_WINDOW) ?? '');
+}
+
 /** 分工格子的第二行：服务商 · 图片 · 窗口 · 推理强度。 */
 export function brainModelSub(spec: string, entry: BrainEntry | undefined, effort: string | null, locale: Locale): string {
   const m = modelMessages(locale);
@@ -65,7 +73,7 @@ export function brainModelSub(spec: string, entry: BrainEntry | undefined, effor
   return [
     parsed.provider,
     entry.model.image ? m.images : null,
-    contextLabel(entry.model.contextWindow),
+    contextWindowLabel(entry.model.contextWindow, locale),
     effort ? m.reasoning(effort) : null,
   ].filter(Boolean).join(' · ');
 }

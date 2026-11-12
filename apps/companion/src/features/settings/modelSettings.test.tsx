@@ -10,7 +10,7 @@ import { renderWithRuntime, setViewportWidth } from '../../../test/connections';
 import { createCompanionStateRuntime, type CompanionRuntimeDependencies } from '../../state/runtime';
 import { ModelSection } from './ModelSection';
 import { brainPickerGroups } from './ModelPicker';
-import { backupsLeft, brainModelName, brainRoles, contextLabel, providerGroup, releaseLabel, untilLabel, withSlot } from './modelSettingsModel';
+import { backupsLeft, brainModelName, brainRoles, contextLabel, contextWindowLabel, providerGroup, releaseLabel, untilLabel, withSlot } from './modelSettingsModel';
 
 vi.mock('expo-crypto', () => ({ getRandomBytesAsync: vi.fn(), digest: vi.fn(), CryptoDigestAlgorithm: {} }));
 vi.mock('expo-router', () => ({ useRouter: () => ({ push: vi.fn(), replace: vi.fn() }), usePathname: () => '/settings/model', Slot: () => null, Stack: () => null }));
@@ -113,6 +113,10 @@ describe('the model rules', () => {
     expect(withSlot([1, 2], 2, 3)).toEqual([1, 2, 3]);
     expect(contextLabel(1_048_576)).toBe('1M');
     expect(contextLabel(500_000)).toBe('500K');
+    // A model whose window nobody knows: say that Lead counts it as the default window.
+    expect(contextWindowLabel(500_000, 'en')).toBe('500K');
+    expect(contextWindowLabel(null, 'en')).toBe('Window unknown, counted as 128K');
+    expect(contextWindowLabel(null, 'zh')).toBe('窗口未知，按 128K 算');
     expect(releaseLabel({ at: '2026-11-02T08:00:00.000Z', source: 'first_seen' }, 'en')).toMatch(/^First seen 2026-11-0[23]$/);
     expect(releaseLabel({ at: '2026-11-02T08:00:00.000Z', source: 'first_seen' }, 'zh')).toMatch(/^首见 2026-11-0[23]$/);
     expect(releaseLabel(null, 'en')).toBeNull();

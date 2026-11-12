@@ -12,6 +12,7 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { distDir, packageSource, projectRoot, runHostChild } from "@pi-lead-child/core";
+import type { RequestPrefix } from "../prompt-cache.js";
 
 export const IDLE_COMPACT_REQUEST_VERSION = 1;
 
@@ -34,6 +35,9 @@ export interface IdleCompactRequest {
   // daemon 按会话的模型解析好的凭据（modelRegistry.getApiKeyAndHeaders）。
   auth: { apiKey?: string; headers?: Record<string, string>; baseUrl?: string };
   preparation: IdleCompactPreparation;
+  // The prefix of the last Lead request (prompt-cache.ts). With it, the child writes the summary on the session prefix,
+  // so the provider can serve the prefix from its cache. Optional: without it the child serializes the history.
+  prefix?: RequestPrefix;
 }
 
 export type IdleCompactResponse =

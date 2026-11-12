@@ -62,6 +62,10 @@ export const ModelCapabilitySourceSchema = Type.Union([
 ]);
 export type ModelCapabilitySource = Static<typeof ModelCapabilitySourceSchema>;
 
+// The context window Lead assumes for a model whose window nobody knows (config.json, the provider's catalog and pi's
+// built-in catalog do not list it). The settings page shows it next to such a model.
+export const DEFAULT_LEAD_CONTEXT_WINDOW = 128_000;
+
 // 服务商目录里的一个模型。
 //
 // 分组的字段（Lead 模型分组，2026-11-05）都是可选的，而且只在客户端要的时候才给（GET /v1/models/settings?grouping=1）：
@@ -74,7 +78,7 @@ export const BrainModelSchema = StrictObject({
   // 目录给的显示名。没有时为 null。
   name: Nullable(Type.String({ maxLength: 200 })),
   image: Type.Boolean(),
-  // 上下文窗口（目录给的）。没有时为 null。
+  // 上下文窗口：config.json 写的、目录给的，或者已知的（pi 内置目录）。都没有时为 null：Lead 按 DEFAULT_LEAD_CONTEXT_WINDOW 算。
   contextWindow: Nullable(Type.Integer({ minimum: 1 })),
   efforts: Type.Array(Type.String({ minLength: 1, maxLength: 32 })),
   defaultEffort: Nullable(Type.String({ minLength: 1, maxLength: 32 })),

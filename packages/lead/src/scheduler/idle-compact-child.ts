@@ -13,6 +13,8 @@ import { IDLE_COMPACT_REQUEST_VERSION, type IdleCompactRequest, type IdleCompact
 export interface RunIdleCompactOptions {
   // 测试换掉真正的摘要调用。
   summarize?: Parameters<typeof compactInChunks>[2] extends infer O ? O extends { summarize?: infer S } ? S : never : never;
+  // Tests replace the summary call on the session prefix.
+  complete?: NonNullable<Parameters<typeof compactInChunks>[2]>["complete"];
   signal?: AbortSignal;
   log?: (line: string) => void;
 }
@@ -42,8 +44,10 @@ export async function runIdleCompact(request: IdleCompactRequest, options: RunId
     try {
       const result = await compactInChunks(event, ctx, {
         instructions: leadCompactionInstructions(level),
+        ...(request.prefix ? { prefix: () => request.prefix } : {}),
         ...(options.log ? { log: options.log } : {}),
         ...(options.summarize ? { summarize: options.summarize } : {}),
+        ...(options.complete ? { complete: options.complete } : {}),
       });
       if (!result) return { ok: false, error: "nothing to summarize" };
       const { summary, details, usage } = result.compaction;

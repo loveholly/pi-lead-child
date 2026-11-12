@@ -15,11 +15,14 @@
 // 短暂的状态不列：runtime 的 degraded（自动重试到了上限，派发照常进行，过一会儿自己消失）不列；
 // 连接的 degraded（暂时连不上，daemon 在重试）按「已连接」列。这两样用 get_runtime_health、list_connections 现查。
 import type { ConnectionHub } from "@pi-lead-child/connections";
-import { projectRoot, SANDBOX_SECRET_HOSTS_ENV, sandboxSecrets } from "@pi-lead-child/core";
+import { projectRoot, SANDBOX_SECRET_HOSTS_ENV, sandboxSecrets, tildeHome } from "@pi-lead-child/core";
 import { currentModelCatalog } from "@pi-lead-child/engine";
 import { redactAndCap, type DecisionModelDto, type MemorySettingsDto } from "@pi-lead-child/protocol";
 import { getHostBypass, incidentModel, listUnhealthyRuntimeTargets, type Db } from "@pi-lead-child/store";
 import { disabledRuntimes } from "@pi-lead-child/runtime";
+import { realpathSync } from "node:fs";
+import { homedir } from "node:os";
+import { basename, dirname, join } from "node:path";
 import { loadLeadModelConfig } from "./model-config.js";
 
 /**
@@ -94,6 +97,8 @@ export interface LeadEnvironmentSnapshot {
   connections: Array<{ label: string; state: string }> | null;
   // 「用户本人发话时免沙箱」开关（工单 #246 设计 5.4）：开没开。没有时限。读不到时为 null。不给时当作读不到。
   hostBypass?: { enabled: boolean } | null;
+  // Where Lead's own code is (stableCodeRoot). Null when unknown; missing means unknown.
+  codeRoot?: string | null;
 }
 
 // ── 纯函数：快照 → 文字 ─────────────────────────────────────────────────────────────────
@@ -192,11 +197,27 @@ function leadModelLine(lead: LeadEnvironmentSnapshot["lead"]): string {
   return `- 你的模型：现在用 ${lead.model ?? "（不知道）"}。${models}。`;
 }
 
-function codeRoot(): string {
+/**
+ * The code root as a path that does not change on upgrade. The desktop runtime lives in runtime/versions/<version>, and
+ * runtime/current links to the running version: when the link points at this root, use the link. Otherwise (a source
+ * checkout, a link to another version) the root itself.
+ */
+export function stableCodeRoot(root: string, realpath: (path: string) => string = realpathSync): string {
+  if (basename(dirname(root)) !== "versions") return root;
+  const current = join(dirname(dirname(root)), "current");
   try {
-    return projectRoot();
+    return realpath(current) === realpath(root) ? current : root;
   } catch {
-    return "（找不到仓库的根目录）";
+    return root;
+  }
+}
+
+/** Where Lead's own code is, for get_environment. Null when the root cannot be found. */
+export function leadCodeRoot(): string | null {
+  try {
+    return stableCodeRoot(projectRoot());
+  } catch {
+    return null;
   }
 }
 
@@ -235,7 +256,9 @@ function selfLines(): string[] {
       + "找到以后用 read 读 SKILL.md，里面写的 Claude Code 专用工具（Skill、Agent、mcp__ 开头的）换成你有的工具：bash、codemode、连接工具、派子 agent。",
     "- 你看不到 child 会话的内部。你能读 child 的 Run 事件（read_run_events）、checkpoint 和交付。",
     "- 你看不到 Jev、Hindsight 和兜底 LLM 的内部日志。你能读到的是事件日志里的调用记录。",
-    `- pi-lead-child 自己的代码在 ${codeRoot()}。回答「系统为什么这样做」时，用 read、grep 在这里查。`,
+    // The path is not written here: it changes with every upgrade, and a changed system prompt cannot be served from
+    // the prompt cache. get_environment gives it.
+    "- pi-lead-child 自己的代码在哪：get_environment。回答「系统为什么这样做」时，用 read、grep 在那里查。",
   ];
 }
 
@@ -283,6 +306,11 @@ export function renderLeadEnvironment(): string {
   ].join("\n");
 }
 
+// Where Lead's own code is. Not written when unknown.
+function codeRootLines(root: string | null): string[] {
+  return root ? [`- pi-lead-child 自己的代码在 ${tildeHome(root, homedir())}。回答「系统为什么这样做」时，用 read、grep 在这里查。`] : [];
+}
+
 // 免沙箱开关一行（hostBypass: { enabled }）。读不到时不写。
 function hostBypassLines(state: LeadEnvironmentSnapshot["hostBypass"]): string[] {
   if (!state) return [];
@@ -305,6 +333,7 @@ export function renderEnvironmentDetails(snapshot: LeadEnvironmentSnapshot, env:
     connectionLine(snapshot.connections),
     ...hostBypassLines(snapshot.hostBypass ?? null),
     sandboxSecretsLine(env),
+    ...codeRootLines(snapshot.codeRoot ?? null),
   ].join("\n");
 }
 
@@ -326,6 +355,8 @@ export interface LeadEnvironmentSources {
   connections?: Pick<ConnectionHub, "list"> | null;
   daemon?: (() => LeadDaemonEnvironment) | null;
   env?: Record<string, string | undefined>;
+  // Where Lead's own code is (tests replace it). Default: leadCodeRoot().
+  codeRoot?: () => string | null;
 }
 
 function attempt<T>(read: () => T, fallback: T): T {
@@ -395,5 +426,6 @@ export function collectLeadEnvironment(sources: LeadEnvironmentSources): LeadEnv
       })), null)
       : null,
     hostBypass: attempt(() => ({ enabled: getHostBypass(sources.db, new Date()).enabled }), null),
+    codeRoot: attempt(() => (sources.codeRoot ? sources.codeRoot() : leadCodeRoot()), null),
   };
 }

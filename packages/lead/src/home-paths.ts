@@ -15,16 +15,31 @@ export { tildeHome };
  */
 export function hideHomeInPrompt(options: NormalizedBuildSystemPromptOptions, home: string): void {
   const tilde = (text: string) => tildeHome(text, home);
-  if (options.customPrompt) options.customPrompt = tilde(options.customPrompt);
-  options.appendSystemPrompt = tilde(options.appendSystemPrompt);
-  options.promptGuidelines = options.promptGuidelines.map(tilde);
-  options.toolSnippets = Object.fromEntries(Object.entries(options.toolSnippets).map(([name, text]) => [name, tilde(text)]));
-  options.toolGuidelines = Object.fromEntries(
-    Object.entries(options.toolGuidelines).map(([name, lines]) => [name, lines.map(tilde)]),
-  );
-  for (const [name, content] of Object.entries(options.sections)) options.sections[name] = tilde(content);
+  rewritePromptText(options, tilde);
   // pi 的工作目录一节（cwd）：同名的自定义节盖掉 pi 自己写的那一节。
   if (options.cwd) options.sections.cwd = tilde(options.cwd.replace(/\\/g, "/"));
-  options.contextFiles = options.contextFiles.map((file) => ({ path: tilde(file.path), content: tilde(file.content) }));
-  options.skills = options.skills.map((skill) => ({ ...skill, filePath: tilde(skill.filePath) }));
+}
+
+/**
+ * Writes the versioned code root (runtime/versions/<version>) as its stable link (runtime/current) in every prompt text,
+ * for example the location of Lead's own skills. A path that changes on each upgrade changes the system prompt, and the
+ * provider can no longer serve the prompt from its cache. Does nothing when both are the same.
+ */
+export function stableCodePathsInPrompt(options: NormalizedBuildSystemPromptOptions, root: string, stable: string): void {
+  if (!root || root === stable) return;
+  rewritePromptText(options, (text) => text.split(root).join(stable));
+}
+
+// Applies one text rewrite to every prompt field that can hold a path.
+function rewritePromptText(options: NormalizedBuildSystemPromptOptions, rewrite: (text: string) => string): void {
+  if (options.customPrompt) options.customPrompt = rewrite(options.customPrompt);
+  options.appendSystemPrompt = rewrite(options.appendSystemPrompt);
+  options.promptGuidelines = options.promptGuidelines.map(rewrite);
+  options.toolSnippets = Object.fromEntries(Object.entries(options.toolSnippets).map(([name, text]) => [name, rewrite(text)]));
+  options.toolGuidelines = Object.fromEntries(
+    Object.entries(options.toolGuidelines).map(([name, lines]) => [name, lines.map(rewrite)]),
+  );
+  for (const [name, content] of Object.entries(options.sections)) options.sections[name] = rewrite(content);
+  options.contextFiles = options.contextFiles.map((file) => ({ path: rewrite(file.path), content: rewrite(file.content) }));
+  options.skills = options.skills.map((skill) => ({ ...skill, filePath: rewrite(skill.filePath) }));
 }
