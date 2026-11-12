@@ -75,7 +75,6 @@ export const conversationMessages = defineMessages({
       more: (count: number) => (count === 1 ? '1 more' : `${count} more`),
       notAcknowledged: (error: string) => `Not acknowledged: ${error}`,
       open: (id: number) => `Open #${id}`,
-      snooze: 'Remind me in 10 minutes',
       acknowledge: 'Got it',
     },
     outage: {
@@ -151,7 +150,6 @@ export const conversationMessages = defineMessages({
       more: (count) => `还有 ${count} 条`,
       notAcknowledged: (error) => `没有确认上：${error}`,
       open: (id) => `打开 #${id}`,
-      snooze: '10 分钟后再提醒',
       acknowledge: '知道了',
     },
     outage: {

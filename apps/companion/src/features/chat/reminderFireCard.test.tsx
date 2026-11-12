@@ -4,7 +4,7 @@
 //     时间、事情、「重要」标记、推送的情况，「知道了」「10 分钟后再提醒」。
 //   · 一条提醒一张卡：新版本原地更新；确认以后收成一行「09:00 抢票 · 09:01 已确认」；旧版本忽略。
 //   · Lead 为它单独回的那一轮挂在卡下面，不另起气泡。
-//   · interrupt 级的同时在输入框上方显示横幅：横幅上的「知道了」确认这条提醒，另有「10 分钟后再提醒」，没有「打开 #N」。
+//   · Important (interrupt) reminders do not also show the banner above the composer: the due card is enough.
 //   · 创建时的提醒卡：「重要」标记，「改时间」「取消」。
 import {
   PROTOCOL_VERSION, type ConversationTurn, type GatewayEvent, type LeadInterrupt, type ReminderCard, type TicketDetail,
@@ -209,23 +209,33 @@ describe('the card when a reminder fires', () => {
 });
 
 describe('the banner for an important reminder', () => {
-  it('confirms the reminder itself, offers 10 分钟后再提醒, and does not open it as a ticket', async () => {
-    const performTicketAction = vi.fn(async (ticketId: number, action: string) => ({ ticketId, action, ticket: null }));
-    const acknowledgeLeadInterrupt = vi.fn();
-    const rescheduleReminder = vi.fn(async (ticketId: number) => ({ ticketId, remindAt: local(9, 11), ticket: null }));
-    const runtime = setup({ performTicketAction, acknowledgeLeadInterrupt, rescheduleReminder } as never);
+  // The due card in the conversation already shows the reminder with its own Got it, so the banner above the
+  // composer does not show it a second time. Other interrupts (and Lead's own follow-ups) keep the banner.
+  it('does not repeat a due reminder above the composer', () => {
+    const runtime = setup();
+    push(runtime, { reminder: reminder() });
     push(runtime, { interrupt: interrupt() });
-    const banner = within(screen.getByTestId('interrupt-banner'));
-    expect(banner.getByTestId('interrupt-banner-text').textContent).toBe('提醒「抢票」到点');
-    expect(banner.queryByText('打开 #5')).toBeNull();
-    fireEvent.click(banner.getByTestId('interrupt-banner-snooze'));
-    await waitFor(() => expect(rescheduleReminder).toHaveBeenCalledWith(5, { snoozeMinutes: 10 }));
-    fireEvent.click(banner.getByTestId('interrupt-banner-ack'));
-    await waitFor(() => expect(performTicketAction).toHaveBeenCalledWith(5, 'ack', {}));
-    expect(acknowledgeLeadInterrupt).not.toHaveBeenCalled();
-    // 提醒结束了：daemon 推横幅结束的样子，横幅收起。
-    push(runtime, { interrupt: interrupt({ entityVersion: 45, lastSeq: 44, acknowledgedAt: local(9, 1) }) });
+    expect(within(screen.getByTestId('reminder-fire-5')).getByRole('button', { name: 'Got it' })).toBeTruthy();
     expect(screen.queryByTestId('interrupt-banner')).toBeNull();
+  });
+
+  it('still shows other interrupts, and does not count the reminder in the rest', () => {
+    const runtime = setup();
+    push(runtime, { reminder: reminder() });
+    push(runtime, { interrupt: interrupt() });
+    push(runtime, { interrupt: interrupt({
+      key: 'interrupt:42', seq: 42, entityKey: 'config:settings', entityVersion: 42, lastSeq: 42, ticketId: null,
+      kind: 'config.changed_outside_api', summary: 'Settings changed outside the app', basis: [],
+    }) });
+    expect(screen.getByTestId('interrupt-banner-text').textContent).toBe('Settings changed outside the app');
+    expect(screen.queryByTestId('interrupt-banner-meta')?.textContent ?? '').not.toContain('more');
+    expect(screen.queryByTestId('interrupt-banner-snooze')).toBeNull();
+  });
+
+  it('still shows a follow-up of Lead\'s own that fires, which has no reminder card', () => {
+    const runtime = setup();
+    push(runtime, { interrupt: interrupt({ entityKey: 'followup:9', ticketId: null, summary: 'Follow-up is due' }) });
+    expect(screen.getByTestId('interrupt-banner-text').textContent).toBe('Follow-up is due');
   });
 });
 

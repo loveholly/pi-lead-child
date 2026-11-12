@@ -48,9 +48,10 @@ function card(overrides: Partial<LeadActivityCard> = {}): LeadActivityCard {
 
 function interrupt(overrides: Partial<LeadInterrupt> = {}): LeadInterrupt {
   return {
-    key: 'interrupt:20', seq: 20, entityKey: 'reminder:5', entityVersion: 20, lastSeq: 20,
-    at: '2026-10-17T01:05:00.000Z', ticketId: 5, kind: 'timer.fired', summary: '提醒「交房租」到点', rootCause: null,
-    basis: [{ kind: 'order', id: 'reminder.fire', version: 1 }], acknowledgedAt: null, resolvedElsewhere: false,
+    // A security alert, not a due reminder: a due reminder has its own card in the conversation and no banner.
+    key: 'interrupt:20', seq: 20, entityKey: 'config:settings', entityVersion: 20, lastSeq: 20,
+    at: '2026-10-17T01:05:00.000Z', ticketId: null, kind: 'config.changed_outside_api', summary: 'Settings changed outside the app',
+    rootCause: null, basis: [{ kind: 'order', id: 'security.alert', version: 1 }], acknowledgedAt: null, resolvedElsewhere: false,
     ...overrides,
   };
 }
@@ -258,8 +259,8 @@ describe('the interrupt banner above the composer', () => {
     expect(screen.queryByTestId('interrupt-banner')).toBeNull();
 
     push(runtime, { interrupt: interrupt() });
-    expect(screen.getByTestId('interrupt-banner-text').textContent).toBe('提醒「交房租」到点');
-    expect(screen.getByTestId('interrupt-banner-meta').textContent).toContain('Basis: reminder.fire v1');
+    expect(screen.getByTestId('interrupt-banner-text').textContent).toBe('Settings changed outside the app');
+    expect(screen.getByTestId('interrupt-banner-meta').textContent).toContain('Basis: security.alert v1');
     // 别的事（新的摘要、同一条的旧版本）不让它消失。
     push(runtime, { card: card({ entityVersion: 13, lastSeq: 12, summary: '#7 第二次重试' }) });
     push(runtime, { interrupt: interrupt({ entityVersion: 19 }) });
@@ -277,7 +278,7 @@ describe('the interrupt banner above the composer', () => {
     const runtime = setup();
     push(runtime, { interrupt: interrupt() });
     push(runtime, { interrupt: interrupt({ key: 'interrupt:30', seq: 30, entityVersion: 30, lastSeq: 30, summary: '服务器磁盘快满了' }) });
-    expect(screen.getByTestId('interrupt-banner-text').textContent).toBe('提醒「交房租」到点');
+    expect(screen.getByTestId('interrupt-banner-text').textContent).toBe('Settings changed outside the app');
     expect(screen.getByTestId('interrupt-banner-meta').textContent).toContain('1 more');
 
     push(runtime, { interrupt: interrupt({ entityVersion: 32, lastSeq: 31, acknowledgedAt: '2026-10-17T01:06:00.000Z' }) });

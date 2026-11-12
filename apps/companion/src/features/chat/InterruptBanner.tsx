@@ -15,6 +15,8 @@ import { useOpenTicket } from './useOpenTicket';
 // 横幅只放 interrupt 级的事件。一次显示最早的一条，还有别的写「还有 N 条」；确认一条，下一条接着显示。
 // 确认写回事件的处置（daemon 的 POST /v1/lead/interrupts/:seq/ack），别的客户端由推送收起。别处已处理的不再显示。
 // 和会话里的警告一样：白底、细描边，左边 3px 的色条和图标表示严重程度（见 components 的 NoticeRow）。
+// A due reminder is not shown here: the conversation already has its due card (ReminderFireCard), with Got it and
+// the snooze options. The banner showed the same reminder a second time.
 
 // 两种语言都写 24 小时制（设计规范 P14.2）。
 function clock(value: string, locale: Locale): string {
@@ -23,7 +25,7 @@ function clock(value: string, locale: Locale): string {
   return new Intl.DateTimeFormat(intlLocale(locale), { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).format(date);
 }
 
-/** 横幅上的这件事是不是一条到点的提醒（工单 07）：是的话返回提醒的编号。 */
+/** Is this interrupt a due reminder? If so, returns the reminder's id. The banner skips these. */
 export function interruptReminderId(interrupt: Pick<LeadInterrupt, 'kind' | 'entityKey'>): number | null {
   if (interrupt.kind !== 'timer.fired') return null;
   const match = /^reminder:(\d+)$/u.exec(interrupt.entityKey);
@@ -37,7 +39,6 @@ export function InterruptBannerView({
   busy = false,
   error = null,
   onAcknowledge,
-  onSnooze,
   onOpenTicket,
 }: {
   interrupt: LeadInterrupt;
@@ -48,17 +49,13 @@ export function InterruptBannerView({
   busy?: boolean;
   error?: string | null;
   onAcknowledge: () => void;
-  // 到点的提醒（工单 07）：「10 分钟后再提醒」。
-  onSnooze?: () => void;
   onOpenTicket?: (ticketId: number) => void;
 }) {
   const locale = useLocale();
   const m = conversationMessages(locale).interrupt;
   const basis = leadActivityBasisLine(interrupt, leadName, locale);
   const meta = [clock(interrupt.at, locale), basis, more > 0 ? m.more(more) : null].filter(Boolean).join(' · ');
-  // 提醒不是工单：横幅上不给「打开 #83」，给「10 分钟后再提醒」。
-  const reminderId = interruptReminderId(interrupt);
-  const ticketId = reminderId === null ? interrupt.ticketId : null;
+  const ticketId = interrupt.ticketId;
   return (
     <Column
       testID="interrupt-banner"
@@ -91,17 +88,6 @@ export function InterruptBannerView({
           {ticketId && onOpenTicket ? (
             <Button label={m.open(ticketId)} onPress={() => onOpenTicket(ticketId)} variant="link" size="xs" />
           ) : null}
-          {reminderId !== null && onSnooze ? (
-            <Button
-              testID="interrupt-banner-snooze"
-              label={m.snooze}
-              onPress={onSnooze}
-              disabled={busy}
-              variant="outline"
-              tone="neutral"
-              size="xs"
-            />
-          ) : null}
           <Button
             testID="interrupt-banner-ack"
             label={m.acknowledge}
@@ -120,26 +106,19 @@ export function InterruptBannerView({
 export function InterruptBanner() {
   const runtime = useCompanionRuntime();
   const state = useControlPlaneStore((value) => value.leadActivity);
-  const open = useMemo(() => openLeadInterrupts(state), [state]);
+  const open = useMemo(() => openLeadInterrupts(state).filter((item) => interruptReminderId(item) === null), [state]);
   const openTicket = useOpenTicket();
   const leadName = useLeadName();
   const [pending, setPending] = useState<{ seq: number; error: string | null } | null>(null);
   const first = open[0];
   if (!first) return null;
-  const run = (work: () => Promise<unknown>) => {
+  const acknowledge = () => {
     setPending({ seq: first.seq, error: null });
-    work().then(
+    runtime.acknowledgeLeadInterrupt(first.seq).then(
       () => setPending(null),
       (error: unknown) => setPending({ seq: first.seq, error: error instanceof Error ? error.message : String(error) }),
     );
   };
-  const reminderId = interruptReminderId(first);
-  // 到点的提醒（工单 07）：「知道了」就是确认这条提醒，和到点卡上的「知道了」一样；提醒结束了，服务端同时收起横幅。
-  // 提醒已经确认过（例如 Lead 替用户确认了）时动作会被拒绝，这时只确认横幅。
-  const acknowledge = () => run(reminderId === null
-    ? () => runtime.acknowledgeLeadInterrupt(first.seq)
-    : () => runtime.performTicketAction(reminderId, 'ack').catch(() => runtime.acknowledgeLeadInterrupt(first.seq)));
-  const snooze = reminderId === null ? undefined : () => run(() => runtime.rescheduleReminder(reminderId, { snoozeMinutes: 10 }));
   const mine = pending?.seq === first.seq ? pending : null;
   return (
     <InterruptBannerView
@@ -149,7 +128,6 @@ export function InterruptBanner() {
       busy={mine !== null && mine.error === null}
       error={mine?.error ?? null}
       onAcknowledge={acknowledge}
-      {...(snooze ? { onSnooze: snooze } : {})}
       onOpenTicket={openTicket}
     />
   );
