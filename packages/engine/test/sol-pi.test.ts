@@ -118,8 +118,8 @@ export function createSolPiExtension(load) {
 }
 
 // A fake SoL-Pi with ObservationPack as upstream 41fa7e0 has it: a pure-text tool result over 10 KB
-// is replaced by a placeholder with a new obs_ id after its first 2 provider requests, obs_recall
-// returns pages up to 16 KB, and recall results are not exempt. Like upstream, it registers at
+// is replaced by a placeholder with a new obs_ id after its first 2 provider requests, counted per
+// context event, obs_recall returns pages up to 16 KB, and recall results are not exempt. Like upstream, it registers at
 // session_start.
 function fakeObservationPackPackage(): string {
   const dir = join(tempDir("plc-sol-pi-obs-"), "SoL-Pi");
@@ -136,6 +136,7 @@ const THRESHOLD_BYTES = 10 * 1024;
 const FULL_SENDS = 2;
 const PAGE_BYTES = 16 * 1024 - 512;
 const store = new Map();
+const sentCounts = new Map();
 export function createSolPiExtension(load) {
   return (pi) => {
     pi.on("session_start", (_event, ctx) => {
@@ -165,9 +166,13 @@ export function createSolPiExtension(load) {
         const messages = event.messages.map((message, i) => {
           if (message.role !== "toolResult" || message.isError || !message.content.every((b) => b.type === "text")) return message;
           const text = message.content.map((b) => b.text).join("\\n");
-          if (Buffer.byteLength(text) <= THRESHOLD_BYTES || counts[i] < FULL_SENDS) return message;
+          if (Buffer.byteLength(text) <= THRESHOLD_BYTES) return message;
           const id = "obs_" + createHash("sha256").update(message.toolCallId + text).digest("hex").slice(0, 24);
           store.set(id, text);
+          // Upstream counts context events per observation, falling back to the assistant messages after it.
+          const previous = sentCounts.get(id) ?? counts[i];
+          sentCounts.set(id, previous + 1);
+          if (previous < FULL_SENDS) return message;
           return { ...message, content: [{ type: "text",
             text: "[large tool result replaced]\\nid: " + id + "\\ntool: " + message.toolName }] };
         });
@@ -193,12 +198,15 @@ describe("SoL-Pi entries loaded by pi's extension loader", () => {
     entryFile: string,
     responses: Parameters<ReturnType<typeof fauxProvider>["setResponses"]>[0] = [],
     extraFactories: { name: string; factory: (pi: ExtensionAPI) => void }[] = [],
+    retry = false,
   ) {
     const cwd = tempDir("plc-sol-pi-");
     const agentDir = join(cwd, "agent");
     const faux = fauxProvider({ provider: "plc-sol-pi-test", api: "plc-sol-pi-test-api" });
     faux.setResponses(responses);
-    const settingsManager = SettingsManager.inMemory({ compaction: { enabled: false }, retry: { enabled: false } });
+    const settingsManager = SettingsManager.inMemory({
+      compaction: { enabled: false }, retry: retry ? { enabled: true, maxRetries: 2, baseDelayMs: 1 } : { enabled: false },
+    });
     const loader = new DefaultResourceLoader({
       cwd, agentDir, settingsManager,
       additionalExtensionPaths: [packageSource("engine", "extension", entryFile)],
@@ -249,10 +257,15 @@ describe("SoL-Pi entries loaded by pi's extension loader", () => {
       .not.toContain("then_run");
   });
 
-  // Regression: a recalled page over 10 KB was packed again under a new obs_ id two steps later,
-  // and recalling that id gave yet another one. The page is now folded into a pointer to the
-  // original id and offset, and no new id appears.
-  it("folds a stale obs_recall page into a pointer to the original id instead of a new observation", async () => {
+  type Seen = { role: string; toolName?: string; text: string };
+  type Step = (seen: Seen[]) => ReturnType<typeof fauxAssistantMessage>;
+  const callTool = (name: string, args: Parameters<typeof fauxToolCall>[1] = {}): Step =>
+    () => fauxAssistantMessage(fauxToolCall(name, args), { stopReason: "toolUse" });
+  const obsIds = (seen: Seen[]) => new Set(seen.flatMap((m) => [...m.text.matchAll(/obs_[a-f0-9]{24}/g)].map((x) => x[0])));
+
+  // Runs: a large tool result, two more steps (it is packed), obs_recall of it, then `afterRecall`
+  // and a final answer. Returns what the provider saw on each request.
+  async function recallScenario(afterRecall: Step[]) {
     process.env.PLC_SOL_PI_ENTRY = join(fakeObservationPackPackage(), "src", "sol-pi", "index.ts");
     const big = Array.from({ length: 800 }, (_, i) => `line ${i} of the long ticket brief`).join("\n");
     const tools = (pi: ExtensionAPI) => {
@@ -265,9 +278,8 @@ describe("SoL-Pi entries loaded by pi's extension loader", () => {
         async execute() { return { content: [{ type: "text", text: "ok" }], details: undefined }; },
       });
     };
-    type Seen = { role: string; toolName?: string; text: string };
     const contexts: Seen[][] = [];
-    const record = (context: { messages: unknown[] }) => {
+    const step = (call: Step) => (context: { messages: unknown[] }) => {
       contexts.push(context.messages.map((raw) => {
         const message = raw as { role: string; toolName?: string; content: unknown };
         const blocks = Array.isArray(message.content) ? message.content as { type: string; text?: string }[] : [];
@@ -276,34 +288,49 @@ describe("SoL-Pi entries loaded by pi's extension loader", () => {
           text: typeof message.content === "string" ? message.content : blocks.map((b) => b.text ?? "").join("\n"),
         };
       }));
+      return call(contexts.at(-1)!);
     };
-    const step = (call: (seen: Seen[]) => ReturnType<typeof fauxAssistantMessage>) =>
-      (context: { messages: unknown[] }) => { record(context); return call(contexts.at(-1)!); };
     const { session } = await sessionWith("sol-pi-lead.ts", [
-      step(() => fauxAssistantMessage(fauxToolCall("big", {}), { stopReason: "toolUse" })),
-      step(() => fauxAssistantMessage(fauxToolCall("noop", {}), { stopReason: "toolUse" })),
-      step(() => fauxAssistantMessage(fauxToolCall("noop", {}), { stopReason: "toolUse" })),
-      step((seen) => {
-        const id = /id: (obs_[a-f0-9]{24})/.exec(seen.find((m) => m.toolName === "big")!.text)![1]!;
-        return fauxAssistantMessage(fauxToolCall("obs_recall", { id, offset: 0 }), { stopReason: "toolUse" });
-      }),
-      step(() => fauxAssistantMessage(fauxToolCall("noop", {}), { stopReason: "toolUse" })),
-      step(() => fauxAssistantMessage(fauxToolCall("noop", {}), { stopReason: "toolUse" })),
-      step(() => fauxAssistantMessage("done")),
-    ], [{ name: "tools", factory: tools }]);
-
+      callTool("big"), callTool("noop"), callTool("noop"),
+      (seen: Seen[]) => callTool("obs_recall", { id: [...obsIds(seen)][0], offset: 0 })(seen),
+      ...afterRecall,
+      () => fauxAssistantMessage("done"),
+    ].map(step), [{ name: "tools", factory: tools }], true);
     await session.prompt("read the big result", { expandPromptTemplates: false });
+    const originalId = [...obsIds(contexts[3]!)][0]!;
+    return { contexts, originalId };
+  }
+
+  // Regression: a recalled page over 10 KB was packed again under a new obs_ id two steps later,
+  // and recalling that id gave yet another one. The page is now folded into a pointer to the
+  // original id and offset, and no new id appears.
+  it("folds a stale obs_recall page into a pointer to the original id instead of a new observation", async () => {
+    const { contexts, originalId } = await recallScenario([callTool("noop"), callTool("noop")]);
     expect(contexts).toHaveLength(7);
-    const originalId = /id: (obs_[a-f0-9]{24})/.exec(contexts[3]!.find((m) => m.toolName === "big")!.text)![1]!;
     // The first two requests after the recall still carry the whole page.
     const fresh = contexts[5]!.find((m) => m.toolName === "obs_recall")!;
     expect(Buffer.byteLength(fresh.text)).toBeGreaterThan(OBSERVATION_THRESHOLD_BYTES);
-    const last = contexts[6]!;
-    const recall = last.find((m) => m.toolName === "obs_recall")!;
+    const recall = contexts[6]!.find((m) => m.toolName === "obs_recall")!;
     expect(recall.text).toContain(`{"id":"${originalId}","offset":0}`);
     expect(recall.text).not.toContain("[large tool result replaced]");
-    const ids = new Set(last.flatMap((m) => [...m.text.matchAll(/obs_[a-f0-9]{24}/g)].map((match) => match[0])));
-    expect([...ids]).toEqual([originalId]);
+    for (const seen of contexts) expect([...obsIds(seen)].filter((id) => id !== originalId)).toEqual([]);
+  });
+
+  // Regression: ObservationPack counts context events, and a failed request that pi retries is
+  // dropped from the context but was counted. Counting only the assistant messages after the page
+  // folded it one request too late, and the provider saw the page under a new obs_ id.
+  it("folds the page in time when a request after the recall fails and pi retries it", async () => {
+    const { contexts, originalId } = await recallScenario([
+      () => fauxAssistantMessage("", { stopReason: "error", errorMessage: "503 service unavailable" }),
+      callTool("noop"),
+    ]);
+    // Requests: big, noop, noop, recall, the failed one, its retry, and the final answer.
+    expect(contexts).toHaveLength(7);
+    expect(contexts[5]!.map((m) => m.role)).toEqual(contexts[4]!.map((m) => m.role));
+    const recall = contexts[6]!.find((m) => m.toolName === "obs_recall")!;
+    expect(recall.text).toContain(`{"id":"${originalId}","offset":0}`);
+    expect(recall.text).not.toContain("[large tool result replaced]");
+    for (const seen of contexts) expect([...obsIds(seen)].filter((id) => id !== originalId)).toEqual([]);
   });
 
   // 没装（测试、首次安装完成之前）时入口什么也不做，会话照常起来。
@@ -480,6 +507,17 @@ describe("foldStaleRecallPages", () => {
     expect(text).toContain(`{"id":"${id}","offset":15872}`);
     expect(text).toContain("next_offset: 31744");
     expect(Buffer.byteLength(text)).toBeLessThan(1024);
+  });
+
+  // A retried request adds a context event but no assistant message: the shared count still folds
+  // the page on the third context event, as ObservationPack replaces it then.
+  it("counts context events with a shared map, so a retried request still counts", () => {
+    const sends = new Map<string, number>();
+    expect(foldStaleRecallPages([page(large)], sends)).toBeUndefined();
+    expect(foldStaleRecallPages([page(large)], sends)).toBeUndefined();
+    const folded = foldStaleRecallPages([page(large), assistant], sends)!;
+    expect((folded[0] as { content: { text: string }[] }).content[0]!.text).toContain(`{"id":"${id}","offset":15872}`);
+    expect(foldStaleRecallPages([page(large), assistant], new Map())).toBeUndefined();
   });
 
   it("prefers details, and leaves small pages, failed recalls and other tools alone", () => {

@@ -171,10 +171,17 @@ export function recallPagePointer(page: RecallPage, bytes: number): string {
   ].join("\n");
 }
 
-// Folds every obs_recall page over 10 KB that was already sent twice. Sends are counted the way
-// ObservationPack counts them: a message was sent once per assistant message after it.
-// Returns undefined when nothing changes.
-export function foldStaleRecallPages(messages: readonly ContextMessage[]): ContextMessage[] | undefined {
+// Folds every obs_recall page over 10 KB that was already sent twice, counting sends the way
+// ObservationPack does. ObservationPack counts every context event a large result takes part in,
+// and starts from the number of assistant messages after it when it has no count yet. The two can
+// differ: when a provider request fails and pi retries it, pi drops the failed attempt from the
+// context, but its context event was counted. So we keep our own count per tool call, `sends`, one
+// per context event, and never let it fall below the assistant messages after the page. Our count
+// then reaches 2 no later than ObservationPack's. Call this once per context event with the same
+// map. Returns undefined when nothing changes.
+export function foldStaleRecallPages(
+  messages: readonly ContextMessage[], sends: Map<string, number> = new Map(),
+): ContextMessage[] | undefined {
   let assistantsAfter = 0;
   let folded: ContextMessage[] | undefined;
   for (let index = messages.length - 1; index >= 0; index -= 1) {
@@ -183,11 +190,14 @@ export function foldStaleRecallPages(messages: readonly ContextMessage[]): Conte
       assistantsAfter += 1;
       continue;
     }
-    if (assistantsAfter < OBSERVATION_FULL_SENDS) continue;
+    if (message.role !== "toolResult") continue;
     const page = recallPage(message);
-    if (!page || message.role !== "toolResult") continue;
+    if (!page) continue;
     const bytes = resultBytes(message);
     if (bytes <= OBSERVATION_THRESHOLD_BYTES) continue;
+    const previous = Math.max(sends.get(message.toolCallId) ?? 0, assistantsAfter);
+    sends.set(message.toolCallId, previous + 1);
+    if (previous < OBSERVATION_FULL_SENDS) continue;
     folded ??= [...messages];
     folded[index] = { ...message, content: [{ type: "text", text: recallPagePointer(page, bytes) }] };
   }
@@ -216,8 +226,9 @@ export async function registerSolPi(
     // Must run before SoL-Pi's context handler: pi chains context handlers in registration order,
     // and SoL-Pi registers its own only at session_start.
     if (settings.features.includes("observationPack")) {
+      const sends = new Map<string, number>();
       pi.on("context", (event) => {
-        const messages = foldStaleRecallPages(event.messages);
+        const messages = foldStaleRecallPages(event.messages, sends);
         return messages ? { messages } : undefined;
       });
     }
