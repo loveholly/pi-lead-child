@@ -627,20 +627,30 @@ CREATE TABLE IF NOT EXISTS item_milestone_changes (
 CREATE INDEX IF NOT EXISTS item_milestone_changes_milestone ON item_milestone_changes (milestone_id, id);
 `;
 
-// 连接（v42，设置页的「连接」）：第三方账号的授权。daemon 是唯一的 OAuth 客户端和远程 MCP 客户端。
-// 令牌只以密文存在 secret_cipher 里（AES-256-GCM，密钥在 Keychain，见 packages/connections 的 vault.ts）。
-// 一个 MCP 地址只有一行：断开时清掉密文和工具缓存，status 改成 disconnected，设置（谁能用、写入策略）保留，
-// 重新连接时复用这一行。续期中的状态不落库：进程内由单飞保证，跨进程由 lease_owner / lease_until 的租约保证。
-export const CONNECTIONS_SCHEMA = `
-CREATE TABLE IF NOT EXISTS oauth_clients (
+// oauth_clients (v67): one issuer can hold several registered clients for one redirect URI, one per scope set.
+// MCP servers under one issuer can ask for different scopes, and a client may only ask for the scopes it registered.
+// scope is the scope string sent at registration; NULL means unknown (rows from before v67).
+export function oauthClientsTableSql(name = "oauth_clients"): string {
+  return `
+CREATE TABLE IF NOT EXISTS ${name} (
   issuer         TEXT NOT NULL,
   redirect_uri   TEXT NOT NULL,
   client_id      TEXT NOT NULL,
   method         TEXT NOT NULL CHECK (method IN ('dcr','cimd')),
   secret_cipher  BLOB,
   registered_at  TEXT NOT NULL,
-  PRIMARY KEY (issuer, redirect_uri)
+  scope          TEXT,
+  PRIMARY KEY (issuer, redirect_uri, client_id)
 );
+`;
+}
+
+// 连接（v42，设置页的「连接」）：第三方账号的授权。daemon 是唯一的 OAuth 客户端和远程 MCP 客户端。
+// 令牌只以密文存在 secret_cipher 里（AES-256-GCM，密钥在 Keychain，见 packages/connections 的 vault.ts）。
+// 一个 MCP 地址只有一行：断开时清掉密文和工具缓存，status 改成 disconnected，设置（谁能用、写入策略）保留，
+// 重新连接时复用这一行。续期中的状态不落库：进程内由单飞保证，跨进程由 lease_owner / lease_until 的租约保证。
+export const CONNECTIONS_SCHEMA = `
+${oauthClientsTableSql()}
 CREATE TABLE IF NOT EXISTS connections (
   id                   INTEGER PRIMARY KEY AUTOINCREMENT,
   provider             TEXT NOT NULL,

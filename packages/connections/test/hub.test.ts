@@ -75,6 +75,35 @@ describe("connecting with one click", () => {
     expect(vendor.registrations).toBe(1);
   });
 
+  // Two MCP servers under one issuer ask for different scopes. A client registered for the first
+  // server's scopes cannot ask for the second server's scope ("Client was not registered with scope ...").
+  it("registers another client when a server under the same issuer needs a scope the stored client lacks", async () => {
+    const second = "https://mcp.fake.test/warehouse/mcp";
+    vendor.addResource(second, ["warehouse:use"]);
+    const h = hub();
+    const first = await connectCustom(h);
+    expect(vendor.registrations).toBe(1);
+
+    const started = await h.addCustom(second);
+    if (started.flow !== "browser") throw new Error("expected a browser flow");
+    expect(new URL(started.authorizeUrl).searchParams.get("scope")).toBe("warehouse:use offline_access");
+    const callback = vendor.approve(started.authorizeUrl);
+    await h.completeCallback({ ...callback, error: null, errorDescription: null });
+    expect(vendor.registrations).toBe(2);
+    const secondRow = getConnectionByServer(db, second)!;
+    expect(secondRow.status).toBe("connected");
+    expect(secondRow.client_id).not.toBe(getConnection(db, Number(first.slice(7)))!.client_id);
+
+    // Each server keeps reusing the client that covers its scopes.
+    await h.disconnect(first);
+    await connectCustom(h);
+    await h.disconnect(`custom-${secondRow.id}`);
+    const again = await h.addCustom(second);
+    if (again.flow !== "browser") throw new Error("expected a browser flow");
+    vendor.approve(again.authorizeUrl);
+    expect(vendor.registrations).toBe(2);
+  });
+
   it("accepts each state once, rejects an expired one, and rejects a response from another issuer", async () => {
     const h = hub();
     const started = await h.addCustom(vendor.mcpUrl);

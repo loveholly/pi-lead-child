@@ -82,12 +82,28 @@ describe("a connection row", () => {
     expect(hasConnectionEventSince(db, row.id, "expiry_warning", "7d", "2026-10-17T00:00:00.000Z")).toBe(false);
   });
 
-  it("keeps one registered client per issuer and redirect URI", () => {
-    const base = { issuer: "https://auth.example", redirect_uri: "http://127.0.0.1:47130/oauth/callback", method: "dcr" as const, secret_cipher: null };
+  it("returns the newest registered client for the issuer and redirect URI", () => {
+    const base = { issuer: "https://auth.example", redirect_uri: "http://127.0.0.1:47130/oauth/callback", method: "dcr" as const, secret_cipher: null, scope: "read" };
     saveOAuthClient(db, { ...base, client_id: "first", registered_at: "2026-10-16T08:00:00.000Z" });
     saveOAuthClient(db, { ...base, client_id: "second", registered_at: "2026-10-16T09:00:00.000Z" });
-    expect(getOAuthClient(db, base.issuer, base.redirect_uri)?.client_id).toBe("second");
-    expect(getOAuthClient(db, base.issuer, "http://127.0.0.1:1/oauth/callback")).toBeNull();
+    expect(getOAuthClient(db, base.issuer, base.redirect_uri, "read")?.client_id).toBe("second");
+    expect(getOAuthClient(db, base.issuer, "http://127.0.0.1:1/oauth/callback", "read")).toBeNull();
+    // The older client stays: a connection that uses it still needs it to refresh.
+    expect(db.prepare("SELECT COUNT(*) AS n FROM oauth_clients").get()).toEqual({ n: 2 });
+  });
+
+  it("returns only a client registered with every requested scope", () => {
+    const base = { issuer: "https://auth.example", redirect_uri: "http://127.0.0.1:47130/oauth/callback", method: "dcr" as const, secret_cipher: null };
+    saveOAuthClient(db, { ...base, client_id: "ask", scope: "ask:use offline_access", registered_at: "2026-10-16T08:00:00.000Z" });
+    saveOAuthClient(db, { ...base, client_id: "legacy", scope: null, registered_at: "2026-10-16T09:00:00.000Z" });
+    expect(getOAuthClient(db, base.issuer, base.redirect_uri, "ask:use offline_access")?.client_id).toBe("ask");
+    expect(getOAuthClient(db, base.issuer, base.redirect_uri, "offline_access  ask:use")?.client_id).toBe("ask");
+    expect(getOAuthClient(db, base.issuer, base.redirect_uri, "ask:use")?.client_id).toBe("ask");
+    expect(getOAuthClient(db, base.issuer, base.redirect_uri, "warehouse:use offline_access")).toBeNull();
+    expect(getOAuthClient(db, base.issuer, base.redirect_uri, "ask:use warehouse:use")).toBeNull();
+    // An unknown scope (a row from before v67) serves only a request without scopes.
+    expect(getOAuthClient(db, base.issuer, base.redirect_uri, null)?.client_id).toBe("legacy");
+    expect(getOAuthClient(db, base.issuer, base.redirect_uri, "")?.client_id).toBe("legacy");
   });
 });
 

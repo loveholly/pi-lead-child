@@ -842,11 +842,13 @@ export class ConnectionHub {
   }
 
   // 预注册的客户端优先；否则用账本里按 issuer 存的 DCR 客户端；都没有时注册一个。
+  // A stored DCR client is reused only when it was registered with every requested scope: MCP servers under one
+  // issuer can ask for different scopes, and the server rejects a client that asks for a scope it did not register.
   async #clientFor(key: string, entry: CatalogEntry | null, server: AuthorizationServerMetadata, redirectUri: string, scope: string | null): Promise<ClientCredentials> {
     const preregistered = entry && (entry.id === "slack" || entry.id === "github") ? this.#config.clients[entry.id] : undefined;
     if (preregistered) return { clientId: preregistered.clientId, clientSecret: this.#secrets.get(preregistered.secretName) };
     if (entry?.requiresClient) throw new ConnectionError("needs_setup", this.#m().needsPreregisteredApp(entry.label), key);
-    const stored = getOAuthClient(this.#db, server.issuer, redirectUri);
+    const stored = getOAuthClient(this.#db, server.issuer, redirectUri, scope);
     if (stored) {
       return {
         clientId: stored.client_id,
@@ -862,7 +864,7 @@ export class ConnectionHub {
     saveOAuthClient(this.#db, {
       issuer: server.issuer, redirect_uri: redirectUri, client_id: registered.clientId, method: "dcr",
       secret_cipher: registered.clientSecret ? this.#vault.seal(registered.clientSecret, oauthClientSecretAad(server.issuer, redirectUri)) : null,
-      registered_at: iso(this.#now()),
+      registered_at: iso(this.#now()), scope,
     });
     return registered;
   }

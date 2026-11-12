@@ -11,6 +11,7 @@ import {
   OUTCOME_SNAPSHOT_SCHEMA,
   SCHEMA,
   inboxTableSql,
+  oauthClientsTableSql,
   itemsTableSql,
   RUN_FAILURE_COLUMNS,
   RUN_EFFORT_COLUMNS,
@@ -339,6 +340,7 @@ const CONNECTION_LAUNCH_MIGRATION_VERSION = 63;
 const ITEM_USAGE_PARTS_MIGRATION_VERSION = 64;
 const WATCH_HOST_RUN_MIGRATION_VERSION = 65;
 const AGENDA_ENTRIES_MIGRATION_VERSION = 66;
+const OAUTH_CLIENT_SCOPE_MIGRATION_VERSION = 67;
 
 // v23 的列补齐必须发生在 exec(SCHEMA) 前：当前 DDL/索引会读取这些列，而 SQLite 的
 // CREATE TABLE IF NOT EXISTS 不会给既有表补列。跨字段的 reminder/workflow 约束由 SCHEMA
@@ -762,6 +764,28 @@ function migrateAgendaEntries(db: Db): void {
     .run(AGENDA_ENTRIES_MIGRATION_VERSION, "agenda-entries-v1");
 }
 
+// v67: oauth_clients gets a scope column, and the primary key becomes (issuer, redirect_uri, client_id), so one
+// issuer can hold one registered client per scope set (schema.ts oauthClientsTableSql). SQLite cannot change a
+// primary key in place, so an old table is rebuilt: every row and column is copied, and old rows get scope NULL
+// (unknown). The hub then registers a new client the first time a NULL row would have to cover a scope.
+// A new database already has the column from SCHEMA; this only records the version. No item lifecycle field is touched.
+function migrateOAuthClientScope(db: Db): void {
+  if (db.prepare("SELECT 1 FROM schema_migrations WHERE version=?").get(OAUTH_CLIENT_SCOPE_MIGRATION_VERSION)) return;
+  db.transaction(() => {
+    if (!tableColumns(db, "oauth_clients").has("scope")) {
+      db.exec(oauthClientsTableSql("oauth_clients_v67"));
+      db.exec(
+        `INSERT INTO oauth_clients_v67 (issuer, redirect_uri, client_id, method, secret_cipher, registered_at, scope)
+         SELECT issuer, redirect_uri, client_id, method, secret_cipher, registered_at, NULL FROM oauth_clients`,
+      );
+      db.exec("DROP TABLE oauth_clients");
+      db.exec("ALTER TABLE oauth_clients_v67 RENAME TO oauth_clients");
+    }
+    db.prepare("INSERT INTO schema_migrations (version, name) VALUES (?, ?)")
+      .run(OAUTH_CLIENT_SCOPE_MIGRATION_VERSION, "oauth-client-scope-v1");
+  })();
+}
+
 // v38：派发请求和 Run 加一列 effort。只加列，不重建表，已有的列和行原样保留。
 // v39：工单加一列显示用的短标题。只加列，不重建 items：别的列和行原样保留。
 // 它不是执行列，不进 C2 的 CHECK（提醒也可以有短标题）。
@@ -923,6 +947,7 @@ export function migrateDb(db: Db): void {
   migrateItemUsageParts(db);
   migrateWatchHostRun(db);
   migrateAgendaEntries(db);
+  migrateOAuthClientScope(db);
 }
 
 const ITEM_MODEL_MIGRATION_VERSION = 14;
@@ -934,7 +959,7 @@ const RELATION_EXECUTION_GATE_MIGRATION_VERSION = 19;
 const OUTCOME_SNAPSHOT_MIGRATION_VERSION = 20;
 const TICKET_AGENT_EXECUTION_CONTINUATION_MIGRATION_VERSION = 21;
 const OUTCOME_RECOVERY_SCOPE_MIGRATION_VERSION = 22;
-export const LATEST_SCHEMA_VERSION = AGENDA_ENTRIES_MIGRATION_VERSION;
+export const LATEST_SCHEMA_VERSION = OAUTH_CLIENT_SCOPE_MIGRATION_VERSION;
 
 // 旧 status → 新 status。backlog 映射到 ready 而不是 draft：旧 backlog 是可以被直接派发的，
 // 映射到 draft 会让存量工单突然需要用户逐个确认，等于用迁移改变了既有行为。
@@ -2142,4 +2167,5 @@ export const SCHEMA_MIGRATION_VERSIONS: readonly number[] = [
   ITEM_USAGE_PARTS_MIGRATION_VERSION,
   WATCH_HOST_RUN_MIGRATION_VERSION,
   AGENDA_ENTRIES_MIGRATION_VERSION,
+  OAUTH_CLIENT_SCOPE_MIGRATION_VERSION,
 ];

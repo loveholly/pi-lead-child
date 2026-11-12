@@ -311,20 +311,38 @@ export interface OAuthClientRow {
   method: "dcr" | "cimd";
   secret_cipher: Buffer | null;
   registered_at: string;
+  // The scope string sent at registration. NULL: unknown (registered before v67) or registered without a scope.
+  scope: string | null;
 }
 
-export function getOAuthClient(db: Db, issuer: string, redirectUri: string): OAuthClientRow | null {
-  return (db.prepare("SELECT * FROM oauth_clients WHERE issuer = ? AND redirect_uri = ?").get(issuer, redirectUri) as OAuthClientRow | undefined) ?? null;
+function scopeSet(scope: string | null): Set<string> {
+  return new Set((scope ?? "").split(/\s+/).filter(Boolean));
 }
 
+// The newest client for this issuer and redirect URI that was registered with every scope in `scope`.
+// An authorization server rejects a client that asks for a scope it did not register, so a client registered
+// for one MCP server's scopes cannot serve another server under the same issuer that asks for other scopes.
+// A row with an unknown scope (NULL) only serves a request without scopes.
+export function getOAuthClient(db: Db, issuer: string, redirectUri: string, scope: string | null): OAuthClientRow | null {
+  const wanted = scopeSet(scope);
+  const rows = db.prepare("SELECT * FROM oauth_clients WHERE issuer = ? AND redirect_uri = ? ORDER BY registered_at DESC, rowid DESC")
+    .all(issuer, redirectUri) as OAuthClientRow[];
+  return rows.find((row) => {
+    if (!wanted.size) return true;
+    const registered = scopeSet(row.scope);
+    return [...wanted].every((entry) => registered.has(entry));
+  }) ?? null;
+}
+
+// Adds a client. Clients registered earlier stay: connections that use them still need their secrets to refresh.
 export function saveOAuthClient(db: Db, row: OAuthClientRow): void {
   db.prepare(
-    `INSERT INTO oauth_clients (issuer, redirect_uri, client_id, method, secret_cipher, registered_at)
-     VALUES (?, ?, ?, ?, ?, ?)
-     ON CONFLICT (issuer, redirect_uri) DO UPDATE SET
-       client_id = excluded.client_id, method = excluded.method,
-       secret_cipher = excluded.secret_cipher, registered_at = excluded.registered_at`,
-  ).run(row.issuer, row.redirect_uri, row.client_id, row.method, row.secret_cipher, row.registered_at);
+    `INSERT INTO oauth_clients (issuer, redirect_uri, client_id, method, secret_cipher, registered_at, scope)
+     VALUES (?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT (issuer, redirect_uri, client_id) DO UPDATE SET
+       method = excluded.method, secret_cipher = excluded.secret_cipher,
+       registered_at = excluded.registered_at, scope = excluded.scope`,
+  ).run(row.issuer, row.redirect_uri, row.client_id, row.method, row.secret_cipher, row.registered_at, row.scope);
 }
 
 export function findOAuthClient(db: Db, issuer: string, clientId: string): OAuthClientRow | null {

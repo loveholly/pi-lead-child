@@ -12,6 +12,8 @@ export interface FakeVendorOptions {
   // MCP 服务器的工具（tools/list 原样返回）和调用的结果。不给时是缺省的 search_pages、update_page、get_self。
   tools?: Array<Record<string, unknown>>;
   callResult?: (name: string, args: Record<string, unknown>) => string;
+  // The scopes the MCP server asks for (scopes_supported and the 401 challenge). Default: read, write.
+  scopes?: string[];
 }
 
 const DEFAULT_TOOLS: Array<Record<string, unknown>> = [
@@ -32,7 +34,9 @@ export class FakeVendor {
   accessTtlSec: number;
   supportsDcr: boolean;
   sse: boolean;
-  readonly clients = new Map<string, { redirectUris: string[]; secret: string | null }>();
+  readonly clients = new Map<string, { redirectUris: string[]; secret: string | null; scope: string | null }>();
+  // Every MCP server under this authorization server, with the scopes it asks for.
+  readonly resources = new Map<string, string[]>();
   readonly codes = new Map<string, { clientId: string; challenge: string; redirectUri: string; resource: string; grant: Grant }>();
   readonly access = new Map<string, { expiresAt: number; grant: Grant }>();
   readonly refresh = new Map<string, { used: boolean; grant: Grant }>();
@@ -57,6 +61,12 @@ export class FakeVendor {
     this.sse = options.sse ?? false;
     this.tools = options.tools ?? DEFAULT_TOOLS;
     this.callResult = options.callResult ?? null;
+    this.resources.set(this.mcpUrl, options.scopes ?? ["read", "write"]);
+  }
+
+  // Another MCP server that shares this issuer and its registration endpoint but asks for other scopes.
+  addResource(mcpUrl: string, scopes: string[]): void {
+    this.resources.set(mcpUrl, scopes);
   }
 
   // 让浏览器那一步通过：解析授权地址，签发一个授权码，返回回调参数。
@@ -65,6 +75,13 @@ export class FakeVendor {
     const clientId = url.searchParams.get("client_id")!;
     if (!this.clients.has(clientId) && !clientId.startsWith("pre-")) throw new Error(`unknown client ${clientId}`);
     if (url.searchParams.get("code_challenge_method") !== "S256") throw new Error("PKCE S256 required");
+    // Like real servers: a client registered with a scope may only ask for scopes it registered.
+    const registered = this.clients.get(clientId)?.scope;
+    if (registered) {
+      const allowed = new Set(registered.split(" "));
+      const missing = (url.searchParams.get("scope") ?? "").split(" ").filter(Boolean).find((scope) => !allowed.has(scope));
+      if (missing) throw new Error(`Client was not registered with scope ${missing}`);
+    }
     const code = `code_${randomBytes(8).toString("hex")}`;
     this.codes.set(code, {
       clientId,
@@ -101,11 +118,14 @@ export class FakeVendor {
     const json = (status: number, value: unknown, headers: Record<string, string> = {}) =>
       new Response(JSON.stringify(value), { status, headers: { "content-type": "application/json", ...headers } });
 
-    if (`${url.origin}${url.pathname}` === this.mcpUrl && method === "POST") return this.#mcp(init, body);
-    if (method === "DELETE" && `${url.origin}${url.pathname}` === this.mcpUrl) return new Response(null, { status: 204 });
-    const mcp = new URL(this.mcpUrl);
-    if (url.origin === mcp.origin && url.pathname === `/.well-known/oauth-protected-resource${mcp.pathname}`) {
-      return json(200, { resource: this.mcpUrl, authorization_servers: [this.issuer], scopes_supported: ["read", "write"] });
+    const endpoint = `${url.origin}${url.pathname}`;
+    if (this.resources.has(endpoint) && method === "POST") return this.#mcp(endpoint, init, body);
+    if (method === "DELETE" && this.resources.has(endpoint)) return new Response(null, { status: 204 });
+    for (const [resource, scopes] of this.resources) {
+      const mcp = new URL(resource);
+      if (url.origin === mcp.origin && url.pathname === `/.well-known/oauth-protected-resource${mcp.pathname}`) {
+        return json(200, { resource, authorization_servers: [this.issuer], scopes_supported: scopes });
+      }
     }
     const issuer = new URL(this.issuer);
     // RFC 8414：issuer 带路径时，元数据在 /.well-known/oauth-authorization-server<路径>（Atlassian 的 issuer 就带路径）。
@@ -126,10 +146,10 @@ export class FakeVendor {
     const at = (path: string) => url.origin === issuer.origin && url.pathname === `${issuerPath}${path}`;
     if (at("/register") && method === "POST") {
       this.registrations += 1;
-      const request = JSON.parse(body) as { redirect_uris: string[]; application_type?: string; token_endpoint_auth_method?: string };
+      const request = JSON.parse(body) as { redirect_uris: string[]; application_type?: string; token_endpoint_auth_method?: string; scope?: string };
       if (request.application_type !== "native" || request.token_endpoint_auth_method !== "none") return json(400, { error: "invalid_client_metadata" });
       const clientId = `client_${randomBytes(6).toString("hex")}`;
-      this.clients.set(clientId, { redirectUris: request.redirect_uris, secret: null });
+      this.clients.set(clientId, { redirectUris: request.redirect_uris, secret: null, scope: request.scope ?? null });
       return json(201, { client_id: clientId });
     }
     if (at("/token") && method === "POST") return this.#token(new URLSearchParams(body), json);
@@ -172,14 +192,14 @@ export class FakeVendor {
     return json(400, { error: "unsupported_grant_type" });
   }
 
-  #mcp(init: RequestInit, body: string): Response {
+  #mcp(resource: string, init: RequestInit, body: string): Response {
     const headers = new Headers(init.headers);
     const token = headers.get("authorization")?.replace(/^Bearer /, "") ?? "";
     const entry = this.access.get(token);
     if (!entry || entry.expiresAt <= this.now() || entry.grant.revoked) {
       return new Response(null, {
         status: 401,
-        headers: { "www-authenticate": `Bearer resource_metadata="${new URL(this.mcpUrl).origin}/.well-known/oauth-protected-resource${new URL(this.mcpUrl).pathname}", scope="read write"` },
+        headers: { "www-authenticate": `Bearer resource_metadata="${new URL(resource).origin}/.well-known/oauth-protected-resource${new URL(resource).pathname}", scope="${this.resources.get(resource)!.join(" ")}"` },
       });
     }
     const message = JSON.parse(body) as { id?: number; method: string; params?: { name?: string; arguments?: Record<string, unknown> } };

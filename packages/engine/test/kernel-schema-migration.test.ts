@@ -1040,8 +1040,9 @@ describe("schema version", () => {
     // （store/test/item-usage-parts-migration.test.ts）。
     // v65 (2026-11-11, host-run watches): watches.host_run (store/test/watch-host-run-migration.test.ts).
     // v66 (2026-11-12, external agenda feeds): agenda_entries (store/test/agenda-feeds.test.ts).
-    expect(LATEST_SCHEMA_VERSION).toBe(66);
-    expect(db.prepare("SELECT MAX(version) AS version FROM schema_migrations").get()).toEqual({ version: 66 });
+    // v67 (2026-11-12, one OAuth client per scope set): oauth_clients.scope (store/test/oauth-client-scope-migration.test.ts).
+    expect(LATEST_SCHEMA_VERSION).toBe(67);
+    expect(db.prepare("SELECT MAX(version) AS version FROM schema_migrations").get()).toEqual({ version: 67 });
   });
 });
 
