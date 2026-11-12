@@ -4,7 +4,9 @@
 // 两个入口都经 pi 的扩展加载器加载：SoL-Pi 没有自己的 node_modules，它引用的 pi 包由加载器提供。
 // 只对 pi 生效：Claude Code 和 Codex 执行器不受影响。
 import { dirname, join } from "node:path";
-import type { ExtensionAPI, ToolResultEvent, ToolResultEventResult } from "@earendil-works/pi-coding-agent";
+import type {
+  ContextEvent, ExtensionAPI, ToolResultEvent, ToolResultEventResult,
+} from "@earendil-works/pi-coding-agent";
 
 export const SOL_PI_FEATURES = [
   "actionFusion", "observationPack", "evidencePreservingReducer", "onlineContextCompact",
@@ -125,6 +127,73 @@ export function correctThenRunFailure(event: Pick<ToolResultEvent, "toolName" | 
   return { content, isError: true };
 }
 
+// ObservationPack and obs_recall disagree on size (upstream observation-pack at 41fa7e0):
+// - a pure-text result over 10 KB (THRESHOLD_BYTES) is replaced by a placeholder with a new obs_ id
+//   after its first 2 provider requests (FULL_SENDS);
+// - one obs_recall page holds up to 16 KB (RECALL_MAX_BYTES), and recall results are not exempt.
+// So a recalled page over 10 KB is packed again under a new id two steps later, and recalling that
+// id yields yet another id. Before SoL-Pi runs, we fold such a page into a short pointer to the
+// original id and offset. The pointer is small, so SoL-Pi leaves it alone; the agent reads the page
+// again with the same id and offset. Keep these two constants in step with upstream.
+export const OBSERVATION_THRESHOLD_BYTES = 10 * 1024;
+export const OBSERVATION_FULL_SENDS = 2;
+const RECALL_HEADER = /^\[obs_recall id=(obs_[a-f0-9]{24}) offset=(\d+) next_offset=(\d+) eof=(true|false)\]/;
+
+type ContextMessage = ContextEvent["messages"][number];
+
+interface RecallPage { id: string; offset: number; nextOffset: number; eof: boolean }
+
+// Which page a recall result holds: obs_recall's details first, else the header line.
+function recallPage(message: ContextMessage): RecallPage | null {
+  if (message.role !== "toolResult" || message.toolName !== "obs_recall" || message.isError) return null;
+  const details = message.details as Partial<RecallPage> | undefined;
+  if (details && typeof details.id === "string" && typeof details.offset === "number"
+    && typeof details.nextOffset === "number" && typeof details.eof === "boolean") {
+    return { id: details.id, offset: details.offset, nextOffset: details.nextOffset, eof: details.eof };
+  }
+  const first = message.content.find((block) => block.type === "text");
+  const match = first?.type === "text" ? RECALL_HEADER.exec(first.text) : null;
+  return match
+    ? { id: match[1]!, offset: Number(match[2]), nextOffset: Number(match[3]), eof: match[4] === "true" }
+    : null;
+}
+
+function resultBytes(message: ContextMessage): number {
+  if (message.role !== "toolResult") return 0;
+  return Buffer.byteLength(message.content.map((block) => (block.type === "text" ? block.text : "")).join("\n"), "utf8");
+}
+
+export function recallPagePointer(page: RecallPage, bytes: number): string {
+  return [
+    `[obs_recall page folded after its first ${OBSERVATION_FULL_SENDS} provider requests; no new observation id]`,
+    `id: ${page.id} offset: ${page.offset} next_offset: ${page.nextOffset} eof: ${page.eof} page_bytes: ${bytes}`,
+    `read it again: call obs_recall with {"id":"${page.id}","offset":${page.offset}}`,
+  ].join("\n");
+}
+
+// Folds every obs_recall page over 10 KB that was already sent twice. Sends are counted the way
+// ObservationPack counts them: a message was sent once per assistant message after it.
+// Returns undefined when nothing changes.
+export function foldStaleRecallPages(messages: readonly ContextMessage[]): ContextMessage[] | undefined {
+  let assistantsAfter = 0;
+  let folded: ContextMessage[] | undefined;
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index]!;
+    if (message.role === "assistant") {
+      assistantsAfter += 1;
+      continue;
+    }
+    if (assistantsAfter < OBSERVATION_FULL_SENDS) continue;
+    const page = recallPage(message);
+    if (!page || message.role !== "toolResult") continue;
+    const bytes = resultBytes(message);
+    if (bytes <= OBSERVATION_THRESHOLD_BYTES) continue;
+    folded ??= [...messages];
+    folded[index] = { ...message, content: [{ type: "text", text: recallPagePointer(page, bytes) }] };
+  }
+  return folded;
+}
+
 // 加载装好的 SoL-Pi，按角色注册。没装、配置写错或加载失败时 SoL-Pi 关闭，Lead 和 Run 照常工作：
 // 省 token 不值得让它们起不来。出错时在 stderr 留一行说明；只是没装时不说话（测试和首次安装前都是这样）。
 export async function registerSolPi(
@@ -143,6 +212,14 @@ export async function registerSolPi(
     }
     if (settings.features.includes("actionFusion")) {
       pi.on("tool_result", (event) => correctThenRunFailure(event));
+    }
+    // Must run before SoL-Pi's context handler: pi chains context handlers in registration order,
+    // and SoL-Pi registers its own only at session_start.
+    if (settings.features.includes("observationPack")) {
+      pi.on("context", (event) => {
+        const messages = foldStaleRecallPages(event.messages);
+        return messages ? { messages } : undefined;
+      });
     }
     const resolved = solPiConfig(config.DEFAULT_CONFIG as Record<string, unknown>, settings);
     (solPi.createSolPiExtension as (load: () => unknown) => (pi: ExtensionAPI) => void)(() => resolved)(pi);

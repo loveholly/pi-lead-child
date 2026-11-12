@@ -7,7 +7,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { join } from "node:path";
 import {
-  addActivity, addNotification, completeTurn, createItem, createRun, createTurn, failTurn, insertCheckpoint,
+  addActivity, addNotification, appendBody, completeTurn, createItem, createRun, createTurn, failTurn, getItem, insertCheckpoint,
   markNotificationDelivered, openDb, raiseBlocker, recordExecutionPlan, transition, updateRun, type Db,
 } from "@pi-lead-child/store";
 import type { LeadStatus, TicketSummary } from "@pi-lead-child/protocol";
@@ -15,6 +15,7 @@ import { tempDir } from "@pi-lead-child/core/testing";
 import { createLeadTools, type LeadDeps } from "../src/tools.js";
 import { LEAD_SYSTEM_PROMPT } from "../src/prompt.js";
 import { LEAD_QUIET_TOOLS } from "../src/session.js";
+import { BODY_TAIL_BYTES, BRIEF_HEAD_BYTES, SECTION_PAGE_BYTES } from "../src/ticket-text-pages.js";
 
 let db: Db;
 let dir: string;
@@ -95,6 +96,61 @@ describe("get_ticket", () => {
     expect(line).toContain("auth_expired");
     expect(line).toContain("account");
     expect(line).toContain("…");
+  });
+
+  // Regression: get_ticket returned the whole brief and body. A brief built from a handoff holds
+  // tens of thousands of characters, so one look at a ticket went over ObservationPack's 10 KB
+  // line. The default view now keeps the start of the brief and the end of the body, and says how
+  // to read the rest; section pages stay under the 10 KB line.
+  it("shows the start of a long brief and the end of a long body, and pages through each in full", async () => {
+    const briefLines = Array.from({ length: 1200 }, (_, i) => `交接包第 ${i} 行：Ethan 和 Nina 的对话记录`);
+    const brief = briefLines.join("\n");
+    const itemId = createItem(db, { title: "交接来的工单", brief, createdBy: "lead", runtime: "codex" });
+    for (let i = 0; i < 300; i += 1) appendBody(db, itemId, `## 里程碑 ${i}\n进展说明 ${i}`);
+
+    const output = await call("get_ticket", { id: itemId });
+    expect(Buffer.byteLength(output)).toBeLessThan(10 * 1024);
+    const shownBrief = output.split("brief: ")[1]!.split("\nworkdir:")[0]!;
+    expect(shownBrief).toContain(briefLines[0]);
+    expect(shownBrief).not.toContain(briefLines[1199]);
+    expect(Buffer.byteLength(shownBrief)).toBeLessThan(BRIEF_HEAD_BYTES + 300);
+    expect(shownBrief).toMatch(/get_ticket \{"id":\d+,"section":"brief","offset":\d+\}/);
+    expect(output).toContain("里程碑 299");
+    expect(output).not.toContain("里程碑 0\n");
+    expect(output).toContain(`get_ticket {"id":${itemId},"section":"body","offset":0}`);
+
+    // Following the next-page calls returns the whole brief, byte for byte, in pages under 10 KB.
+    const read = async (section: "brief" | "body") => {
+      let offset = 0;
+      let joined = "";
+      for (let pages = 0; pages < 100; pages += 1) {
+        const page = await call("get_ticket", { id: itemId, section, offset });
+        expect(Buffer.byteLength(page)).toBeLessThanOrEqual(SECTION_PAGE_BYTES + 300);
+        // A page is a header line, then the next-page call unless it is the last page, a blank line, and the text.
+        const lines = page.split("\n");
+        if (lines[0]!.includes("已读完")) return joined + lines.slice(2).join("\n");
+        const next = /"offset":(\d+)\}$/.exec(lines[1]!)![1]!;
+        joined += lines.slice(3).join("\n");
+        offset = Number(next);
+      }
+      throw new Error("did not reach the end");
+    };
+    expect(await read("brief")).toBe(brief);
+    expect(await read("body")).toBe(getItem(db, itemId)!.body);
+    // The default view of the body is its last BODY_TAIL_BYTES at most.
+    const shownBody = output.split("里程碑摘要，共")[1]!.split("\n--- 交付快照")[0]!;
+    expect(Buffer.byteLength(shownBody)).toBeLessThan(BODY_TAIL_BYTES + 400);
+  });
+
+  it("keeps a short brief and body whole, and rejects an offset past the end", async () => {
+    const itemId = createItem(db, { title: "小工单", brief: "把按钮改成蓝色", createdBy: "user", runtime: "codex" });
+    appendBody(db, itemId, "## 交付\n改好了");
+    const output = await call("get_ticket", { id: itemId });
+    expect(output).toContain("brief: 把按钮改成蓝色\n");
+    expect(output).toContain("--- 正文（里程碑摘要）---\n## 交付\n改好了");
+    expect(await call("get_ticket", { id: itemId, section: "brief" }))
+      .toBe(`#${itemId} 的任务说明：第 0–21 字节，共 21 字节，已读完\n\n把按钮改成蓝色`);
+    await expect(call("get_ticket", { id: itemId, section: "brief", offset: 21 })).rejects.toThrow(/outside the brief/);
   });
 
   // 执行计划（工单 06，spec 5.11：只读的数据 Lead 也要能读到，内容和页面看到的一样）。

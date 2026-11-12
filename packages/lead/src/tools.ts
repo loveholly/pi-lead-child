@@ -204,6 +204,7 @@ import {
 } from "./turn-origin.js";
 import { decideWatchCommand, type WatchSetDecision } from "./watch-commands.js";
 import { deliverySnapshotLines } from "./delivery-snapshot-lines.js";
+import { bodyTail, briefHead, sectionPage, type TicketTextSection } from "./ticket-text-pages.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -1720,11 +1721,22 @@ export function createLeadTools(deps: LeadDeps): ToolDefinition<any>[] {
       label: "Get Item",
       description:
         "L2 详情：工单头部 + 任务说明 + 验收标准（逐条带 id，对照最新一次交付写明用户确认了哪几条）+ 执行计划（执行 agent 维护，和页面同一份）+ 正文（里程碑摘要）+ 交付快照（系统跑 git diff 存下的改动文件）+ 最近 20 条 activities（带 Run 号）。" +
+        "任务说明长时只给开头，正文长时只给最后的部分（最新的里程碑）；要读全文，传 section（brief 或 body）和 offset（字节），每次返回一页，回执里写着下一页的调用。" +
         "L1 索引卡不足以回答时再钻取到这层。要看当前状态和失败根因，用 get_ticket_status。",
-      parameters: Type.Object({ id: Type.Number() }),
-      execute: async (_id, params: { id: number }) => {
+      parameters: Type.Object({
+        id: Type.Number(),
+        section: Type.Optional(Type.Union([Type.Literal("brief"), Type.Literal("body")], {
+          description: "只读这一段的原文，一页一页地读：brief 是任务说明，body 是正文（里程碑摘要）",
+        })),
+        offset: Type.Optional(Type.Integer({ minimum: 0, description: "section 从第几个字节读起，默认 0" })),
+      }),
+      execute: async (_id, params: { id: number; section?: TicketTextSection; offset?: number }) => {
         const t = getItem(db, params.id);
         if (!t) throw new Error(`item #${params.id} not found`);
+        if (params.section) {
+          return text(sectionPage(t.id, params.section, params.section === "brief" ? t.brief : (t.body ?? ""), params.offset ?? 0));
+        }
+        const body = t.body ? bodyTail(t.id, t.body) : null;
         // 最近的 20 条（工单 03）。以前取最早 1000 条里的最后 20 条，活动多的工单显示的是旧记录。
         // 打开文件的记录（工单 07）不算：每次打开都写一条，会把工单上真正发生的事挤出这 20 条。
         const acts = listRecentActivities(db, t.id, 20, { skipDecisions: ["delivery_file_opened"] })
@@ -1761,7 +1773,7 @@ export function createLeadTools(deps: LeadDeps): ToolDefinition<any>[] {
                   ? " · 重试已耗尽，已停止派发：不要再 spawn_child 或另建工单，把失败原因摆给用户由他决定"
                   : ""}`]
             : []),
-          `brief: ${t.brief}`,
+          `brief: ${briefHead(t.id, t.brief)}`,
           `workdir: ${t.workdir ?? "-"} | tokens=${t.total_tokens}${usagePartsText(t)} | cost=$${t.total_cost_usd.toFixed(4)}`,
           // 工单附件（工单 #231）：只有名字和来源，要看内容用 read_ticket_attachment。
           ...attachmentLines(db, t.id),
@@ -1773,7 +1785,7 @@ export function createLeadTools(deps: LeadDeps): ToolDefinition<any>[] {
           `\n--- 验收标准 ---\n${await recordedDeliverySnapshot(db, t).then(() => acceptanceCriteriaText(db, t.id))}`,
           // 执行计划（工单 06）：执行 agent 用 update_ticket_plan 维护的步骤列表，和页面读的是同一份。
           `\n--- 执行计划 ---\n${executionPlanText(db, t.id)}`,
-          t.body ? `\n--- 正文（里程碑摘要）---\n${t.body}` : "\n（正文为空）",
+          body ? `\n${body.header}\n${body.text}` : "\n（正文为空）",
           // 交付快照（工单 04）：和工单详情同一份，系统在交付时跑 git diff 存下。
           `\n--- 交付快照（系统记录）---\n${await deliverySnapshotLines(db, t.id)}`,
           // 核查（工单 10）：每一次核查员看到了什么、逐条结论，和页面同一份。
