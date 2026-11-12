@@ -907,6 +907,9 @@ export const TimelineEntrySchema = StrictObject({
   kind: Type.Union([
     Type.Literal("milestone"), Type.Literal("reminder"), Type.Literal("routine"),
     Type.Literal("routine_fired"), Type.Literal("deferred_start"),
+    // External agenda entries (agenda-feeds.ts). Only when the request asks for include=external: older clients
+    // validate this union strictly and would reject the whole response.
+    Type.Literal("external"),
   ]),
   at: Type.String(),
   allDay: Type.Boolean(),
@@ -937,6 +940,24 @@ export const TimelineEntrySchema = StrictObject({
   editable: Type.Boolean(),
   // 例行任务的说明，或者触发结果（「已执行 · 生成 #85」「失败：…」）。
   detail: Type.Optional(Type.String()),
+  // kind=external only: the entry from an external agenda feed and its pre-created reminder.
+  external: Type.Optional(StrictObject({
+    feed: Type.String(),
+    feedLabel: Type.String(),
+    entryId: Type.Integer({ minimum: 1 }),
+    endsAt: Type.Union([Type.String(), Type.Null()]),
+    location: Type.Union([Type.String(), Type.Null()]),
+    url: Type.Union([Type.String(), Type.Null()]),
+    status: Type.Union([Type.Literal("confirmed"), Type.Literal("tentative"), Type.Literal("cancelled")]),
+    muted: Type.Boolean(),
+    // The pre-created reminder: when, how loud, and where it is in its lifecycle. null: no reminder.
+    reminder: Type.Union([StrictObject({
+      id: Type.Integer({ minimum: 1 }),
+      at: Type.String(),
+      level: Type.Union([Type.Literal("interrupt"), Type.Literal("tell")]),
+      stage: TicketStatusSchema,
+    }), Type.Null()]),
+  })),
 });
 export type TimelineEntry = Static<typeof TimelineEntrySchema>;
 

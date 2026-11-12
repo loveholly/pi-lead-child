@@ -2833,7 +2833,9 @@ export async function startPairedServer(
         if (!isTimeZone(timezone)) throw new HttpError(400, "invalid_request", "invalid timezone");
         let timeline;
         try {
-          timeline = service().timeline({ from, to, timezone });
+          // include=external: external agenda entries (newer clients only; older ones reject an unknown kind).
+          const includeExternal = (url.searchParams.get("include") ?? "").split(",").includes("external");
+          timeline = service().timeline({ from, to, timezone, includeExternal });
         } catch (err) {
           throw new HttpError(400, "invalid_request", err instanceof Error ? err.message : "invalid timeline range");
         }

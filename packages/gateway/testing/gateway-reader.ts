@@ -82,7 +82,7 @@ export async function archiveGatewayProject(db: Db, projectId: number): Promise<
 
 /** 日程（GET /v1/timeline），companion 的日程 tab 读的那一次。 */
 export async function readGatewayTimeline(
-  db: Db, range: { from: string; to: string; timezone: string },
+  db: Db, range: { from: string; to: string; timezone: string; include?: string },
 ): Promise<TimelineResponse> {
   const params = new URLSearchParams(range);
   return readGateway<TimelineResponse>(db, "tickets:view", `/v1/timeline?${params}`);

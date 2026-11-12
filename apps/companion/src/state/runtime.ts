@@ -722,6 +722,8 @@ export class CompanionStateRuntime {
     await Promise.allSettled([
       this.ensureResource('tickets', true),
       this.ensureResource('overview', true),
+      // External agenda entries and feeds change the agenda (and the reminders the system pre-created for it).
+      ...(type === 'agenda_entry' || type === 'agenda_feed' ? [this.ensureResource(RESOURCE_KEYS.timeline, true)] : []),
       ...(type === 'reminder' && Number.isInteger(itemId) ? [
         this.ensureResource(RESOURCE_KEYS.ticket(itemId), true),
         this.ensureResource(RESOURCE_KEYS.notifications, true),

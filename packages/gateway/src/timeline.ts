@@ -13,11 +13,16 @@ import {
   ticketTurn,
   type TicketSummary,
   type TimelineEntry,
+  type AgendaEntryDto,
   type Locale,
   type TimelineResponse,
 } from "@pi-lead-child/protocol";
 import {
+  agendaEntriesByReminder,
   agendaNote,
+  listAgendaEntries,
+  listAgendaFeeds,
+  reminderPolicyOf,
   firedOccurrences,
   getLocale,
   listItems,
@@ -44,6 +49,8 @@ export type TimelineInput = {
   to: Date;
   timezone: string;
   now: Date;
+  // Add external agenda entries (kind=external) and fold their pre-created reminders into them. Only new clients ask.
+  includeExternal?: boolean;
   summaryOf: (item: Item) => TicketSummary;
   routineDetail: (actionPayload: string) => { description: string; project: string | null };
 };
@@ -67,6 +74,31 @@ function risk(summary: TicketSummary, at: string, now: Date, locale: Locale): Ti
   if (turn === "user") return { reason: "ticket_needs_user", label: m.ticketNeedsUser };
   if (turn === "queued" && !summary.hasRun) return { reason: "not_started", label: m.notStarted };
   return null;
+}
+
+function externalEntry(entry: AgendaEntryDto, feedLabel: string, reminder: Item | null, nowIso: string): TimelineEntry {
+  const remindAt = reminder ? iso(reminder.remind_at) : null;
+  const status: TimelineEntry["status"] = reminder?.stage === "fired" ? "unacked"
+    : entry.startsAt < nowIso ? "done" : "upcoming";
+  return {
+    id: `external:${entry.id}`,
+    kind: "external",
+    at: entry.startsAt,
+    allDay: entry.allDay,
+    title: entry.title,
+    ticketId: null,
+    project: null,
+    status,
+    risk: null,
+    editable: false,
+    external: {
+      feed: entry.feed, feedLabel, entryId: entry.id, endsAt: entry.endsAt, location: entry.location, url: entry.url,
+      status: entry.status, muted: entry.muted,
+      reminder: reminder && remindAt
+        ? { id: reminder.id, at: remindAt, level: reminderPolicyOf(reminder).level, stage: reminder.stage }
+        : null,
+    },
+  };
 }
 
 export function buildTimeline(db: Db, input: TimelineInput): TimelineResponse {
@@ -145,8 +177,24 @@ export function buildTimeline(db: Db, input: TimelineInput): TimelineResponse {
     if (entry.status === "overdue") overdue.push(entry);
   }
 
+  // External agenda entries: one row per entry, carrying its pre-created reminder (one object, one row: P4.1).
+  const foldedReminders = new Set<number>();
+  if (input.includeExternal) {
+    const labels = new Map(listAgendaFeeds(db).map((feed) => [feed.name, feed.label]));
+    for (const entry of listAgendaEntries(db, { from: fromIso, to: toIso })) {
+      const reminder = entry.reminderItemId !== null ? items.get(entry.reminderItemId) : undefined;
+      if (reminder) foldedReminders.add(reminder.id);
+      entries.push(externalEntry(entry, labels.get(entry.feed) ?? entry.feed, reminder ?? null, nowIso));
+    }
+    // A reminder whose entry starts outside the range still belongs to that entry: do not list it on its own either.
+    for (const id of agendaEntriesByReminder(db, [...items.values()].filter((item) => item.kind === "reminder").map((item) => item.id)).keys()) {
+      foldedReminders.add(id);
+    }
+  }
+
   for (const item of items.values()) {
     if (item.kind === "reminder") {
+      if (foldedReminders.has(item.id)) continue;
       const remindAt = iso(item.remind_at);
       if (!remindAt || item.stage === "cancelled") continue;
       const status: TimelineEntry["status"] = item.stage === "fired" ? "unacked" : item.stage === "acked" ? "done" : "upcoming";

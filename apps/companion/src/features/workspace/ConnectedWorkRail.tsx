@@ -156,6 +156,7 @@ export function ConnectedWorkRail({
       onSetProjectArchived={(projectId, archived) => runtime.setProjectArchived(projectId, archived)}
       timeline={timeline}
       onUpdateMilestone={(milestoneId, patch) => runtime.updateMilestone(milestoneId, patch)}
+      onUpdateAgendaEntry={async (entryId, patch) => { await runtime.performUiAction('agenda_entry', String(entryId), 'update', { input: patch }); }}
       view={view ?? railView}
       onViewChange={(nextView) => {
         setRailView(nextView);

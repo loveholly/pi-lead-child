@@ -1121,8 +1121,9 @@ export class ControlPlaneClient {
   }
 
   // 日程（阶段 3）：节点、提醒、推迟开始、例行任务，带出处和风险；过期区不设下限。
+  // External agenda entries come with include=external: this client knows the external kind.
   async getTimeline(from: string, to: string, timezone: string, signal?: AbortSignal): Promise<TimelineResponse> {
-    const params = new URLSearchParams({ from, to, timezone });
+    const params = new URLSearchParams({ from, to, timezone, include: 'external' });
     return this.request<TimelineResponse>(`/v1/timeline?${params}`, TimelineResponseSchema, { ...(signal ? { signal } : {}) });
   }
 

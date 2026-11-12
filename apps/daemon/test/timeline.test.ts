@@ -5,7 +5,11 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { tempDir } from "@pi-lead-child/core/testing";
 import { createLeadTools } from "@pi-lead-child/lead";
 import { RuntimeRegistry } from "@pi-lead-child/runtime";
-import { createItem, createTurn, getItem, openDb, setItemTime, type Db } from "@pi-lead-child/store";
+import {
+  createAgendaFeed, createItem, createTurn, getItem, listAgendaEntries, openDb, setItemTime, syncAgendaFeed, type Db,
+} from "@pi-lead-child/store";
+import { TimelineResponseSchema } from "@pi-lead-child/protocol";
+import { Value } from "typebox/value";
 import {
   patchGatewayMilestone,
   readGatewayInbox,
@@ -103,5 +107,44 @@ describe("the agenda through the gateway", () => {
     expect(getItem(db, ticket)?.due_at).toBe(due.at);
     await patchGatewayMilestone(db, due.milestone!.id, { state: "cancelled" });
     expect(getItem(db, ticket)?.due_at).toBeNull();
+  });
+});
+
+describe("external agenda entries through the gateway", () => {
+  function seedFeed() {
+    createAgendaFeed(db, { name: "work", label: "Work calendar" }, { by: "lead", now: new Date() });
+    syncAgendaFeed(db, "work", {
+      entries: [
+        { key: "m1", title: "Design review", startsAt: at(day), location: "Room 4" },
+        { key: "m2", title: "Planning", startsAt: at(2 * day), status: "cancelled" },
+      ],
+    }, new Date());
+    return listAgendaEntries(db, { from: at(0), to: at(3 * day) });
+  }
+
+  it("leaves the response unchanged for a client that does not ask for external entries", async () => {
+    seedFeed();
+    const timeline = await readGatewayTimeline(db, range());
+    expect(timeline.entries.some((entry) => entry.kind === ("external" as never))).toBe(false);
+    // The pre-created reminder still shows as a plain reminder, so older clients see it ahead of time.
+    expect(timeline.entries.filter((entry) => entry.kind === "reminder").map((entry) => entry.title)).toEqual(["Design review"]);
+  });
+
+  it("lists each external entry once, carrying its pre-created reminder, when the client asks", async () => {
+    const [m1] = seedFeed();
+    const timeline = await readGatewayTimeline(db, { ...range(), include: "external" });
+    expect(Value.Check(TimelineResponseSchema, timeline)).toBe(true);
+    expect(timeline.entries.filter((entry) => entry.kind === "reminder")).toHaveLength(0);
+    const external = timeline.entries.filter((entry) => entry.kind === "external");
+    expect(external.map((entry) => entry.title)).toEqual(["Design review", "Planning"]);
+    expect(external[0]).toMatchObject({
+      id: `external:${m1!.id}`, status: "upcoming", editable: false,
+      external: {
+        feed: "work", feedLabel: "Work calendar", entryId: m1!.id, location: "Room 4", status: "confirmed", muted: false,
+        reminder: { id: m1!.reminderItemId, level: "interrupt", stage: "scheduled" },
+      },
+    });
+    expect(getItem(db, m1!.reminderItemId!)!.remind_at).toBe(external[0]!.external!.reminder!.at);
+    expect(external[1]!.external).toMatchObject({ status: "cancelled", reminder: null });
   });
 });

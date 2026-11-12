@@ -12,7 +12,7 @@ import { useLocale, useMessages } from '@/i18n';
 import { leadNameNow } from '@/state/leadName';
 import { useDeferredValue, useState, type ReactNode } from 'react';
 
-import { AgendaTimeline, type MilestonePatch } from './AgendaTimeline';
+import { AgendaTimeline, type AgendaEntryPatch, type MilestonePatch } from './AgendaTimeline';
 import { InboxQueue, type UpcomingReminder } from './InboxQueue';
 import {
   buildTicketRailPresentation,
@@ -46,6 +46,7 @@ type WorkRailProps = {
   // 日程（GET /v1/timeline）。还没取到时为 null。
   timeline?: TimelineResponse | null;
   onUpdateMilestone?: (milestoneId: number, patch: MilestonePatch) => Promise<void>;
+  onUpdateAgendaEntry?: (entryId: number, patch: AgendaEntryPatch) => Promise<void>;
   loading?: boolean;
   view?: RailView;
   onViewChange?: (view: RailView) => void;
@@ -95,6 +96,7 @@ export function WorkRail({
   onSetProjectArchived,
   timeline = null,
   onUpdateMilestone,
+  onUpdateAgendaEntry,
   loading = false,
   view: controlledView,
   onViewChange,
@@ -310,6 +312,7 @@ export function WorkRail({
                 timeline={timeline}
                 onOpenTicket={(ticketId) => onSelectTicket(String(ticketId))}
                 onUpdateMilestone={onUpdateMilestone}
+                onUpdateAgendaEntry={onUpdateAgendaEntry}
               />
             ) : null}
           </Column>

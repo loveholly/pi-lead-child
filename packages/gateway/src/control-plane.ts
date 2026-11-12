@@ -1264,7 +1264,7 @@ export function createControlPlaneService(db: Db, options: ControlPlaneOptions) 
     // includeOverdue：再返回 from 之前还没结束的截止，和已经触发、没有确认的提醒（日程的「已过期」区）。
     // 返回形状不变，只多返回条目。
     // 日程（阶段 3）：节点、提醒、推迟开始、例行任务，带出处和风险。见 timeline.ts。
-    timeline(range: { from: string; to: string; timezone: string }): TimelineResponse {
+    timeline(range: { from: string; to: string; timezone: string; includeExternal?: boolean }): TimelineResponse {
       const from = new Date(range.from);
       const to = new Date(range.to);
       if (Number.isNaN(from.getTime()) || Number.isNaN(to.getTime()) || to <= from
@@ -1272,7 +1272,7 @@ export function createControlPlaneService(db: Db, options: ControlPlaneOptions) 
         throw new Error("invalid timeline range");
       }
       return buildTimeline(db, {
-        from, to, timezone: range.timezone, now: now(), summaryOf: itemSummary,
+        from, to, timezone: range.timezone, now: now(), summaryOf: itemSummary, includeExternal: range.includeExternal === true,
         routineDetail: (payload) => {
           const template = agendaTemplate(payload);
           return { description: template.brief ?? template.body ?? "", project: template.project ?? null };

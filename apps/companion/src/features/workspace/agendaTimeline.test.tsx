@@ -125,6 +125,25 @@ describe('buildTimelineView', () => {
   });
 });
 
+describe('calendar entries in the agenda', () => {
+  const calendar = (overrides: Partial<NonNullable<TimelineEntry['external']>>, status: TimelineEntry['status'] = 'upcoming') => entry('external:3', {
+    kind: 'external', at: '2026-10-15T09:00:00.000Z', title: 'Planning', status,
+    external: {
+      feed: 'work', feedLabel: 'Work calendar', entryId: 3, endsAt: null, location: null, url: null, status: 'confirmed', muted: false,
+      reminder: null, ...overrides,
+    },
+  });
+  const rowOf = (value: TimelineEntry) => buildTimelineView({ ...timeline, entries: [value], overdue: [] }, now).sections[0]!.rows[0]!;
+
+  it('says whether a calendar entry reminds you, and lets you mute it only before it starts', () => {
+    expect(rowOf(calendar({ muted: true }))).toMatchObject({ sub: 'No reminder for this one', external: { entryId: 3, muted: true, canToggle: true } });
+    expect(rowOf(calendar({ status: 'cancelled' }))).toMatchObject({ sub: 'Cancelled in the calendar', muted: true, external: { canToggle: false } });
+    expect(rowOf(calendar({ reminder: { id: 9, at: '2026-10-15T08:55:00.000Z', level: 'tell', stage: 'acked' } }, 'done')))
+      .toMatchObject({ sub: 'Reminded', external: { canToggle: false } });
+    expect(rowOf(calendar({}))).toMatchObject({ tag: { label: 'Calendar' }, opensTicket: false, sub: 'No reminder' });
+  });
+});
+
 describe('parseMilestoneInput', () => {
   it('reads a local date and time, and keeps the time when only the date changes', () => {
     expect(parseMilestoneInput('10/17 18:00', '2026-10-16T10:00:00.000Z', now)).toBe('2026-10-17T10:00:00.000Z');
@@ -188,4 +207,41 @@ describe('the agenda tab', () => {
     fireEvent.click(within(row).getByTestId('agenda-edit-save-milestone:12'));
     expect(client.updateMilestone).toHaveBeenCalledWith(12, { at: '2026-10-17T10:00:00.000Z' });
   });
+
+  it('mutes the reminder of a calendar entry from its row', async () => {
+    const withCalendar: TimelineResponse = {
+      ...timeline,
+      entries: [...timeline.entries, entry('external:7', {
+        kind: 'external', at: '2026-10-15T09:00:00.000Z', title: 'Design review',
+        external: {
+          feed: 'work', feedLabel: 'Work calendar', entryId: 7, endsAt: null, location: 'Room 4', url: null,
+          status: 'confirmed', muted: false,
+          reminder: { id: 91, at: '2026-10-15T08:55:00.000Z', level: 'interrupt', stage: 'scheduled' },
+        },
+      })],
+    };
+    const client = {
+      getTimeline: vi.fn(async () => withCalendar),
+      updateMilestone: vi.fn(async () => ({})),
+      getTickets: vi.fn(async () => []),
+      performUiAction: vi.fn(async () => ({ result: null })),
+    };
+    const runtime = createCompanionStateRuntime({
+      client: client as unknown as CompanionRuntimeDependencies['client'],
+      credentials: {} as CompanionRuntimeDependencies['credentials'],
+      scheduler: { schedule: () => 0, cancel: () => {}, now: () => now.getTime() },
+    });
+    runtime.control.setState({ phase: 'ready', connectionState: 'connected' });
+    runtime.control.getState().replaceTimeline(withCalendar);
+    runtime.workspace.setState({ hydrated: true });
+    renderUI(<CompanionRuntimeProvider runtime={runtime}><Workbench /></CompanionRuntimeProvider>);
+    act(() => runtime.workspace.getState().setRailView('agenda'));
+
+    const row = screen.getByTestId('agenda-row-external:7');
+    expect(within(row).getByText('Calendar')).toBeTruthy();
+    expect(within(row).getByText(/Reminds at \d\d:55 · Important · Room 4/)).toBeTruthy();
+    await act(async () => { fireEvent.click(within(row).getByTestId('agenda-mute-external:7')); });
+    expect(client.performUiAction).toHaveBeenCalledWith('agenda_entry', '7', 'update', { input: { muted: true } });
+  });
 });
+

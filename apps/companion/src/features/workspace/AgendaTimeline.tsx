@@ -17,11 +17,13 @@ import {
 } from './timelineModel';
 
 export type MilestonePatch = { at?: string; state?: MilestoneState };
+export type AgendaEntryPatch = { muted: boolean };
 
 type AgendaTimelineProps = {
   timeline: TimelineResponse | null;
   onOpenTicket?: (ticketId: number) => void;
   onUpdateMilestone?: (milestoneId: number, patch: MilestonePatch) => Promise<void>;
+  onUpdateAgendaEntry?: (entryId: number, patch: AgendaEntryPatch) => Promise<void>;
 };
 
 const TAG_COLORS: Record<TimelineTagTone, { bg: ColorToken; text: ColorToken }> = {
@@ -33,10 +35,11 @@ const TAG_COLORS: Record<TimelineTagTone, { bg: ColorToken; text: ColorToken }> 
 };
 
 // 一件事一行：时间、类型标签、标题；下面一行是出处或状态，有风险时标红。节点可以改日期、标完成、取消。
-function TimelineRow({ row, onOpenTicket, onUpdateMilestone }: {
+function TimelineRow({ row, onOpenTicket, onUpdateMilestone, onUpdateAgendaEntry }: {
   row: TimelineRowView;
   onOpenTicket?: (ticketId: number) => void;
   onUpdateMilestone?: (milestoneId: number, patch: MilestonePatch) => Promise<void>;
+  onUpdateAgendaEntry?: (entryId: number, patch: AgendaEntryPatch) => Promise<void>;
 }) {
   const m = useMessages(agendaMessages);
   const [editing, setEditing] = useState(false);
@@ -45,6 +48,20 @@ function TimelineRow({ row, onOpenTicket, onUpdateMilestone }: {
   const [error, setError] = useState<string | null>(null);
   const colors = TAG_COLORS[row.tag.tone];
   const canEdit = row.editable && row.milestoneId !== null && onUpdateMilestone !== undefined;
+  const canToggleReminder = row.external !== null && row.external.canToggle && onUpdateAgendaEntry !== undefined;
+  // A calendar entry's reminder: mute or unmute it in place (the same action as Lead's agenda_entry update).
+  const toggleReminder = async () => {
+    if (!row.external || !onUpdateAgendaEntry || pending) return;
+    setPending(true);
+    setError(null);
+    try {
+      await onUpdateAgendaEntry(row.external.entryId, { muted: !row.external.muted });
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setPending(false);
+    }
+  };
 
   const submit = async (patch: MilestonePatch) => {
     if (row.milestoneId === null || !onUpdateMilestone || pending) return;
@@ -89,7 +106,7 @@ function TimelineRow({ row, onOpenTicket, onUpdateMilestone }: {
                 {row.title}
               </Text>
             </Row>
-            {row.sub || row.risk || canEdit ? (
+            {row.sub || row.risk || canEdit || canToggleReminder ? (
               <Row items="center" gap="inline-item" flexWrap="wrap">
                 {row.sub ? <Text size="meta" tone="muted">{row.sub}</Text> : null}
                 {canEdit && !row.muted ? (
@@ -104,6 +121,12 @@ function TimelineRow({ row, onOpenTicket, onUpdateMilestone }: {
                   >
                     {/* spacing-exempt: 链接字号 */}
                     <Text size="11" weight="bold" color="accent">{editing ? m.close : m.edit}</Text>
+                  </Pressable>
+                ) : null}
+                {canToggleReminder ? (
+                  <Pressable testID={`agenda-mute-${row.id}`} onPress={() => { void toggleReminder(); }} feedback="opacity" disabled={pending}>
+                    {/* spacing-exempt: 链接字号 */}
+                    <Text size="11" weight="bold" color="accent">{row.external!.muted ? m.unmuteEntry : m.muteEntry}</Text>
                   </Pressable>
                 ) : null}
                 {row.risk ? (
@@ -138,6 +161,7 @@ function TimelineRow({ row, onOpenTicket, onUpdateMilestone }: {
           {error ? <Text size="secondary" color="danger-dark">{error}</Text> : null}
         </Column>
       ) : null}
+      {!editing && error ? <Text size="secondary" color="danger-dark">{error}</Text> : null}
     </Column>
   );
 }
@@ -147,6 +171,7 @@ function RowsCard({ rows, testID, ...handlers }: {
   testID?: string;
   onOpenTicket?: (ticketId: number) => void;
   onUpdateMilestone?: (milestoneId: number, patch: MilestonePatch) => Promise<void>;
+  onUpdateAgendaEntry?: (entryId: number, patch: AgendaEntryPatch) => Promise<void>;
 }) {
   return (
     // spacing-exempt: 行自带分隔线；行自带内边距
@@ -162,7 +187,7 @@ function RowsCard({ rows, testID, ...handlers }: {
 }
 
 // 日程 tab（阶段 3，方向 A）：一句话、周条、已过期、今天、明天、之后。
-export function AgendaTimeline({ timeline, onOpenTicket, onUpdateMilestone }: AgendaTimelineProps) {
+export function AgendaTimeline({ timeline, onOpenTicket, onUpdateMilestone, onUpdateAgendaEntry }: AgendaTimelineProps) {
   const m = useMessages(agendaMessages);
   const locale = useLocale();
   const now = new Date();
@@ -170,7 +195,7 @@ export function AgendaTimeline({ timeline, onOpenTicket, onUpdateMilestone }: Ag
   const [selectedDate, setSelectedDate] = useState(today);
   const week = buildWeek(today, locale);
   const view = buildTimelineView(timeline, now, selectedDate, locale);
-  const handlers = { onOpenTicket, onUpdateMilestone };
+  const handlers = { onOpenTicket, onUpdateMilestone, onUpdateAgendaEntry };
 
   if (timeline === null) {
     return (

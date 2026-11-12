@@ -31,6 +31,8 @@ export type TimelineRowView = {
   editable: boolean;
   at: string;
   allDay: boolean;
+  /** An entry from a connected calendar: the user can mute or unmute its reminder. null for everything else. */
+  external: { entryId: number; muted: boolean; canToggle: boolean } | null;
 };
 
 export type TimelineSection = { key: string; label: string; rows: TimelineRowView[] };
@@ -99,6 +101,7 @@ function tag(entry: TimelineEntry, m: AgendaWords): TimelineRowView['tag'] {
   }
   if (entry.kind === 'reminder') return { label: m.tagReminder, tone: 'accent' };
   if (entry.kind === 'deferred_start') return { label: m.tagStart, tone: 'neutral' };
+  if (entry.kind === 'external') return { label: m.tagCalendar, tone: 'neutral' };
   return { label: m.tagRoutine, tone: entry.status === 'failed' ? 'danger' : 'success' };
 }
 
@@ -118,7 +121,23 @@ function sub(entry: TimelineEntry, now: Date, inOverdue: boolean, locale: Locale
     return entry.status === 'unacked' ? m.firedNotAcked : entry.status === 'done' ? m.acknowledged : null;
   }
   if (entry.kind === 'deferred_start') return m.plannedStart;
+  if (entry.kind === 'external') return externalSub(entry, m);
   return entry.detail ?? null;
+}
+
+// A calendar entry: its reminder (when, how loud, or why there is none), then where it is.
+function externalSub(entry: TimelineEntry, m: AgendaWords): string | null {
+  const external = entry.external;
+  if (!external) return null;
+  const reminder = external.reminder;
+  const remind = external.status === 'cancelled' ? m.externalCancelled
+    : external.muted ? m.externalMuted
+      : entry.status === 'unacked' ? m.firedNotAcked
+        : reminder && (reminder.stage === 'acked' || reminder.stage === 'fired') ? m.externalReminded
+          : reminder && reminder.stage === 'scheduled'
+            ? [m.externalRemindsAt(clockTimeLabel(reminder.at)), reminder.level === 'interrupt' ? m.externalImportant : null].filter(Boolean).join(' · ')
+            : entry.status === 'done' ? null : m.externalNotReminding;
+  return [remind, external.location].filter(Boolean).join(' · ') || null;
 }
 
 function row(entry: TimelineEntry, now: Date, locale: Locale, inOverdue = false): TimelineRowView {
@@ -132,13 +151,21 @@ function row(entry: TimelineEntry, now: Date, locale: Locale, inOverdue = false)
     title: numbered ? `#${entry.ticketId} ${entry.title}` : entry.title,
     sub: sub(entry, now, inOverdue, locale),
     risk: entry.risk?.label ?? null,
-    muted: entry.status === 'done',
+    muted: entry.status === 'done' || entry.external?.status === 'cancelled',
     ticketId: entry.ticketId,
     opensTicket: entry.ticketId !== null && entry.kind !== 'reminder',
     milestoneId: entry.milestone?.id ?? null,
     editable: entry.editable,
     at: entry.at,
     allDay: entry.allDay,
+    external: entry.kind === 'external' && entry.external
+      ? {
+        entryId: entry.external.entryId,
+        muted: entry.external.muted,
+        // Muting only makes sense before the meeting starts and while the calendar still lists it as on.
+        canToggle: entry.status === 'upcoming' && entry.external.status !== 'cancelled',
+      }
+      : null,
   };
 }
 
