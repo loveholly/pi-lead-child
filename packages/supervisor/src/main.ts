@@ -36,6 +36,7 @@ try {
     dbPath: dbPath(),
     daemonCommand: daemonCommand(),
     cwd: root,
+    // PLC_DAEMON_READY_TIMEOUT_MS。plc daemon start 按同一个变量决定等 ensure_running 多久。
     daemonReadyTimeoutMs: daemonReadyTimeoutMs(),
     // 桌面版的运行包（根目录有 release.json）还要知道安装根，闸门据此检查 current 和版本目录。
     deployment: runsFromDist()

@@ -106,7 +106,7 @@ describe('the Lead status in the conversation header', () => {
       + 'last upstream error: {\\"error\\": {\\"type\\": \\"authentication_error\\", '
       + '\\"message\\": \\"invalid x-api-key\\"}}","type":"server_error"}';
     render(runtimeWith({ ...degraded, reason: 'Lead 的模型账号认证失败', detail: live }));
-    expect(screen.getByText('Model authentication failed. Check the configuration.')).toBeTruthy();
+    expect(screen.getByText('Model authentication failed. Check Settings → Models.')).toBeTruthy();
     expect(screen.queryByText(/Tries again at/)).toBeNull();
   });
 
@@ -132,13 +132,13 @@ describe('the Lead status in the conversation header', () => {
 
   it('does not promise an automatic retry for a failure that needs the user', () => {
     render(runtimeWith({ ...degraded, reason: 'Lead 的模型账号认证失败', detail: '401 Unauthorized' }));
-    expect(screen.getByText('Model authentication failed. Check the configuration.')).toBeTruthy();
+    expect(screen.getByText('Model authentication failed. Check Settings → Models.')).toBeTruthy();
     expect(screen.queryByText(/Tries again at/)).toBeNull();
   });
 
   it('names a model configuration failure as needing the user too', () => {
     render(runtimeWith({ ...degraded, reason: 'Lead 的模型配置有误', detail: '404 {"error":"model not found: claude-sonnet-9"}' }));
-    expect(screen.getByText('Model configuration error. Check the configuration.')).toBeTruthy();
+    expect(screen.getByText('Model configuration error. Check Settings → Models.')).toBeTruthy();
     expect(screen.queryByText(/Tries again at/)).toBeNull();
   });
 

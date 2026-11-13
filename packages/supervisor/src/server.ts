@@ -2,7 +2,7 @@ import Database from "better-sqlite3";
 import { randomUUID } from "node:crypto";
 import { spawn, type ChildProcess } from "node:child_process";
 import {
-  closeSync, existsSync, mkdirSync, openSync, readdirSync, rmSync, unlinkSync,
+  closeSync, existsSync, fstatSync, mkdirSync, openSync, readdirSync, readSync, rmSync, statSync, unlinkSync,
 } from "node:fs";
 import { connect, createServer, type Server, type Socket } from "node:net";
 import { join } from "node:path";
@@ -12,14 +12,20 @@ import { attachJsonlReader, listenOwnerOnly } from "@pi-lead-child/runtime";
 import { LATEST_SCHEMA_VERSION } from "@pi-lead-child/store";
 import {
   LEAD_DRAIN_TIMEOUT_MS, SUPERVISOR_FEATURE_DEPLOY_GATE, SUPERVISOR_FEATURE_MAINTENANCE_BACKUP, type DaemonDrainResult,
+  redactKnownValues, redactSecretText, secretEnvValues,
 } from "@pi-lead-child/protocol";
-import { deployReadiness, type DeployReadiness } from "./deploy/readiness.js";
+import {
+  buildDaemonDist, cliDistDir, deployReadiness, discardStagedBuild, promoteStagedBuild, readBuildProvenance, readWebBuild, stagedCliDir, stagingDistDir,
+  webBuildMismatch, webDistDir,
+  type DeployReadiness,
+} from "./deploy/readiness.js";
 import { databaseSchemaVersion } from "./deploy/release.js";
 import { backupSqlite } from "./deploy/backup.js";
 import { startHindsightChild, type HindsightChildOptions } from "./hindsight-child.js";
 import { findRuntimeExecutable, runtimeSearchPath } from "@pi-lead-child/runtime";
 import type {
   MaintenanceAction,
+  MaintenanceFailureKind,
   MaintenanceRequest,
   SupervisorCommand,
   SupervisorPersistentState,
@@ -60,6 +66,9 @@ export interface SupervisorOptions {
   daemonStopTimeoutMs?: number;
   // Hindsight 记忆服务（hindsight-child.ts）：按 daemon 写的 run.json 拉起它。测试里调快时间，或者给 false 不管它。
   hindsight?: false | Pick<HindsightChildOptions, "pollMs" | "throttleMs" | "stopTimeoutMs">;
+  // 维护前从 HEAD 构建 dist 到 outdir（暂存目录；缺省是 deploy/readiness.ts 的 buildDaemonDist）。plc 的 cli 构建到
+  // stagedCliDir（outdir 里的 cli/）。测试用它代替真的构建。
+  buildDist?: (root: string, outdir: string, signal: AbortSignal) => Promise<void>;
 }
 
 export interface Deployment {
@@ -104,6 +113,41 @@ export function startingDaemonVerdict(check: {
   if (check.answered) return "ready";
   if (check.exited) return "exited";
   return check.waitedMs >= check.timeoutMs ? "timed_out" : "starting";
+}
+
+// daemon 没就绪就退出时，supervisor.log 里那一行带上这次启动写进 err.log 的末尾几行（2026-11-02：以前只有 code 和 signal，
+// 原因要去 err.log 里翻，还混着以前几次启动的输出）。只从 fromOffset（spawn 前 err.log 的长度）读起，最多 maxBytes，
+// 截断时丢掉不完整的第一行。先按规则、再按 daemon 环境里的密钥值脱敏。只写 supervisor.log，不进 status：
+// status 会经 get_runtime_health 到达 Lead。读不到时返回空串。
+export const DAEMON_STDERR_TAIL_BYTES = 2_048;
+export function daemonStderrTail(
+  path: string,
+  fromOffset: number,
+  env: Record<string, string | undefined>,
+  maxBytes = DAEMON_STDERR_TAIL_BYTES,
+): string {
+  let raw: string;
+  let cut: boolean;
+  try {
+    const fd = openSync(path, "r");
+    try {
+      const size = fstatSync(fd).size;
+      const start = Math.max(fromOffset, size - maxBytes);
+      if (start >= size) return "";
+      const buffer = Buffer.alloc(size - start);
+      const read = readSync(fd, buffer, 0, buffer.length, start);
+      raw = buffer.subarray(0, read).toString("utf8");
+      cut = start > fromOffset;
+    } finally {
+      closeSync(fd);
+    }
+  } catch {
+    return "";
+  }
+  const lines = raw.split("\n");
+  if (cut) lines.shift();
+  const tail = lines.map((line) => line.trim()).filter(Boolean).join(" | ");
+  return redactKnownValues(redactSecretText(tail), secretEnvValues(env));
 }
 
 export interface SupervisorHandle {
@@ -226,6 +270,8 @@ async function runSupervisor(opts: SupervisorOptions, lock: InstanceLock): Promi
   let restartTimer: ReturnType<typeof setNodeTimeout> | null = null;
   let daemonOutFd: number | null = null;
   let daemonErrFd: number | null = null;
+  // child 启动前 err.log 的长度。和 child 一起设置。
+  let childErrOffset = 0;
 
   const persist = () => saveSupervisorState(statePath, state);
   // Hindsight 是 supervisor 的子进程，不是 daemon 的：daemon 重启时它照常跑（设计第 8.7 节，2026-11-05）。
@@ -258,7 +304,10 @@ async function runSupervisor(opts: SupervisorOptions, lock: InstanceLock): Promi
   // 等本 supervisor 拉起的 daemon 回答第一次 status。以前固定等 30 秒：2026-10-19 14:54Z 负载约 37，
   // daemon 39 秒才开始监听，维护在第 30 秒把这个健康的 daemon 记成了失败。
   const readyTimeoutMs = opts.daemonReadyTimeoutMs ?? DEFAULT_DAEMON_READY_TIMEOUT_MS;
-  const waitForStartedDaemon = async (started: ChildProcess): Promise<Record<string, unknown>> => {
+  const daemonErrLogPath = join(logsDir, "coordinatord.err.log");
+  const daemonEnv = (): Record<string, string | undefined> => ({ ...process.env, ...opts.env });
+  // errOffset：spawn 这个进程之前 err.log 的长度，它退出时只读这之后写的内容。
+  const waitForStartedDaemon = async (started: ChildProcess, errOffset: number): Promise<Record<string, unknown>> => {
     const startedAt = Date.now();
     let nextNote = startedAt + DAEMON_SLOW_START_NOTE_MS;
     for (;;) {
@@ -272,8 +321,12 @@ async function runSupervisor(opts: SupervisorOptions, lock: InstanceLock): Promi
       });
       if (verdict === "ready") return status!;
       if (verdict === "exited") {
-        throw new Error(`daemon pid ${started.pid ?? "?"} exited before it answered status `
-          + `(code=${started.exitCode}, signal=${started.signalCode})`);
+        const message = `daemon pid ${started.pid ?? "?"} exited before it answered status `
+          + `(code=${started.exitCode}, signal=${started.signalCode})`;
+        // stderr 只进 supervisor.log。抛出的错误会进维护记录和 status，不带它。
+        const tail = daemonStderrTail(daemonErrLogPath, errOffset, daemonEnv());
+        log(tail ? `${message}; last stderr: ${tail}` : message);
+        throw new Error(message);
       }
       if (verdict === "timed_out") {
         const listening = await socketListening(daemonSockPath);
@@ -315,24 +368,30 @@ async function runSupervisor(opts: SupervisorOptions, lock: InstanceLock): Promi
   const spawnDaemon = async (): Promise<Record<string, unknown>> => {
     const deadline = Date.now() + readyTimeoutMs;
     for (;;) {
+      // 下面三条路都是 daemon 已经在了，phase 回到 running，crashCount 也清零（2026-11-02）：以前只有自己拉起、
+      // 一次就等到就绪的那条路清零。崩溃以后拉起的 daemon 启动慢、第二轮才等到时，phase 是 running，
+      // crashCount 却还停在崩溃时的数，下次崩溃的退避也按它算。
       const existing = await daemonStatus();
       if (existing) {
         state.daemonPid = Number(existing.pid ?? 0) || null;
         state.phase = "running";
+        state.crashCount = 0;
         persist();
         return existing;
       }
       // daemon 的 socket 在监听，只是 status 没有及时回答：它在忙，不是不在。不再起第二个。
       if (!child && await socketListening(daemonSockPath)) {
         state.phase = "running";
+        state.crashCount = 0;
         persist();
         return {};
       }
       if (child) {
         const starting = child;
-        const ready = await waitForStartedDaemon(starting);
+        const ready = await waitForStartedDaemon(starting, childErrOffset);
         state.daemonPid = Number(ready.pid ?? starting.pid ?? 0) || null;
         state.phase = "running";
+        state.crashCount = 0;
         persist();
         return ready;
       }
@@ -349,8 +408,10 @@ async function runSupervisor(opts: SupervisorOptions, lock: InstanceLock): Promi
     // 崩溃后的自动拉起、开机启动：不拦截（拦截就等于停服），只把不符合部署闸门的原因记下来。
     const startRefusal = deployRefusal();
     if (startRefusal.length) log(`starting the daemon from a build the deploy gate would refuse: ${startRefusal.join(" ")}`);
+    let errOffset = 0;
+    try { errOffset = statSync(daemonErrLogPath).size; } catch { /* 还没有 err.log */ }
     daemonOutFd = openSync(join(logsDir, "coordinatord.out.log"), "a");
-    daemonErrFd = openSync(join(logsDir, "coordinatord.err.log"), "a");
+    daemonErrFd = openSync(daemonErrLogPath, "a");
     state.phase = "starting";
     persist();
     const spawned = spawn(opts.daemonCommand.bin, opts.daemonCommand.args, {
@@ -364,6 +425,7 @@ async function runSupervisor(opts: SupervisorOptions, lock: InstanceLock): Promi
       stdio: ["ignore", daemonOutFd, daemonErrFd],
     });
     child = spawned;
+    childErrOffset = errOffset;
     state.daemonPid = spawned.pid ?? null;
     persist();
     spawned.once("error", (error) => {
@@ -384,7 +446,7 @@ async function runSupervisor(opts: SupervisorOptions, lock: InstanceLock): Promi
         persist();
       }
     });
-    const ready = await waitForStartedDaemon(spawned);
+    const ready = await waitForStartedDaemon(spawned, errOffset);
     state.daemonPid = Number(ready.pid ?? spawned.pid ?? 0) || null;
     state.phase = "running";
     state.crashCount = 0;
@@ -508,14 +570,26 @@ async function runSupervisor(opts: SupervisorOptions, lock: InstanceLock): Promi
     return readiness.ready ? [] : readiness.reasons;
   };
 
-  // 停机之前的那几步失败时：daemon 照常在跑，这次维护记成失败，不拉起任何东西。
-  const refuseBeforeStop = (request: MaintenanceRequest, error: string): void => {
+  // 从 HEAD 构建好、还没换进 dist 的暂存构建（deploy/readiness.ts 的 stagingDistDir）。
+  let stagedBuild = false;
+  // 正在跑的构建。supervisor 停下时取消它。
+  let buildAbort: AbortController | null = null;
+
+  // 停机之前的那几步失败时：daemon 照常在跑，这次维护记成失败，不拉起任何东西。暂存的构建丢掉，dist 不动。
+  // kind 是给 Lead 看的类别（daemon 的 inbox 只写它，不写 error 里的构建输出）。
+  const refuseBeforeStop = (request: MaintenanceRequest, error: string, kind: MaintenanceFailureKind): void => {
+    if (opts.deployment) discardStagedBuild(opts.deployment.distDir);
+    stagedBuild = false;
     request.state = "failed";
     request.completedAt = new Date().toISOString();
     request.error = error;
+    request.failureKind = kind;
     state.phase = "running";
     persist();
     log(`maintenance ${request.id} refused before the stop: ${error}`);
+    // 请求方早就拿到了「已接受」，不知道它失败了：告诉 daemon，由它叫醒 Lead。只发 id，daemon 回头向这里核对原因。
+    void socketCommand(daemonSockPath, { type: "maintenance_failed", maintenanceId: request.id })
+      .catch((reportError: Error) => log(`maintenance ${request.id} failure not reported to the daemon: ${reportError.message}`));
   };
 
   const executeMaintenance = async (request: MaintenanceRequest): Promise<void> => {
@@ -526,11 +600,63 @@ async function runSupervisor(opts: SupervisorOptions, lock: InstanceLock): Promi
     state.phase = request.backup ? "backing_up" : "restarting";
     persist();
     try {
-      // 等排空的这段时间里 checkout 可能变了：停机之前再查一次。
-      const refusal = deployRefusal();
-      if (refusal.length) {
-        refuseBeforeStop(request, new DeployRefusedError(refusal).message);
-        return;
+      // 部署闸门。等排空的这段时间里 checkout 可能变了：停机之前再查一次。有暂存的构建时查它。
+      if (opts.deployment) {
+        const { root, distDir } = opts.deployment;
+        const readiness = deployReadiness(root, stagedBuild ? stagingDistDir(distDir) : distDir);
+        // dist 落后于干净的 HEAD（2026-11-02：修复合并后重启，跑的还是旧 dist）：从 HEAD 构建到暂存目录。
+        // 备份成功、停机之前才换进 dist（二审：先换的话，备份失败时 daemon 一崩溃就从新 dist 拉起，迁移在没有备份时执行）。
+        if (readiness.rebuild) {
+          state.phase = "building";
+          persist();
+          log(`maintenance ${request.id}: building dist from ${readiness.head} (dist was built from ${readiness.build?.commit ?? "unknown"})`);
+          const staging = stagingDistDir(distDir);
+          discardStagedBuild(distDir);
+          stagedBuild = false;
+          mkdirSync(staging, { recursive: true });
+          let failure: string | null = null;
+          let kind: MaintenanceFailureKind = "build_failed";
+          buildAbort = new AbortController();
+          try {
+            // dist/web 存在时网页包也从 HEAD 构建，和 daemon 一起换进去（#45）。
+            const web = existsSync(webDistDir(distDir));
+            await (opts.buildDist ?? ((r, outdir, signal) => buildDaemonDist(r, { outdir, cliOutdir: stagedCliDir(distDir), web, signal })))(
+              root, staging, buildAbort.signal,
+            );
+          } catch (error: any) {
+            failure = `从 HEAD 重新构建失败（${redactKnownValues(redactSecretText(String(error?.message ?? error)), secretEnvValues(process.env))}）`;
+          } finally {
+            buildAbort = null;
+          }
+          const built = failure ? null : readBuildProvenance(staging);
+          if (!failure && (!built || built.dirty || built.commit !== readiness.head)) {
+            failure = `构建出来的不是 HEAD ${readiness.head}（${built ? `是 ${built.commit}${built.dirty ? "，有改动" : ""}` : "没有构建记录"}），构建期间 HEAD 可能变了`;
+            kind = "build_mismatch";
+          }
+          // #45：dist/web 存在，暂存目录里却没有同一个 commit 的网页包：换进去以后网页包和 daemon 又不一致了。
+          const webMismatch = !failure && existsSync(webDistDir(distDir)) ? webBuildMismatch(readWebBuild(staging) ?? null, readiness.head ?? "") : null;
+          if (webMismatch) {
+            failure = `构建出来的网页包不是 HEAD 的（${webMismatch}）`;
+            kind = "build_mismatch";
+          }
+          if (failure) {
+            refuseBeforeStop(request, new DeployRefusedError([
+              `dist 不是从 HEAD ${readiness.head} 构建的，停机前${failure}。daemon 没有停，还在跑原来的构建。`
+              + `在主 checkout 里运行 npm run build 可以看完整输出。`,
+            ]).message, kind);
+            return;
+          }
+          // 构建要花时间，这期间 Lead 可能开始了新的一轮：回到 pending，下一次巡检重新等 Lead 和 Run 排空，再过闸门。
+          stagedBuild = true;
+          request.state = "pending";
+          state.phase = "running";
+          persist();
+          return;
+        }
+        if (!readiness.ready) {
+          refuseBeforeStop(request, new DeployRefusedError(readiness.reasons).message, "deploy_refused");
+          return;
+        }
       }
       // 顺序：先排空 Lead，再在线备份，最后才停 daemon（审查 2026-10-20 C：先备份的话，排空期间 Lead 那一轮写的东西不在备份里）。
       // 备份失败就不停机（审查 2026-10-19 第 4 条：以前先停机再备份，备份失败时巡检直接用新 dist 拉起 daemon，
@@ -545,11 +671,23 @@ async function runSupervisor(opts: SupervisorOptions, lock: InstanceLock): Promi
           request.backupPath = await backupDatabase(request);
           persist();
         } catch (error: any) {
-          refuseBeforeStop(request, `database backup failed, the daemon was not stopped: ${error.message}`);
+          refuseBeforeStop(request, `database backup failed, the daemon was not stopped: ${error.message}`, "backup_failed");
           return;
         }
       }
       daemonDown = true;
+      // 备份好了：把暂存的构建（daemon 和 plc 的 cli）换进去，再停机。换不进去时已经换回原来的构建，daemon 不停。
+      if (stagedBuild && opts.deployment) {
+        try {
+          promoteStagedBuild(opts.deployment.distDir, cliDistDir(opts.deployment.root));
+        } catch (error: any) {
+          refuseBeforeStop(request, `${error.message}。daemon 没有停，还在跑原来的构建。`, "swap_failed");
+          return;
+        }
+        stagedBuild = false;
+        readinessCache = null;
+        log(`maintenance ${request.id}: swapped the staged build into ${opts.deployment.distDir}`);
+      }
       state.phase = "restarting";
       persist();
       await shutdownDaemon(answered);
@@ -608,8 +746,9 @@ async function runSupervisor(opts: SupervisorOptions, lock: InstanceLock): Promi
       throw new Error(`maintenance request ${state.maintenance.id} is already ${state.maintenance.state}`);
     }
     // 部署闸门：没提交的代码不能部署。拒绝时 daemon 不动，原因原样返回给请求方。
-    const refusal = deployRefusal();
-    if (refusal.length) throw new DeployRefusedError(refusal);
+    // 只是 dist 不是干净 HEAD 的构建（rebuild）时不拒绝：维护在停机之前先从 HEAD 构建。
+    const readiness = opts.deployment ? deployReadiness(opts.deployment.root, opts.deployment.distDir) : null;
+    if (readiness && !readiness.ready && !readiness.rebuild) throw new DeployRefusedError(readiness.reasons);
     const request: MaintenanceRequest = {
       id: randomUUID(),
       action: command.action,
@@ -730,6 +869,7 @@ async function runSupervisor(opts: SupervisorOptions, lock: InstanceLock): Promi
     if (closing) return;
     closing = true;
     clearInterval(timer);
+    buildAbort?.abort();
     if (restartTimer) clearTimeout(restartTimer);
     // daemon 和 Hindsight 一起停：launchd 停这个任务时只等一会儿（ExitTimeOut），过了就强杀整个进程组。
     await Promise.all([

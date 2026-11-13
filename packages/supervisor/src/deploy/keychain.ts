@@ -15,6 +15,12 @@ export function keychainServiceName(key: string): string {
   return `dev-secret:${key}`;
 }
 
+// 给用户照抄的写入命令（doctor 和 install 的提示）。只用 macOS 自带的 security，不依赖别的脚本。
+// -w 放最后、不带值：security 交互式提示输入，命令里和 shell 历史里都不出现明文。-U 表示已有时覆盖。
+export function keychainSetCommand(key: string): string {
+  return `security add-generic-password -U -a "$USER" -s "${keychainServiceName(key)}" -w`;
+}
+
 export function keychainSecretExists(key: string): boolean {
   if (process.platform !== "darwin") return false;
   try {

@@ -387,6 +387,20 @@ describe('the memory section', () => {
     expect(screen.getByTestId('memory-switch-error').textContent).toBe('设置已经变了，这个切换作废');
   });
 
+  // 凭证做不了决定（网关按来历去掉了 approvals:respond），同意回 403：卡上说下一步去哪里做，不显示网关的英文原话。
+  it('says where to decide instead of the gateway refusal when this credential cannot decide', async () => {
+    const { runtime } = memoryRuntime(waitingForConsent(), {
+      confirmMemorySwitch: vi.fn(async () => {
+        throw new ControlPlaneClientError('missing scope: approvals:respond. Only the user decides, in the web page or on the paired phone', 'forbidden', 403);
+      }),
+    });
+    (runtime as unknown as { scopes: Set<string> }).scopes.delete('approvals:respond');
+    renderWithRuntime(<MemorySection />, runtime);
+    await act(async () => { fireEvent.click(screen.getByTestId('memory-switch-approve')); });
+    expect(screen.getByTestId('memory-switch-error').textContent).toBe('This device\'s credential cannot make decisions. '
+      + 'Decide in the web page opened on the Mac that runs the daemon, or on a phone paired by QR code.');
+  });
+
   it('moves focus to a switch card that appears while the page is open, not to one that was there before', async () => {
     const { runtime } = memoryRuntime(memory({ reranker: { ...memory().reranker, mode: 'none', effective: 'none', external: null } }));
     renderWithRuntime(<MemorySection />, runtime);

@@ -13,7 +13,7 @@ import { ModelSettingsDtoSchema } from "@pi-lead-child/protocol";
 import { openDb } from "@pi-lead-child/store";
 import { Value } from "typebox/value";
 import { loadDecisionModels } from "../src/decision-models.js";
-import { connectLeadProviderKeys, ModelSettings, providerSecretName } from "../src/model-settings.js";
+import { connectLeadProviderKeys, ModelSettings, providerSecretName, storedProviderKey } from "../src/model-settings.js";
 import { SealedSecrets } from "../src/sealed-secrets.js";
 
 const DAY = 86_400;
@@ -205,6 +205,27 @@ describe("ModelSettings: the brain", () => {
     expect(moved.note).toBe("The address changed to gateway.example.com. The old key was only for api.openai.com, so the daemon deleted it.");
     expect(t.secrets().get("lead.provider.openai")).toBeNull();
     expect(resolveLeadApiKey(loadLeadModelConfig(t.dataDir).providers.openai!, {}, "openai")).toBeUndefined();
+  });
+
+  // 保险库里的 key 只给存 key 时的那个主机；解不开时不给，记一行不带内容的日志。
+  it("gives a stored provider key only to the host it was saved for, without a ModelSettings", () => {
+    const dataDir = tempDir("plc-model-settings-key-");
+    const db = openDb(join(dataDir, "plc.db"));
+    const vault = new Vault(randomBytes(32));
+    const logged: string[] = [];
+    const log = (line: string) => logged.push(line);
+    new SealedSecrets<string>(db, vault).set("lead.provider.openai", { value: "sk-test-boundary", host: "api.openai.com" });
+    const secrets = new SealedSecrets<string>(db, vault);
+    expect(storedProviderKey(secrets, log, "openai", { baseUrl: "https://api.openai.com/v1" })).toEqual({ value: "sk-test-boundary", host: "api.openai.com" });
+    expect(storedProviderKey(secrets, log, "openai", { baseUrl: "https://gateway.example.com/v1" })).toBeNull();
+    expect(storedProviderKey(secrets, log, "other", { baseUrl: "https://api.openai.com/v1" })).toBeNull();
+    // 保险库的密钥换了：解不开，不给 key，记一行不带内容的日志。
+    const otherVault = new SealedSecrets<string>(db, new Vault(randomBytes(32)));
+    expect(storedProviderKey(otherVault, log, "openai", { baseUrl: "https://api.openai.com/v1" })).toBeNull();
+    expect(logged).toHaveLength(1);
+    expect(logged[0]).toMatch(/^\[models\] provider key for openai cannot be opened: /);
+    expect(logged[0]).not.toContain("sk-test");
+    db.close();
   });
 
   it("drops a key written in config.json when the provider moves to another host", async () => {

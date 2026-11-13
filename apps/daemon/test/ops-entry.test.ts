@@ -3,11 +3,11 @@
 // plc 只依赖 client、protocol 和 core。这里只测没有副作用的命令。
 import { spawn } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { createServer, type Socket } from "node:net";
+import { createServer, type Server, type Socket } from "node:net";
 import { join } from "node:path";
 import Database from "better-sqlite3";
 import { openDb } from "@pi-lead-child/store";
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { packageSource } from "@pi-lead-child/core";
 import { tempDir } from "@pi-lead-child/core/testing";
 
@@ -18,10 +18,10 @@ const OPS_RUN_MS = 60_000;
 let dir: string;
 beforeEach(() => { dir = tempDir("plc-ops-"); });
 
-function ops(args: string[]): Promise<{ code: number | null; stdout: string; stderr: string }> {
+function ops(args: string[], env: Record<string, string> = {}): Promise<{ code: number | null; stdout: string; stderr: string }> {
   return new Promise((done, fail) => {
     const child = spawn(process.execPath, ["--import", "tsx", packageSource("daemon", "ops.ts"), ...args], {
-      env: { ...process.env, PLC_DATA_DIR: dir, PLC_LEAD_MODEL: "" },
+      env: { ...process.env, PLC_DATA_DIR: dir, PLC_LEAD_MODEL: "", ...env },
       stdio: ["ignore", "pipe", "pipe"],
     });
     let stdout = "";
@@ -220,4 +220,39 @@ describe("the ops entry", () => {
     expect(result.code).toBe(2);
     expect(result.stderr).toContain("usage: ops.mjs");
   }, OPS_RUN_MS);
+});
+
+// 2026-11-02：负载高时 daemon 3 分钟才就绪。supervisor 自己等 daemon 120 秒（PLC_DAEMON_READY_TIMEOUT_MS），
+// plc daemon start 却只等 ensure_running 35 秒，超时就打印 supervisor request timed out、退出码 1，CLI 报「启动失败」。
+describe("plc daemon start while the daemon is still starting", () => {
+  const servers: Server[] = [];
+  const sockets = new Set<Socket>();
+  afterEach(async () => {
+    for (const socket of sockets) socket.destroy();
+    sockets.clear();
+    await Promise.all(servers.splice(0).map((server) => new Promise<void>((done) => server.close(() => done()))));
+  });
+  // 假 supervisor：answer 决定回答哪些命令，别的命令一直不回答（supervisor 还在等 daemon 就绪）。
+  async function fakeSupervisor(answer: (type: string) => boolean): Promise<void> {
+    const server = createServer((socket) => {
+      sockets.add(socket);
+      socket.setEncoding("utf8");
+      socket.on("data", (chunk: string) => {
+        const command = JSON.parse(chunk.trim()) as { type: string };
+        if (answer(command.type)) socket.write(`${JSON.stringify({ type: "response", success: true, data: {} })}\n`);
+      });
+    });
+    servers.push(server);
+    await new Promise<void>((resolve) => server.listen(join(dir, "supervisor.sock"), resolve));
+  }
+
+  it("says the daemon is still starting, with its own exit code, when ensure_running outlasts the wait", async () => {
+    await fakeSupervisor((type) => type === "status");
+    // 等 ensure_running 的期限跟着 PLC_DAEMON_READY_TIMEOUT_MS 走（再加一点余量），这里把它调短。
+    const result = await ops(["start"], { PLC_DAEMON_READY_TIMEOUT_MS: "100" });
+    expect(result.code).toBe(4);
+    expect(result.stderr).toContain("daemon 仍在启动");
+    expect(result.stderr).toContain("plc daemon status");
+    expect(result.stderr).not.toContain("timed out");
+  }, 90_000);
 });

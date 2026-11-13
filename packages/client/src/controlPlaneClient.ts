@@ -882,8 +882,19 @@ export class ControlPlaneClient {
   }
 
   // 这个凭证对应的 binding（GET /v1/paired/me）。凭证无效时抛 401。
+  // 网关回的是有效 scope（按来历去掉不允许的），存着的是配对那时的：不一样就换成网关回的这一份。
   async getOwnBinding(signal?: AbortSignal): Promise<BindingDto> {
+    const credentialGeneration = this.credentialGeneration;
     const payload = await this.request<{ binding: BindingDto }>('/v1/paired/me', OwnBindingResponseSchema, { signal });
+    const record = this.record;
+    if (
+      record && credentialGeneration === this.credentialGeneration && record.binding.id === payload.binding.id &&
+      JSON.stringify(record.binding) !== JSON.stringify(payload.binding)
+    ) {
+      const snapshot = { ...record, binding: payload.binding };
+      await this.saveCredentials(snapshot, credentialGeneration);
+      if (credentialGeneration === this.credentialGeneration) this.record = snapshot;
+    }
     return payload.binding;
   }
 

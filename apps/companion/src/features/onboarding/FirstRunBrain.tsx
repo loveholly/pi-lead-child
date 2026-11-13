@@ -90,7 +90,7 @@ export function FirstRunBrain({ onSkip }: { onSkip: () => void }) {
   };
 
   const connect = async () => {
-    const request = firstRunProviderRequest({ preset, apiKey, baseUrl, api }, (modelSettings?.brain.providers ?? []).map((entry) => entry.name), locale);
+    const request = firstRunProviderRequest({ preset, apiKey, baseUrl, api }, modelSettings?.brain.providers ?? [], locale);
     if (!request.ok) {
       setProblem(request.problem);
       return;
