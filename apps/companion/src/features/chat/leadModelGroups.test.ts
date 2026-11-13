@@ -1,7 +1,7 @@
 import type { LeadModelOption } from '@pi-lead-child/protocol';
 import { describe, expect, it } from 'vitest';
 
-import { effortForModel, groupLeadModels, leadModelLabel, leadModelProviders, matchesLeadModel } from './leadModelGroups';
+import { effortForModel, groupLeadModels, leadModelLabel, leadModelProviders, matchesLeadModel, upstreamProvider } from './leadModelGroups';
 
 // prefix 是 daemon 给的账号（group）：只有服务商的 accountPrefix 生效时才有。
 function option(model: string, source: string | null, efforts: string[] = [], prefix: string | null = null): LeadModelOption {
@@ -34,7 +34,7 @@ describe('groupLeadModels', () => {
     ]);
   });
 
-  it('names the provider when there is more than one, and does not treat a prefix as an account without the daemon saying so', () => {
+  it('names the provider when there is more than one, and treats a prefix the daemon does not call an account as the upstream provider', () => {
     const groups = groupLeadModels([
       option('vibeproxy/as1/claude-sonnet-5', 'anthropic', [], 'as1'),
       option('magpie/auto/deepseek-flash', 'deepseek'),
@@ -42,7 +42,8 @@ describe('groupLeadModels', () => {
     ]);
     expect(groups.map((group) => [group.title, group.models.map((model) => model.id)])).toEqual([
       ['vibeproxy · as1', ['as1/claude-sonnet-5']],
-      ['magpie', ['auto/deepseek-flash', 'deepseek/deepseek-flash']],
+      ['auto · magpie', ['auto/deepseek-flash']],
+      ['deepseek · magpie', ['deepseek/deepseek-flash']],
     ]);
   });
 });
@@ -57,12 +58,14 @@ describe('the provider rail and the search', () => {
   ];
 
   it('lists each provider once, in catalog order, with its model count', () => {
-    expect(leadModelProviders(models)).toEqual([{ provider: 'vibeproxy', count: 2 }, { provider: 'magpie', count: 2 }]);
+    expect(leadModelProviders(models)).toEqual([
+      { provider: 'vibeproxy', count: 2 }, { provider: 'auto', count: 1 }, { provider: 'deepseek', count: 1 },
+    ]);
   });
 
   it('shows only the picked provider, without the provider in the titles', () => {
     expect(groupLeadModels(models, { provider: 'vibeproxy' }).map((group) => group.title)).toEqual(['as1 · anthropic', 'antigravity']);
-    expect(groupLeadModels(models).map((group) => group.title)).toEqual(['vibeproxy · as1 · anthropic', 'vibeproxy · antigravity', 'magpie']);
+    expect(groupLeadModels(models).map((group) => group.title)).toEqual(['vibeproxy · as1 · anthropic', 'vibeproxy · antigravity', 'auto · magpie', 'deepseek · magpie']);
   });
 
   it('keeps the section titles and counts while searching, and drops sections with no match', () => {
@@ -75,7 +78,7 @@ describe('the provider rail and the search', () => {
   });
 
   it('keeps the section total when search matches only one of two models', () => {
-    const groups = groupLeadModels(models, { query: 'v4', provider: 'magpie' });
+    const groups = groupLeadModels([...models, option('magpie/deepseek/deepseek-flash', 'deepseek')], { query: 'v4', provider: 'deepseek' });
     expect(groups.map((group) => [group.count, group.models.map((model) => model.id)])).toEqual([
       [2, ['deepseek/deepseek-v4']],
     ]);
@@ -87,6 +90,31 @@ describe('the provider rail and the search', () => {
     expect(matchesLeadModel(v4, 'deepseek v4')).toBe(true);
     expect(matchesLeadModel(v4, '  ')).toBe(true);
     expect(matchesLeadModel(v4, 'opus')).toBe(false);
+  });
+});
+
+// 2026-11-06：左栏按上游供应商（deepseek、asin…），不按网关实例（local-3425 / local-3425-2）。
+describe('the upstream provider', () => {
+  it('takes the first part of the id, skipping an account prefix, and falls back to the provider', () => {
+    expect(upstreamProvider(option('local-3425/deepseek/deepseek-v4-pro', 'deepseek'))).toBe('deepseek');
+    expect(upstreamProvider(option('asin/gemini-4-argon', 'asin'))).toBe('asin');
+    expect(upstreamProvider(option('vibeproxy/as1/claude-sonnet-5', 'anthropic', [], 'as1'))).toBe('vibeproxy');
+  });
+
+  it('merges one provider across two gateways into one rail entry whose count is the sum', () => {
+    const models = [
+      option('local-3425/asin/gemini-4-argon', 'asin'),
+      option('local-3425/asin/gemini-4-flash', 'asin'),
+      option('local-3425/deepseek/deepseek-v4-pro', 'deepseek'),
+      option('local-3425-2/asin/gemini-4-argon', 'asin'),
+      option('local-3425-2/deepseek/deepseek-v4-pro', 'deepseek'),
+    ];
+    expect(leadModelProviders(models)).toEqual([{ provider: 'asin', count: 3 }, { provider: 'deepseek', count: 2 }]);
+    // 选中 asin：两个网关各一段，标题写网关，看得到来源。
+    expect(groupLeadModels(models, { provider: 'asin' }).map((group) => [group.title, group.count, group.models.map((model) => model.model)])).toEqual([
+      ['local-3425', 2, ['local-3425/asin/gemini-4-argon', 'local-3425/asin/gemini-4-flash']],
+      ['local-3425-2', 1, ['local-3425-2/asin/gemini-4-argon']],
+    ]);
   });
 });
 
