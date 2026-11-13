@@ -10,7 +10,8 @@ import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-work
 import { packageSource } from "@pi-lead-child/core";
 import { tempDir } from "@pi-lead-child/core/testing";
 import {
-  correctThenRunFailure, foldStaleRecallPages, OBSERVATION_THRESHOLD_BYTES, solPiConfig, solPiSettings,
+  correctThenRunFailure, foldStaleRecallPages, OBSERVATION_THRESHOLD_BYTES, recallPagePointer, solPiConfig, solPiSettings,
+  StableToolResults, stablePrefixMode, usesAutomaticPrefixCache,
 } from "../src/extension/sol-pi.js";
 import { SOL_PI_SOURCE, solPiPackage, solPiPinnedCommit, solPiSource } from "../src/extension/sol-pi-package.js";
 
@@ -188,10 +189,13 @@ export function createSolPiExtension(load) {
 describe("SoL-Pi entries loaded by pi's extension loader", () => {
   const sessions: AgentSession[] = [];
   const savedEntry = process.env.PLC_SOL_PI_ENTRY;
+  const savedStable = process.env.PLC_SOL_PI_STABLE_PREFIX;
   afterEach(() => {
     for (const session of sessions.splice(0)) session.dispose();
     if (savedEntry === undefined) delete process.env.PLC_SOL_PI_ENTRY;
     else process.env.PLC_SOL_PI_ENTRY = savedEntry;
+    if (savedStable === undefined) delete process.env.PLC_SOL_PI_STABLE_PREFIX;
+    else process.env.PLC_SOL_PI_STABLE_PREFIX = savedStable;
   });
 
   async function sessionWith(
@@ -265,8 +269,11 @@ describe("SoL-Pi entries loaded by pi's extension loader", () => {
 
   // Runs: a large tool result, two more steps (it is packed), obs_recall of it, then `afterRecall`
   // and a final answer. Returns what the provider saw on each request.
+  // The test model is not Claude, so it counts as automatic prefix caching. These scenarios exercise the folding that
+  // runs where ObservationPack replaces results (explicit cache breakpoints), so they turn the stable prefix off.
   async function recallScenario(afterRecall: Step[]) {
     process.env.PLC_SOL_PI_ENTRY = join(fakeObservationPackPackage(), "src", "sol-pi", "index.ts");
+    process.env.PLC_SOL_PI_STABLE_PREFIX = "off";
     const big = Array.from({ length: 800 }, (_, i) => `line ${i} of the long ticket brief`).join("\n");
     const tools = (pi: ExtensionAPI) => {
       pi.registerTool({
@@ -331,6 +338,57 @@ describe("SoL-Pi entries loaded by pi's extension loader", () => {
     expect(recall.text).toContain(`{"id":"${originalId}","offset":0}`);
     expect(recall.text).not.toContain("[large tool result replaced]");
     for (const seen of contexts) expect([...obsIds(seen)].filter((id) => id !== originalId)).toEqual([]);
+  });
+
+  // Regression (prompt cache, 2026-11-12): ObservationPack replaced a large tool result in the middle of the history at
+  // its third request. A provider with automatic prefix caching (Gemini, DeepSeek, OpenAI) had cached the prefix with
+  // the full result, so the rewrite invalidated everything after it. Now each request's messages start with exactly
+  // the messages of the request before it.
+  async function packScenario(mode: string | undefined) {
+    process.env.PLC_SOL_PI_ENTRY = join(fakeObservationPackPackage(), "src", "sol-pi", "index.ts");
+    if (mode === undefined) delete process.env.PLC_SOL_PI_STABLE_PREFIX;
+    else process.env.PLC_SOL_PI_STABLE_PREFIX = mode;
+    const big = Array.from({ length: 800 }, (_, i) => `line ${i} of the long ticket brief`).join("\n");
+    const tools = (pi: ExtensionAPI) => {
+      pi.registerTool({
+        name: "big", label: "Big", description: "big", parameters: Type.Object({}),
+        async execute() { return { content: [{ type: "text", text: big }], details: undefined }; },
+      });
+      pi.registerTool({
+        name: "noop", label: "Noop", description: "noop", parameters: Type.Object({}),
+        async execute() { return { content: [{ type: "text", text: "ok" }], details: undefined }; },
+      });
+    };
+    const requests: string[][] = [];
+    const step = (call: Step) => (context: { messages: unknown[] }) => {
+      requests.push(context.messages.map((message) => JSON.stringify({
+        role: (message as { role: string }).role, content: (message as { content: unknown }).content,
+      })));
+      return call([]);
+    };
+    const { session } = await sessionWith("sol-pi-lead.ts", [
+      callTool("big"), callTool("noop"), callTool("noop"), callTool("noop"), () => fauxAssistantMessage("done"),
+    ].map(step), [{ name: "tools", factory: tools }]);
+    await session.prompt("read the big result", { expandPromptTemplates: false });
+    return requests;
+  }
+
+  const prefixBreaks = (requests: string[][]) => requests.flatMap((request, index) => (
+    index > 0 && JSON.stringify(request.slice(0, requests[index - 1]!.length)) !== JSON.stringify(requests[index - 1]) ? [index] : []
+  ));
+
+  it("keeps every earlier message byte-identical on a model with automatic prefix caching", async () => {
+    const requests = await packScenario(undefined);
+    expect(requests).toHaveLength(5);
+    expect(prefixBreaks(requests)).toEqual([]);
+    expect(requests.flat().join("\n")).not.toContain("[large tool result replaced]");
+  });
+
+  it("still lets ObservationPack replace the result where the stable prefix is off (explicit cache breakpoints)", async () => {
+    const requests = await packScenario("off");
+    // The big result arrives with request 2 and is replaced at its third request: request 4 rewrites history.
+    expect(prefixBreaks(requests)).toEqual([3]);
+    expect(requests[3]!.join("\n")).toContain("[large tool result replaced]");
   });
 
   // 没装（测试、首次安装完成之前）时入口什么也不做，会话照常起来。
@@ -528,5 +586,63 @@ describe("foldStaleRecallPages", () => {
     expect(foldStaleRecallPages([page(header + "small"), assistant, assistant])).toBeUndefined();
     expect(foldStaleRecallPages([{ ...page(large), isError: true }, assistant, assistant])).toBeUndefined();
     expect(foldStaleRecallPages([{ ...page(large), toolName: "read" }, assistant, assistant])).toBeUndefined();
+  });
+});
+
+describe("stable prefix for automatic prefix caching", () => {
+  it("tells providers that cache prefixes on their own from requests with explicit breakpoints", () => {
+    expect(usesAutomaticPrefixCache({ api: "openai-completions", id: "gemini-3.8-flash-high" })).toBe(true);
+    expect(usesAutomaticPrefixCache({ api: "openai-completions", id: "auto/deepseek-flash" })).toBe(true);
+    expect(usesAutomaticPrefixCache({ api: "google-generative-ai", id: "gemini-3.5-flash" })).toBe(true);
+    expect(usesAutomaticPrefixCache({ api: "openai-responses", id: "gpt-5.5" })).toBe(true);
+    expect(usesAutomaticPrefixCache({ api: "anthropic-messages", id: "claude-sonnet-5-5" })).toBe(false);
+    expect(usesAutomaticPrefixCache({ api: "bedrock-converse-stream", id: "anything" })).toBe(false);
+    expect(usesAutomaticPrefixCache({ api: "openai-completions", id: "as1/claude-opus-5-5" })).toBe(false);
+    expect(usesAutomaticPrefixCache({ api: "openai-completions", id: "x", compat: { cacheControlFormat: "anthropic" } })).toBe(false);
+  });
+
+  it("reads the mode, auto by default, and refuses an unknown one", () => {
+    expect(stablePrefixMode({})).toBe("auto");
+    expect(stablePrefixMode({ PLC_SOL_PI_STABLE_PREFIX: "always" })).toBe("always");
+    expect(stablePrefixMode({ PLC_SOL_PI_STABLE_PREFIX: "off" })).toBe("off");
+    expect(() => stablePrefixMode({ PLC_SOL_PI_STABLE_PREFIX: "sometimes" })).toThrow(/auto, always, off/);
+  });
+
+  const result = (id: string, text: string) => ({
+    role: "toolResult" as const, toolCallId: id, toolName: "read", content: [{ type: "text" as const, text }], isError: false, timestamp: 0,
+  });
+  const reply = { role: "assistant" as const, content: [{ type: "text" as const, text: "ok" }], timestamp: 0 } as never;
+
+  it("keeps each tool result as first projected until the span changes", () => {
+    const stable = new StableToolResults();
+    const full = result("a", "x".repeat(20_000));
+    expect(stable.apply([full], "m#0")).toBeUndefined();
+    // Another handler replaced it on a later request: the first projection comes back.
+    const replaced = stable.apply([result("a", "[placeholder]"), reply, result("b", "new")], "m#0")!;
+    expect(replaced[0]).toEqual(full);
+    // A compaction (or another model) starts a new span: the placeholder is kept from then on.
+    expect(stable.apply([result("a", "[placeholder]")], "m#1")).toBeUndefined();
+    expect(stable.apply([result("a", "y".repeat(20_000))], "m#1")![0]).toEqual(result("a", "[placeholder]"));
+  });
+
+  it("keeps a large recalled page whole instead of folding it mid-span", () => {
+    const page = { id: `obs_${"a".repeat(24)}`, offset: 0, nextOffset: 15_000, eof: false };
+    const header = `[obs_recall id=${page.id} offset=0 next_offset=15000 eof=false]`;
+    const recall = { ...result("r", `${header}\n${"p".repeat(15_000)}`), toolName: "obs_recall", details: page };
+    const sends = new Map<string, number>();
+    const stable = new StableToolResults();
+    const history: unknown[] = [recall];
+    const projections: string[] = [];
+    for (let request = 0; request < 4; request += 1) {
+      const folded = foldStaleRecallPages(history as never, sends) ?? history;
+      const projected = stable.apply(folded as never, "gemini#0") ?? folded;
+      projections.push(JSON.stringify(projected[0]));
+      history.push(reply);
+    }
+    // Without the stable projection the page becomes a pointer at its third request.
+    const pointer = foldStaleRecallPages([recall, reply, reply] as never, new Map())![0] as typeof recall;
+    expect(pointer.content[0]!.text).toBe(recallPagePointer(page, Buffer.byteLength(recall.content[0]!.text)));
+    expect(new Set(projections).size).toBe(1);
+    expect(projections[0]).toContain("p".repeat(100));
   });
 });

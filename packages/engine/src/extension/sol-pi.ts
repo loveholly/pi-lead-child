@@ -204,6 +204,91 @@ export function foldStaleRecallPages(
   return folded;
 }
 
+// Stable prefix for providers with automatic prefix caching (prompt cache, 2026-11-12).
+//
+// ObservationPack (and foldStaleRecallPages above) rewrite a large tool result in the middle of the history at its
+// third request. Upstream PR #89 measured what that costs: the provider has already cached the prefix that holds the
+// full result, so the rewrite invalidates everything after it (one request re-billed 379k of a 475k-token prompt). On
+// Lead's own Gemini traffic, 123 such rewrites (11.5% of requests) lost 11.2M cached tokens, 37% of all misses of that
+// segment; 59% of them fell back to the fixed 64k prefix or to zero, because these providers do not resume a cache at
+// an arbitrary position. Claude is different (0.4%): Pi's explicit cache breakpoints catch the cache just before the
+// rewritten result, and upstream PR #121 tunes the send count for that case.
+//
+// So for automatic prefix caching, a tool result is projected the same way on every request until the cache starts
+// over anyway: the next compaction, or a switch to another model. The first projection of each tool result within that
+// span is kept and reused. A new large result is sent in full; a result that was already packed when the span began
+// keeps its placeholder. This is #89's "the projected prefix never changes", without its cost that the model never sees
+// a new result in full. Nothing upstream changes: the archive, the ledger and obs_recall work as before.
+export const SOL_PI_STABLE_PREFIX_ENV = "PLC_SOL_PI_STABLE_PREFIX";
+// auto: only for providers with automatic prefix caching. always: for every model. off: upstream behaviour.
+export const STABLE_PREFIX_MODES = ["auto", "always", "off"] as const;
+export type StablePrefixMode = (typeof STABLE_PREFIX_MODES)[number];
+
+export function stablePrefixMode(env: Record<string, string | undefined> = process.env): StablePrefixMode {
+  const raw = env[SOL_PI_STABLE_PREFIX_ENV]?.trim() ?? "";
+  if (raw === "") return "auto";
+  if (!(STABLE_PREFIX_MODES as readonly string[]).includes(raw)) {
+    throw new Error(`${SOL_PI_STABLE_PREFIX_ENV}=${raw}: use one of ${STABLE_PREFIX_MODES.join(", ")}`);
+  }
+  return raw as StablePrefixMode;
+}
+
+/**
+ * True when the provider caches prompt prefixes on its own (OpenAI, Azure OpenAI, DeepSeek, Gemini, most gateways),
+ * false when the request places explicit cache breakpoints: the Anthropic and Bedrock APIs, an OpenAI-compatible
+ * endpoint with Anthropic cache control, and Claude models behind an OpenAI-compatible proxy (the proxy turns the
+ * request into an Anthropic one with breakpoints; Lead's Claude traffic through such a proxy hits 99% of its cache).
+ */
+export function usesAutomaticPrefixCache(model: { api: string; id: string; compat?: unknown }): boolean {
+  if (model.api === "anthropic-messages" || model.api === "bedrock-converse-stream") return false;
+  const compat = model.compat as { cacheControlFormat?: unknown } | undefined;
+  if (compat?.cacheControlFormat === "anthropic") return false;
+  return !/claude/i.test(model.id);
+}
+
+type ToolResultContent = Extract<ContextMessage, { role: "toolResult" }>["content"];
+
+function sameContent(a: ToolResultContent, b: ToolResultContent): boolean {
+  if (a === b) return true;
+  if (a.length !== b.length) return false;
+  return a.every((block, index) => JSON.stringify(block) === JSON.stringify(b[index]));
+}
+
+/**
+ * Keeps the projection of each tool result fixed within one cache span. Call apply() once per context event, after
+ * every other context handler, with a span key that changes when the cache starts over (a compaction, another model).
+ * Returns the messages with each tool result as it was first projected in this span, or undefined when nothing changes.
+ */
+export class StableToolResults {
+  #span: string | null = null;
+  readonly #first = new Map<string, ToolResultContent>();
+
+  reset(): void {
+    this.#span = null;
+    this.#first.clear();
+  }
+
+  apply(messages: readonly ContextMessage[], span: string): ContextMessage[] | undefined {
+    if (span !== this.#span) {
+      this.#first.clear();
+      this.#span = span;
+    }
+    let changed: ContextMessage[] | undefined;
+    for (const [index, message] of messages.entries()) {
+      if (message.role !== "toolResult") continue;
+      const first = this.#first.get(message.toolCallId);
+      if (!first) {
+        this.#first.set(message.toolCallId, message.content);
+        continue;
+      }
+      if (sameContent(first, message.content)) continue;
+      changed ??= [...messages];
+      changed[index] = { ...message, content: first };
+    }
+    return changed;
+  }
+}
+
 // 加载装好的 SoL-Pi，按角色注册。没装、配置写错或加载失败时 SoL-Pi 关闭，Lead 和 Run 照常工作：
 // 省 token 不值得让它们起不来。出错时在 stderr 留一行说明；只是没装时不说话（测试和首次安装前都是这样）。
 export async function registerSolPi(
@@ -232,9 +317,35 @@ export async function registerSolPi(
         return messages ? { messages } : undefined;
       });
     }
+    const stableMode = settings.features.includes("observationPack") ? stablePrefixMode(env) : "off";
     const resolved = solPiConfig(config.DEFAULT_CONFIG as Record<string, unknown>, settings);
     (solPi.createSolPiExtension as (load: () => unknown) => (pi: ExtensionAPI) => void)(() => resolved)(pi);
+    if (stableMode !== "off") registerStablePrefix(pi, stableMode);
   } catch (error) {
     console.error(`[sol-pi] ${error instanceof Error ? error.message : String(error)}; SoL-Pi is off`);
   }
+}
+
+// Must run after SoL-Pi's context handler, which SoL-Pi registers at session_start: this session_start handler is
+// registered after SoL-Pi's, so the context handler it adds comes after SoL-Pi's in pi's chain.
+function registerStablePrefix(pi: ExtensionAPI, mode: Exclude<StablePrefixMode, "off">): void {
+  const stable = new StableToolResults();
+  let compactions = 0;
+  let registered = false;
+  pi.on("session_compact", () => {
+    compactions += 1;
+  });
+  pi.on("session_start", () => {
+    if (registered) return;
+    registered = true;
+    pi.on("context", (event, ctx) => {
+      const model = ctx.model;
+      if (!model || (mode === "auto" && !usesAutomaticPrefixCache(model))) {
+        stable.reset();
+        return undefined;
+      }
+      const messages = stable.apply(event.messages, `${model.provider}/${model.id}#${compactions}`);
+      return messages ? { messages } : undefined;
+    });
+  });
 }
