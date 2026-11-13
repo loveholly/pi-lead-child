@@ -757,10 +757,31 @@ export const ChannelCardDtoSchema = StrictObject({
   resolvedAt: Nullable(Type.String()),
   // 现在能做的动作。
   actions: Type.Array(Literals(CHANNEL_CARD_ACTIONS)),
+  // 在来源里打开这张卡最新的一条消息（「在 X 中打开」）：来源插件给的地址，只会是 https（sourceLink）。来源给不出时是 null；
+  // 旧的 daemon 不给。
+  link: Type.Optional(Nullable(Type.String())),
   createdAt: Type.String(),
   updatedAt: Type.String(),
 });
 export type ChannelCardDto = Static<typeof ChannelCardDtoSchema>;
+
+const SOURCE_LINK_MAX = 2048;
+
+/**
+ * 「在来源里打开」的地址（会话卡的 link、消息事件的 link）：只认 https，不带用户名和密码，最长 2048 字。
+ * 来源插件给的地址在 hub 里过一遍，界面打开以前再过一遍：别的协议（javascript:、file:、自定义的 scheme）一律不认。不合格时是 null。
+ */
+export function sourceLink(value: unknown): string | null {
+  if (typeof value !== "string" || value.length > SOURCE_LINK_MAX) return null;
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return null;
+  }
+  if (url.protocol !== "https:" || url.username || url.password || !url.hostname) return null;
+  return url.toString();
+}
 
 export const ChannelCardListResponseSchema = StrictObject({ items: Type.Array(ChannelCardDtoSchema) });
 export type ChannelCardListResponse = Static<typeof ChannelCardListResponseSchema>;

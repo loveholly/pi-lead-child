@@ -258,6 +258,8 @@ export class FakeSlack {
   sessionLive = true;
   // 认哪个会话 cookie。缺省是 FAKE_SLACK_SESSION_COOKIE；测试可以换成真实长度的（网页版的 d cookie 可能超过 1000 个字符）。
   sessionCookie = FAKE_SLACK_SESSION_COOKIE;
+  // 会话换到的工作区子域名。Enterprise Grid 下它和工作区网址的主机不一样，测试可以改它。
+  sessionDomain = "home";
   // 会话方式的 Web API 收到的方法名（不含令牌和 cookie）。
   readonly sessionCalls: string[] = [];
   private readonly now: () => Date;
@@ -377,7 +379,7 @@ export class FakeSlack {
     switch (method) {
       case "auth.test":
         return {
-          ok: true, user_id: this.self.id, user: "me", team_id: this.teamId, team: "Home",
+          ok: true, url: FAKE_SLACK_WORKSPACE_URL, user_id: this.self.id, user: "me", team_id: this.teamId, team: "Home",
           response_metadata: { scopes: [...this.scopes] },
         };
       case "files.info": {
@@ -773,7 +775,7 @@ export class FakeSlack {
       return Response.json({
         teams: {
           [this.teamId]: {
-            id: this.teamId, name: "Home", domain: "home", url: FAKE_SLACK_WORKSPACE_URL, user_id: this.self.id, token: FAKE_SLACK_SESSION_TOKEN,
+            id: this.teamId, name: "Home", domain: this.sessionDomain, url: FAKE_SLACK_WORKSPACE_URL, user_id: this.self.id, token: FAKE_SLACK_SESSION_TOKEN,
           },
         },
       });
