@@ -4,8 +4,8 @@
 //     「我从来没有说允许外部通道也能去通过我的 fairy 来发定时器」。
 //   - externalBy：这一轮带着的外部内容（spec D10），写明是哪些（给拒绝和确认卡看）：external 的那些，
 //     加上没有声明的工具（按外部内容算）。规则 4 看它。external 和 externalBy 在一轮里都只会加、不会减。
-//   - timer：用户本人设的跟进到点、只为它开的一轮（跟进的 inbox 编号）。这一轮算用户的一轮，凭 timer:<编号>
-//     （store 的 activePairedUserTurn 核对）。和外部通道的事混在同一轮时不算。
+//   - timer：用户本人设的跟进到点、用户本人设的后台检查叫醒 Lead 的一轮（叫醒它的 inbox 编号）。这一轮算用户的一轮，凭 timer:<编号>
+//     （store 的 activePairedUserTurn 核对）。和外部通道的事混在同一轮时也算（维护者 2026-11-04 定）；读过外部原文的规则 1–4 照旧。
 //   - externalEvents：交给这一轮的外部事件的编号（外部通道的消息事件、外部来源的定时器到点）。设定时器时据此记下这一轮读了哪条消息；
 //     只有 Lead 指明是哪条消息要的（工具的 event），才记成发信人要求的（2026-10-28）。
 // 规则：
@@ -27,7 +27,7 @@
 import {
   activePairedUserTurn, bindingScopes, CORE_KINDS, getBinding, getHostBypass, getTurn, type Db, type NoteKind, type PairedUserTurn,
 } from "@pi-lead-child/store";
-import { bindingOriginOf, type HostCommandTurnOrigin, type Scope, type TimerOrigin } from "@pi-lead-child/protocol";
+import { bindingOriginOf, isSystemTurnOrigin, type HostCommandTurnOrigin, type Scope, type TimerOrigin } from "@pi-lead-child/protocol";
 import {
   externalTimerOriginOf, externalTurnWhy, isLiveUserTurn, leadUserTurnOf, requestExternalTimer, requestRuleChangeConfirmation,
   RULE_CHANGE_CONFIRM_NEXT, ruleChangeRefusalText, setTimer,
@@ -46,6 +46,8 @@ export interface LeadTurnOrigin {
 export interface TurnOriginDeps {
   currentTurnId?: () => string | null;
   turnOrigin?: () => LeadTurnOrigin;
+  // 给 authorityTurnId 认出当前的一轮是不是 Lead 自己的系统轮次。
+  db?: Db;
 }
 
 // 每个 Lead 工具在这里声明它的输出算不算外部内容（spec D10）：由代码定，不让模型判断。daemon 在 tool_execution_start 记，
@@ -271,12 +273,23 @@ export function turnOriginOf(deps: TurnOriginDeps): LeadTurnOrigin {
   return deps.turnOrigin?.() ?? { external: false, timer: null };
 }
 
-/** 凭哪一轮代用户做：用户本人当前的一轮；用户设的跟进到点、只为它开的一轮是 timer:<编号>。都不是时为 null。 */
+/**
+ * 凭哪一轮代用户做：用户本人当前的一轮；用户设的跟进到点、用户设的后台检查叫醒的一轮是 timer:<编号>，带着外部内容时也是
+ * （维护者 2026-11-04 定）。都不是时为 null。
+ */
 export function authorityTurnId(deps: TurnOriginDeps): string | null {
   const current = deps.currentTurnId?.() ?? null;
-  if (current) return current;
   const origin = turnOriginOf(deps);
-  return origin.timer !== null && !origin.external ? `timer:${origin.timer}` : null;
+  const timer = origin.timer !== null ? `timer:${origin.timer}` : null;
+  // 这一轮里 Lead 一调改东西的工具，daemon 就把它落成一条系统轮次（materializeBufferedSystemTurn），currentTurnId 成了那一条：
+  // 系统轮次凭不了用户，凭的仍是 timer:<编号>。用户插话开的一轮照旧优先。
+  if (current && !(timer && deps.db && isSystemTurn(deps.db, current))) return current;
+  return timer;
+}
+
+function isSystemTurn(db: Db, turnId: string): boolean {
+  const row = db.prepare("SELECT origin_kind FROM channel_turns WHERE id=?").get(turnId) as { origin_kind: string } | undefined;
+  return isSystemTurnOrigin(row?.origin_kind);
 }
 
 function userTurn(db: Db, deps: TurnOriginDeps, label: string, scope: Scope): PairedUserTurn | null {

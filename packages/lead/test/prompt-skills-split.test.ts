@@ -46,6 +46,8 @@ describe("skills split out of the Lead system prompt", () => {
       "outward",
       "「业务地图」",
       "先看上下文包再判断",
+      // 「自动代你处理」关着时，用户这一轮要回 ✅ 该用哪个工具（评审，2026-11-03）。
+      "用户本人这一轮要回 ✅ 时用 mark_channel_card_handled",
     ]) {
       expect(skill).toContain(rule);
       expect(LEAD_SYSTEM_PROMPT).not.toContain(rule);

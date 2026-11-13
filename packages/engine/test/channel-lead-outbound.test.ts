@@ -6,13 +6,17 @@
 //   - Lead 在事件轮里发给别人的话（不是回复来源）：不冒充用户确认过，署名写 auto-reply。
 //   - 状态消息「正在处理」只在 Lead 派活时发；系统不派活（工单 06 删了兜底）。
 //   - Lead 用通用工具关掉的请求（判断不用回），以后也没有系统的动作。
+//   - 「自动代你处理」关着（issue 07）：上面这些 Lead 自己的动作都不往来源里发（回表情、改消息、卡上的发送、「已处理」的 ✅、
+//     「正在处理」、子 agent 结果的代发）。你本人的动作照常。
 // 真的 SQLite、真的 Slack 来源插件、假的 Slack、假的 SmartModel（假 Jev）、假的派单器。
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { tempDir } from "@pi-lead-child/core/testing";
-import { MESSAGE_EVENT_KIND } from "@pi-lead-child/protocol";
+import { CHANNEL_HANDBOOK_DEFAULTS, MESSAGE_EVENT_KIND } from "@pi-lead-child/protocol";
 import { getChannelCard, listEvents, openDb, type Db } from "@pi-lead-child/store";
-import { ChannelHub, ChannelRegistry, createSlackChannelAdapter, type ChannelHubOptions } from "../src/index.js";
+import {
+  CHANNEL_HANDLING_PURPOSE, ChannelHub, ChannelRegistry, createSlackChannelAdapter, runUiAction, type ChannelHubOptions,
+} from "../src/index.js";
 import { agentTaskResult, cardIdOf, FakeAgentTaskDispatcher, FakeSlack, scriptedSmartModel, type ScriptedSmartModel } from "../testing/index.js";
 
 let db: Db;
@@ -226,5 +230,89 @@ describe("a card with a dispatched sub-agent waits for its result", () => {
     await channels.idle();
     const done = await channels.leadDisposed(item.event, { disposition: "handled", reason: "在会话里告诉用户了，他说自己回" });
     expect(done).toMatchObject({ cardId: item.cardId, state: "handled" });
+  });
+});
+
+describe("Lead does nothing outward by itself when auto-handling is off", () => {
+  const autoHandling = (on: boolean) => runUiAction(db, {
+    target: { type: "channel_handbook", id: "handbook" }, action: "update", caller: { kind: "user" },
+    input: { ...CHANNEL_HANDBOOK_DEFAULTS, autoReply: on },
+  });
+  const reactions = () => slack.calls.filter((call) => call.method === "reactions.add");
+
+  it("refuses Lead's own reaction and edit, closes a handled card without ✅; the user's reaction still goes", async () => {
+    const channels = hub(jev());
+    const ivy = await receive(channels, slack.dm("U0IVYLIN", "按照下面映射关系，发相应的 slack 消息"));
+    const objectKey = getChannelCard(db, ivy.cardId)!.objectKey;
+    await autoHandling(false);
+    const off = { code: "invalid_action", message: expect.stringMatching(/自动代你处理关着.*notify_user/u) };
+    await expect(channels.react(objectKey, { emoji: "eyes", by: "lead" })).rejects.toMatchObject(off);
+    await expect(channels.editMessage(objectKey, { ref: "1792000000.000100", text: "改一下", words: "assistant", by: "lead", forUser: false }))
+      .rejects.toMatchObject(off);
+    expect(getChannelCard(db, ivy.cardId)).toMatchObject({ state: "open" });
+    expect(slack.sent()).toEqual([]);
+    expect(reactions()).toEqual([]);
+
+    const done = await channels.leadDisposed(messageEventOf(ivy.cardId), { disposition: "handled", reason: "在别处发完了" });
+    expect(done).toMatchObject({ cardId: ivy.cardId, state: "handled" });
+    expect(reactions()).toEqual([]);
+
+    const nina = await receive(channels, slack.dm("U0NINA", "收到"));
+    const mine = await channels.react(getChannelCard(db, nina.cardId)!.objectKey, { emoji: "+1", by: "user" });
+    expect(mine).toMatchObject({ emoji: "+1" });
+    expect(reactions()).toHaveLength(1);
+  });
+
+  // 卡上的「发送」和 reply_to_source 结果一样（2026-11-04 定）：放到卡上等用户点发送，Lead 拿到 drafted 和下一步，不抛错。
+  it("keeps Lead's send_draft and send_edited on the card for the user to send, like reply_to_source", async () => {
+    const channels = hub(jev());
+    const ivy = await receive(channels, slack.dm("U0IVYLIN", "按照下面映射关系，发相应的 slack 消息"));
+    await autoHandling(false);
+    const edited = await channels.act(ivy.cardId, "send_edited", { by: "lead", forUser: false, text: "发了。" });
+    expect(edited).toMatchObject({ state: "open", draft: { text: "发了。", drafter: "lead" }, drafted: expect.stringMatching(/自动代你处理关着.*等用户点发送/u) });
+    const drafted = await channels.act(ivy.cardId, "send_draft", { by: "lead", forUser: false });
+    expect(drafted).toMatchObject({ state: "open", draft: { text: "发了。" }, drafted: expect.stringMatching(/放到了卡 #\d+ 上/u) });
+    expect(slack.sent()).toEqual([]);
+    expect(pushes.filter((push) => push.cardId === ivy.cardId).at(-1)).toMatchObject({ body: expect.stringContaining("等你点发送") });
+
+    // 用户自己在卡上点「发送」照常发。
+    const mine = await channels.act(ivy.cardId, "send_draft", { by: "user via Mac 网页" });
+    expect(mine).toMatchObject({ state: "replied" });
+    expect(mine.drafted).toBeUndefined();
+    expect(sentTexts("D0IVYLIN")).toHaveLength(1);
+  });
+
+  it("says no 「正在处理」 for a dispatch, and hands a confident result back instead of sending it", async () => {
+    const channels = hub(jev());
+    await autoHandling(false);
+    const yi = await receive(channels, slack.dm("U0ETHAN", "orders 今天上线了吗？"));
+    const event = messageEventOf(yi.cardId);
+    const task = await channels.leadDispatch(event, { summary: "查 orders 今天有没有上线", intent: "progress" });
+    await channels.idle();
+    expect(slack.sent()).toEqual([]);
+    await dispatcher.finish(task.runId, { result: agentTaskResult({ replyDraft: "orders 今天已经上线了。" }) });
+    await channels.idle();
+    expect(slack.sent()).toEqual([]);
+    expect(getChannelCard(db, yi.cardId)).toMatchObject({ state: "open" });
+    expect(listEvents(db, { kind: "channel.task.finished" })).toMatchObject([{ level: "tell", payload: { handedBack: true, messageEvent: event } }]);
+  });
+
+  it("does not send 「正在处理」 when the switch is turned off while the notice is still being worded", async () => {
+    const model = jev();
+    let worded!: () => void;
+    const wording = new Promise<void>((resolve) => { worded = resolve; });
+    const channels = hub({
+      ...model,
+      decide: async (state, questions, options) => {
+        if (options?.purpose === CHANNEL_HANDLING_PURPOSE) await wording;
+        return model.decide(state, questions, options);
+      },
+    });
+    const yi = await receive(channels, slack.dm("U0ETHAN", "orders 今天上线了吗？"));
+    await channels.leadDispatch(messageEventOf(yi.cardId), { summary: "查 orders 今天有没有上线", intent: "progress" });
+    await autoHandling(false);
+    worded();
+    await channels.idle();
+    expect(slack.sent()).toEqual([]);
   });
 });

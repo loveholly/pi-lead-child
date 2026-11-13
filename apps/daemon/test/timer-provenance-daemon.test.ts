@@ -9,12 +9,12 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { tempDir } from "@pi-lead-child/core/testing";
 import { createLeadTools } from "@pi-lead-child/lead";
-import { withCallObserver } from "@pi-lead-child/engine";
+import { runUiAction, wakeLeadForWatch, withCallObserver } from "@pi-lead-child/engine";
 import { FakeSlack, scriptedSmartModel } from "@pi-lead-child/engine/testing";
-import { MESSAGE_EVENT_KIND } from "@pi-lead-child/protocol";
+import { CHANNEL_HANDBOOK_DEFAULTS, MESSAGE_EVENT_KIND } from "@pi-lead-child/protocol";
 import {
-  completeTurn, createLoopbackBinding, createTurn, getLeadProfile, getOpenChannelCard, getStandingOrder, listEvents, listInbox, listNotifications, openDb,
-  recordDecisionModelCall, type Db,
+  completeTurn, createLoopbackBinding, createTurn, finishWatchCheck, getLeadProfile, getOpenChannelCard, getStandingOrder, listEvents, listInbox,
+  listNotifications, openDb, recordDecisionModelCall, startWatchCheck, type Db,
 } from "@pi-lead-child/store";
 import { startDaemon } from "../src/server.js";
 import { fakePiLead, type FakeCall, type FakeReply } from "./fake-pi-session.js";
@@ -221,5 +221,114 @@ describe("Lead's own messages go out directly in any turn: Lead judges, no outbo
     await vi.waitFor(() => expect(slack.sent("C0PROJ")).toHaveLength(1), { timeout: 10_000 });
     expect(slack.sent("C0PROJ")[0]!.text).toContain("confirmed by");
     expect(getOpenChannelCard(db, "slack:C0PROJ:main")).toBeUndefined();
+  }, 30_000);
+});
+
+// 「自动代你处理」关着（issue 07）：Lead 不在用户这一轮里什么都不往外发。维护者定（2026-11-04）：用户本人设的后台检查（watch）到点
+// 叫醒的一轮、和外部内容合在同一轮的用户跟进，都按 setBy 算用户的一轮，和 timer: 一样，照常发。Lead 自己设的检查照旧被拦。
+describe("auto-handling off: a watch or follow-up the user set still sends", () => {
+  const autoHandlingOff = () => runUiAction(db, {
+    target: { type: "channel_handbook", id: "handbook" }, action: "update", caller: { kind: "user" },
+    input: { ...CHANNEL_HANDBOOK_DEFAULTS, autoReply: false },
+  });
+  const NOTE = "部署没通过就在 #proj-x 说一声";
+  // 按 cron 排到明年：检查本身不会在测试里跑命令。fireWatch 写下一次没通过的检查，和后台检查的执行器一样叫醒 Lead。
+  const WATCH = { label: "proj-x 的部署", check: "command", command: "true", mode: "repeat", cron: "0 0 1 1 *", note: NOTE };
+  const fireWatch = (id: number) => {
+    const now = new Date();
+    const finished = finishWatchCheck(db, { checkId: startWatchCheck(db, id, now)!, status: "fail", exitCode: 1, output: "deploy failed", now })!;
+    wakeLeadForWatch(db, finished, finished.decision.wake!);
+  };
+  // 被拒时工具抛错：记下错误的话。
+  const sendToProj = (live: (name: string) => any) => live("send_channel_message").execute("call", {
+    conversation: "slack:C0PROJ:main", text: "部署没通过，在查。", words: "assistant", reason: "用户让我盯着部署，没通过就说一声",
+  }).then(parsed, (error: Error) => ({ isError: true, message: error.message }));
+
+  // 回归：用户设的检查到点那一轮以前是系统的一轮，开关关着时 Lead 发不出去（被拒，改用 notify_user）。
+  it("sends in the turn a watch the user set wakes", async () => {
+    const slack = new FakeSlack();
+    let sent: any = null;
+    const { owner, tool } = await boot(slack, async (call, live) => {
+      if (!sent && call.inputs.some((input) => input.includes(NOTE))) sent = await sendToProj(live);
+      return { say: "NO_REPLY" };
+    });
+    await autoHandlingOff();
+    createTurn(db, { id: "turn-set", originBindingId: owner.binding.id, originKind: "paired:companion", userText: NOTE, state: "streaming" });
+    const set = await tool("watch", "turn-set").execute("call", WATCH);
+    expect(set.isError).toBeUndefined();
+    completeTurn(db, "turn-set");
+    fireWatch(1);
+
+    await vi.waitFor(() => expect(sent).not.toBeNull(), { timeout: 10_000 });
+    expect(sent).toMatchObject({ isError: false, authority: "on_behalf", result: { sent: { outcome: "sent" } } });
+    await vi.waitFor(() => expect(slack.sent("C0PROJ")).toHaveLength(1), { timeout: 10_000 });
+    expect(slack.sent("C0PROJ")[0]!.text).toContain("confirmed by");
+  }, 30_000);
+
+  // 不变：Lead 自己设的检查到点那一轮只有 Lead 自己的权限，开关关着时照旧不发。
+  it("still refuses in the turn a watch Lead set itself wakes", async () => {
+    const slack = new FakeSlack();
+    let sent: any = null;
+    const { tool } = await boot(slack, async (call, live) => {
+      if (!sent && call.inputs.some((input) => input.includes(NOTE))) sent = await sendToProj(live);
+      return { say: "NO_REPLY" };
+    });
+    await autoHandlingOff();
+    const set = await tool("watch", null).execute("call", WATCH);
+    expect(set.isError).toBeUndefined();
+    fireWatch(1);
+
+    await vi.waitFor(() => expect(sent).not.toBeNull(), { timeout: 10_000 });
+    expect(sent).toMatchObject({ isError: true, message: expect.stringContaining("自动代你处理关着") });
+    expect(slack.sent("C0PROJ")).toEqual([]);
+  }, 30_000);
+
+  // 回归：用户设的跟进到点，这一轮又读进了外部内容（这里是 Slack 的对话），以前就不算用户的一轮了，开关关着时发不出去。
+  it("sends in the turn a follow-up the user set wakes, after external content joins it", async () => {
+    const slack = new FakeSlack();
+    let read = false;
+    let sent: any = null;
+    const { owner, tool } = await boot(slack, async (call, live) => {
+      if (!read && call.inputs.some((input) => input.includes(NOTE))) {
+        read = true;
+        return { tools: ["read_channel_conversation"] };
+      }
+      if (read && !sent) sent = await sendToProj(live);
+      return { say: "NO_REPLY" };
+    });
+    await autoHandlingOff();
+    createTurn(db, { id: "turn-set", originBindingId: owner.binding.id, originKind: "paired:companion", userText: NOTE, state: "streaming" });
+    await tool("follow_up", "turn-set").execute("call", { at: new Date(Date.now() - 1_000).toISOString(), note: NOTE });
+    completeTurn(db, "turn-set");
+
+    await vi.waitFor(() => expect(sent).not.toBeNull(), { timeout: 10_000 });
+    expect(sent).toMatchObject({ isError: false, authority: "on_behalf", result: { sent: { outcome: "sent" } } });
+    await vi.waitFor(() => expect(slack.sent("C0PROJ")).toHaveLength(1), { timeout: 10_000 });
+  }, 30_000);
+
+  // 回归：真的会话里工具先发 tool_execution_start 再执行。改东西的工具一开始，daemon 就把这一轮落成系统轮次，currentTurnId 成了它，
+  // 以前 timer:<编号> 就被它盖住了：用户设的跟进、检查到点那一轮，Lead 发的话按 Lead 自己的算。fake 会话只发事件、不执行，所以先发一次
+  // 事件，再调工具。
+  it("keeps the user's turn after Lead's first state-changing tool turns the run into a system turn", async () => {
+    const slack = new FakeSlack();
+    let started = false;
+    let sent: any = null;
+    const { owner, tool } = await boot(slack, async (call, live) => {
+      if (!started && call.inputs.some((input) => input.includes(NOTE))) {
+        started = true;
+        return { tools: ["send_channel_message"] };
+      }
+      if (started && !sent) sent = await sendToProj(live);
+      return { say: "NO_REPLY" };
+    });
+    await autoHandlingOff();
+    createTurn(db, { id: "turn-set", originBindingId: owner.binding.id, originKind: "paired:companion", userText: NOTE, state: "streaming" });
+    await tool("watch", "turn-set").execute("call", WATCH);
+    completeTurn(db, "turn-set");
+    fireWatch(1);
+
+    await vi.waitFor(() => expect(sent).not.toBeNull(), { timeout: 10_000 });
+    expect(sent).toMatchObject({ isError: false, authority: "on_behalf", result: { sent: { outcome: "sent" } } });
+    await vi.waitFor(() => expect(slack.sent("C0PROJ")).toHaveLength(1), { timeout: 10_000 });
   }, 30_000);
 });

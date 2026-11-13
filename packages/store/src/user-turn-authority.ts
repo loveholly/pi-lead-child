@@ -22,7 +22,12 @@ export interface PairedUserTurn {
 // timer:<跟进的 inbox 编号>。这个编号由 daemon 给，Lead 填不了。跟进要是在用户本人的一轮里设的（payload.setBy，inbox.ts 的
 // addLeadFollowUp），凭的是设它那一轮来自的配对凭证：凭证作废了、scope 不够、跟进取消了或者还没到点都不算。
 // 这一轮开始的时间按设它的那一轮算：之后才出现的东西（例如新的审批），用户设定时器时没见过。
+// 用户本人设的后台检查叫醒 Lead 也一样（维护者 2026-11-04 定）：凭的是叫醒它的那一行 inbox（命令检查的结果 watch_result，
+// 子代理检查交回的 run_finished），payload.setBy 是设检查那一轮（engine 的 watch-runner.ts、daemon 的 run-finished.ts）。
 export const SCHEDULED_TURN_PREFIX = "timer:";
+
+// 带 setBy 时能凭 timer:<编号> 算用户一轮的 inbox：用户设的跟进，和用户设的后台检查叫醒 Lead 的那一行。
+const USER_SET_TIMER_KINDS: ReadonlySet<unknown> = new Set(["lead_followup", "watch_result", "run_finished"]);
 
 /** 跟进记下的「谁设的」：用户本人那一轮的编号、来自的凭证、那一轮开始的时间。 */
 export interface FollowUpSetBy {
@@ -43,12 +48,13 @@ function scheduledUserTurn(db: Db, turnId: string, label: string, scope: Scope):
     payload = {};
   }
   const setBy = payload.setBy;
-  if (!row || payload.kind !== "lead_followup" || !setBy || typeof setBy.bindingId !== "number" || typeof setBy.startedAt !== "string") {
+  if (!row || !USER_SET_TIMER_KINDS.has(payload.kind) || !setBy || typeof setBy.bindingId !== "number" || typeof setBy.startedAt !== "string") {
     throw new Error(`${label} ${turnId} is not a follow-up the user set in their own turn`);
   }
   // 取消的跟进：inbox 行是 consumed，取消记在 disposition 里（inbox.ts 的 cancelLeadFollowUp）。
   if (payload.disposition?.kind === "cancelled") throw new Error(`${label} ${turnId} was cancelled`);
-  if (typeof payload.notBefore !== "string" || payload.notBefore > new Date().toISOString()) {
+  // 检查叫醒 Lead 时就已经到点了，没有 notBefore。
+  if (payload.kind === "lead_followup" && (typeof payload.notBefore !== "string" || payload.notBefore > new Date().toISOString())) {
     throw new Error(`${label} ${turnId} is not due yet`);
   }
   const binding = db.prepare("SELECT status, kind, origin, scopes FROM bindings WHERE id=?").get(setBy.bindingId) as {
