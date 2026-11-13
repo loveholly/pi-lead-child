@@ -6492,6 +6492,8 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     await agentTasks.close();
     closeStep = "stopping the channels";
     await stopChannels(startedChannels);
+    // 通道停了：收不到事件的提醒不用再等（定时器不留到关库以后）。
+    channelSettings.stop();
     closeStep = "stopping the channel memory";
     await channelMemory?.stop();
     network.stop();

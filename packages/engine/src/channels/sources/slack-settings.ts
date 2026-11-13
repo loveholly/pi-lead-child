@@ -6,15 +6,18 @@
 //   3. 权限：auth.test 的结果里 response_metadata.scopes（WebClient 从 x-oauth-scopes 头取的）和要求的清单比，列出缺的。
 //   4. apps.connections.open（App-Level Token）：成功即可（拿到的地址不用）。
 // 结果里的文字不含令牌：先把这次的两个令牌原样换掉，再按通用的规则脱敏。
+// 连上了却一直收不到事件时（daemon 判断），设置页显示 noEventsWarning：这段时间没人发消息可以忽略；否则查用户事件的订阅、
+// User Token Scopes，别人也装了这个应用时还有 App-Level Token 的 authorizations:read（visibleToUser 要用它）。
 // 浏览器会话方式（2026-11-02）另有一份：只要会话 cookie，检查见 createSlackSessionSettings。
 import { SLACK_APP_TOKEN_ENV, SLACK_SESSION_COOKIE_ENV, SLACK_USER_TOKEN_ENV } from "@pi-lead-child/core";
 import {
-  CHANNEL_SECRET_MAX_LENGTH, type ChannelSecretCheck, type ChannelSecretsTestResult, type ChannelSourceAccount,
+  CHANNEL_SECRET_MAX_LENGTH, CHANNEL_SETUP_URL_MAX, type ChannelSecretCheck, type ChannelSecretsTestResult, type ChannelSourceAccount,
 } from "@pi-lead-child/protocol";
 import type { ChannelSecretSpec, ChannelSettingsSpec } from "../types.js";
 import { ASSISTANT_NAME_DEFAULT } from "../disclosure.js";
 import { createGabrielCore, gabrielErrorOf, type SlackSessionNetwork } from "./slack-gabriel.js";
 import { SLACK_SESSION_COOKIE_PREFIX } from "./slack-session.js";
+import { slackSettingsMessages } from "./slack-settings.messages.js";
 import { scrubSlackText, type SlackWebApi } from "./slack-web-api.js";
 
 /** Slack 通道要的用户权限（user scopes）。清单和设置页的检查都用它。 */
@@ -40,18 +43,27 @@ export const SLACK_USER_EVENTS = ["message.channels", "message.groups", "message
 /** 建 Slack 应用的网页。 */
 export const SLACK_SETUP_URL = "https://api.slack.com/apps";
 
+/**
+ * 带上清单的建应用链接：打开就是从清单建应用，权限和用户事件都填好了（Slack 文档 app-manifests 的
+ * 「new_app=1&manifest_yaml=<URL 编码的 YAML>」）。太长（超过 CHANNEL_SETUP_URL_MAX）时退回不带清单的网页，用户复制清单。
+ */
+export function slackSetupUrl(manifest: string): string {
+  const url = `${SLACK_SETUP_URL}?new_app=1&manifest_yaml=${encodeURIComponent(manifest)}`;
+  return url.length <= CHANNEL_SETUP_URL_MAX ? url : SLACK_SETUP_URL;
+}
+
 const SECRETS: readonly ChannelSecretSpec[] = [
   {
     name: SLACK_APP_TOKEN_ENV,
     label: "App-Level Token",
     prefix: "xapp-",
-    hint: "在应用的 Basic Information → App-Level Tokens 点 Generate Token and Scopes，加 connections:write 和 authorizations:read（别人也装了这个应用时，用它认出哪些消息是你能看到的）。",
+    hint: (locale) => slackSettingsMessages(locale).appTokenHint,
   },
   {
     name: SLACK_USER_TOKEN_ENV,
     label: "User OAuth Token",
     prefix: "xoxp-",
-    hint: "在应用的 OAuth & Permissions 点 Install to Workspace，授权以后复制 User OAuth Token（不是 Bot User OAuth Token）。",
+    hint: (locale) => slackSettingsMessages(locale).userTokenHint,
   },
 ];
 
@@ -245,7 +257,10 @@ export function createSlackSettings(input: {
   return {
     secrets: SECRETS,
     get manifest() { return slackAppManifest(input.ownerName, assistantName()); },
-    setupUrl: SLACK_SETUP_URL,
+    get setupUrl() { return slackSetupUrl(slackAppManifest(input.ownerName, assistantName())); },
+    setupNote: (locale) => slackSettingsMessages(locale).setupNote(SLACK_USER_EVENTS),
+    // 2026-11-02：手建应用时没有订阅用户事件、没有加 User Token Scopes，Socket 连上了却一个事件都收不到，哪里都没说。
+    noEventsWarning: (locale) => slackSettingsMessages(locale).noEvents(SLACK_USER_EVENTS, SLACK_USER_SCOPES),
     test,
   };
 }
@@ -256,7 +271,7 @@ const SESSION_SECRETS: readonly ChannelSecretSpec[] = [
     name: SLACK_SESSION_COOKIE_ENV,
     label: "Slack 会话",
     prefix: SLACK_SESSION_COOKIE_PREFIX,
-    hint: "在设置 → 消息通道 → Slack 里点「登录 Slack」，在弹出的窗口里登录。它等于你整个 Slack 账号的权限，只存在这台 Mac 上。",
+    hint: (locale) => slackSettingsMessages(locale).sessionCookieHint,
     // 网页版的 d cookie 可能超过 1000 个字符（#220）：用协议的上限。
     maxLength: CHANNEL_SECRET_MAX_LENGTH,
   },

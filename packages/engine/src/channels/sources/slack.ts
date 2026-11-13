@@ -1786,6 +1786,8 @@ export function createSlackChannelAdapter(options: SlackChannelOptions): Channel
       const event = envelope.event;
       if (!event || event.type !== "message" || !isString(event.channel)) return [];
       if (!await visibleToUser(envelope, context)) return [];
+      // 用户本人能看到的事件（补拉的没有 event_id，不算）：设置页据此知道事件订阅是通的。
+      if (delivery.transport === "socket" && isString(envelope.event_id)) socketTransport?.userEvent();
       const channel = event.channel;
       const channelType = isString(event.channel_type) ? event.channel_type : "channel";
       if (event.subtype === "message_changed" || event.subtype === "message_deleted") {

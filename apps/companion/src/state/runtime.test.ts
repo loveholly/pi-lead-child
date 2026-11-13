@@ -1699,9 +1699,9 @@ describe('agent logs', () => {
       return {
         source: 'slack', label: 'Slack', status,
         account: status === 'connected' ? { userId: 'U1', userName: 'bin', teamId: 'T1', teamName: 'Acme' } : null,
-        missingScopes: [], lastError: null, lastConnectedAt: null,
+        missingScopes: [], lastError: null, lastConnectedAt: null, noEventsWarning: null,
         secrets: [{ name: 'PLC_SLACK_APP_TOKEN', label: 'App-Level Token', prefix: 'xapp-', hint: '', present: status !== 'not_configured', origin: status === 'not_configured' ? null : 'vault' }],
-        manifest: null, setupUrl: null, editable: true,
+        manifest: null, setupUrl: null, setupNote: null, editable: true,
       };
     }
 

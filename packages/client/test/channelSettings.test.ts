@@ -46,12 +46,14 @@ const source: ChannelSourceSettingsDto = {
   missingScopes: [],
   lastError: null,
   lastConnectedAt: '2026-10-20T03:00:00.000Z',
+  noEventsWarning: null,
   secrets: [
     { name: 'PLC_SLACK_APP_TOKEN', label: 'App-Level Token', prefix: 'xapp-', hint: 'Basic Information → App-Level Tokens', present: true, origin: 'vault' },
     { name: 'PLC_SLACK_USER_TOKEN', label: 'User OAuth Token', prefix: 'xoxp-', hint: 'OAuth & Permissions', present: true, origin: 'keychain' },
   ],
   manifest: 'display_information:\n  name: test',
   setupUrl: 'https://api.slack.com/apps',
+  setupNote: null,
   editable: true,
 };
 

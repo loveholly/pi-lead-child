@@ -12,7 +12,7 @@
 //   6. 出站动作：回复、撤回。必须幂等：内核每次都带同一个幂等键重试，适配器要保证重复调用在来源里只做一次。
 // 来源插件另外提供默认常设指令（打断阈值、投递、代你行动的参数）和回复模板的白名单，
 // 还可以声明凭据设置（settings：要哪些密钥、怎么校验、建应用的清单），设置页按它保存密钥、热重连。
-import type { ChannelCardState, ChannelSecretsTestResult, EventKindDefinition, SenderTrust } from "@pi-lead-child/protocol";
+import type { ChannelCardState, ChannelSecretsTestResult, EventKindDefinition, Locale, SenderTrust } from "@pi-lead-child/protocol";
 import type { SystemStandingOrderSeed } from "@pi-lead-child/store";
 
 /** 来源推来的一次投递（例如一次 webhook 请求），原样交给适配器。头的名字都是小写。 */
@@ -342,6 +342,8 @@ export interface ChannelTransportContext {
   log(line: string): void;
   // 连接的状态变了。daemon 记下来给设置页看；hub 自己的 transportContext 不给。
   status?(update: ChannelTransportStatus): void;
+  // 这次连上以后收到了第一个来源的事件（连接的控制消息不算）。daemon 记下来：连上了却一直收不到事件时，设置页提醒检查订阅。
+  received?(): void;
 }
 
 /** 断线这段时间的补拉没补全（ChannelTransportContext.catchUpIncomplete）。reasons 是来源写的话，不含外部的原文。 */
@@ -375,8 +377,8 @@ export interface ChannelSecretSpec {
   label: string;
   // 应该以什么开头（界面提示用；校验在 test 里做）。
   prefix: string;
-  // 在哪里生成它（给人看的一句话）。
-  hint: string;
+  // 在哪里生成它（给人看的一句话，按界面语言）。
+  hint(locale: Locale): string;
   // 值最多多少个字符（daemon 查）。缺省是 CHANNEL_TOKEN_MAX_LENGTH（令牌）；浏览器会话的 cookie 这类长的密钥声明更大的，
   // 但不超过协议的 CHANNEL_SECRET_MAX_LENGTH（请求体本身的上限）。
   maxLength?: number;
@@ -396,6 +398,10 @@ export interface ChannelSettingsSpec {
   readonly manifest: string | null;
   // 建应用的网页。没有时是 null。
   readonly setupUrl: string | null;
+  // 建应用的要点（给人看，按界面语言），设置页放在建应用的链接下面。没有时不显示。
+  setupNote?(locale: Locale): string;
+  // 存了令牌、连上了很久，却一个事件都没收到时，设置页上的提醒（多半是应用没有订阅事件）：该查哪里、怎样验证。没有时不提醒。
+  noEventsWarning?(locale: Locale): string;
   /**
    * 用给的密钥（按名字）做一遍检查：格式、来源认不认、是不是用户本人的、权限够不够。不保存，不建长连接。
    * daemon 先把请求里没给的密钥用现在生效的值补上（保险库 → 环境变量 → Keychain），所以这里缺的就是哪里都没有：

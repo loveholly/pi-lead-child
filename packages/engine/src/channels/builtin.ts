@@ -26,7 +26,7 @@ export type { SlackSignInBrowser, SlackSignInOptions, SlackSignInWindow } from "
 export type { SlackSessionTransportOptions } from "./sources/slack-session-transport.js";
 export { createSlackWebApi, scrubSlackText, slackSdkLogger } from "./sources/slack-web-api.js";
 export {
-  createSlackSettings, SLACK_OPTIONAL_USER_SCOPES, SLACK_SETUP_URL, SLACK_USER_EVENTS, SLACK_USER_SCOPES, slackAppManifest,
+  createSlackSettings, SLACK_OPTIONAL_USER_SCOPES, SLACK_SETUP_URL, SLACK_USER_EVENTS, SLACK_USER_SCOPES, slackAppManifest, slackSetupUrl,
 } from "./sources/slack-settings.js";
 export type { SlackFetch, SlackWebApiOptions } from "./sources/slack-web-api.js";
 export { createSlackSocketTransport } from "./sources/slack-socket.js";
