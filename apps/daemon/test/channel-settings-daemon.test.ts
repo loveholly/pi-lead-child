@@ -57,7 +57,7 @@ async function boot(slack: FakeSlack, keychain?: Record<string, string>) {
     dataDir: dir, dbPath, gatewayPort: 0, log: (line) => logs.push(line), triageShadow: false,
     sessionFactory: fakePiLead(async () => ({ say: "好的。" })).factory as never,
     channels: {
-      live: { fetch: slack.fetch, socket: { createClient: slack.createSocketClient, retryBaseMs: 5, retryMaxMs: 50 } },
+      live: { fetch: slack.fetch, socket: { createClient: slack.createSocketClient, retryBaseMs: 5, retryMaxMs: 50, catchUpSpacingMs: 0 } },
       ...(keychain ? { keychain: (name: string) => keychain[name] ?? null } : {}),
     },
   });

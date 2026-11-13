@@ -3,11 +3,12 @@
 //   1. 消息帧（type 是 message）按收到的顺序一个一个换成投递（toDelivery，和 Events API 一样的 event_callback），
 //      交给 hub 的进程内入口。网页版没有 ack，也不重发：hub 按投递编号去重。
 //   2. 每次连上（gabriel 的 hello）以后补拉（afterReconnect），排在投递队列里；补完告诉 gabriel 这一轮连接准备好了（markReady）。
+//      交给补拉这次断线的真实时段（outage：连着的连接第一次断开、重新连上的时刻、断了几次）。
 //   3. 连接的状态报给 host.status（设置页）。会话失效（cookie 换不出令牌，gabriel 停在 AUTH_DEAD）时报错：
 //      「会话已失效，请重新登录」，不再重试，等用户在设置页重新登录（daemon 换了凭据以后先 stop 再 start）。
 //   4. 停了以后能再开。每次 start 用凭据缓存里现在的会话（SlackSessions）：cookie 换了就是新的 GabrielCore。
 import type {
-  ChannelAdapterContext, ChannelDelivery, ChannelTransport, ChannelTransportContext, ChannelTransportDeliver, ChannelTransportStatus,
+  ChannelAdapterContext, ChannelDelivery, ChannelOutage, ChannelTransport, ChannelTransportContext, ChannelTransportDeliver, ChannelTransportStatus,
 } from "../types.js";
 import type { GabrielCore } from "./slack-gabriel.js";
 import type { SlackSessions } from "./slack-session.js";
@@ -29,6 +30,8 @@ export interface SlackSessionTransportInput {
     transport: ChannelTransportContext;
     deliver: ChannelTransportDeliver;
     active: () => boolean;
+    // 这次补拉盖住的真实断线。daemon 启动以后第一次连上时是 null。
+    outage: ChannelOutage | null;
   }) => Promise<void>;
 }
 
@@ -50,6 +53,9 @@ class SlackSessionTransport implements ChannelTransport {
   private reported: string | null = null;
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
   private failures = 0;
+  // 还没补拉的断线：第一次断开的时刻和断了几次。
+  private outageSince: number | null = null;
+  private outageDrops = 0;
   private queue: Promise<void> = Promise.resolve();
   private readonly retryBaseMs: number;
   private readonly retryMaxMs: number;
@@ -65,6 +71,8 @@ class SlackSessionTransport implements ChannelTransport {
     this.generation += 1;
     this.failures = 0;
     this.reported = null;
+    this.outageSince = null;
+    this.outageDrops = 0;
     this.host = host;
     this.deliver = deliver;
     void this.open(this.generation);
@@ -170,6 +178,8 @@ class SlackSessionTransport implements ChannelTransport {
     if (state === "AUTH_DEAD") this.ended();
     else if (state === "BACKOFF" && this.reported === "connected") {
       this.host?.log("session: disconnected; reconnecting");
+      this.outageSince ??= Date.now();
+      this.outageDrops += 1;
       this.report({ state: "connecting" });
     }
   }
@@ -183,11 +193,15 @@ class SlackSessionTransport implements ChannelTransport {
     this.connectedBefore = true;
     const core = this.core;
     const afterReconnect = this.input.afterReconnect;
+    const reconnectedAt = new Date();
     this.enqueue(async () => {
       if (afterReconnect) {
         const context = await host.context();
         if (context && !this.stale(generation)) {
-          await afterReconnect({ context, transport: host, deliver: this.deliver!, active: () => !this.stale(generation) });
+          const outage = this.outageSince === null ? null : { disconnectedAt: new Date(this.outageSince), reconnectedAt, drops: this.outageDrops };
+          this.outageSince = null;
+          this.outageDrops = 0;
+          await afterReconnect({ context, transport: host, deliver: this.deliver!, active: () => !this.stale(generation), outage });
         }
       }
       // 补完了：这一轮连接准备好了（gabriel 重置它的退避）。
