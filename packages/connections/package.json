@@ -12,7 +12,7 @@
     "test": "cd ../.. && vitest run packages/connections"
   },
   "dependencies": {
-    "@earendil-works/pi-mcp": "^1.1.0",
+    "@earendil-works/pi-mcp": "^1.5.2",
     "@pi-lead-child/core": "*",
     "@pi-lead-child/protocol": "*",
     "@pi-lead-child/store": "*"

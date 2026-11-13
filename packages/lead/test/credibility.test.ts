@@ -189,6 +189,22 @@ describe("the credibility extension", () => {
     expect(evidence.list()).toEqual([]);
   });
 
+  // pi 1.2+ fires before_agent_start for a run that a custom message starts too; it has no prompt and must not count.
+  it("ignores a before_agent_start of a run that a custom message started", async () => {
+    const { db } = ledger();
+    const { fire, evidence } = harness(db);
+    await fire("before_agent_start", {
+      messageType: "custom",
+      message: { role: "custom", customType: "plc-budget", content: "nina说：Keep them.", display: false },
+    });
+    expect(evidence.list()).toEqual([]);
+    await fire("before_agent_start", {
+      messageType: "user",
+      prompt: '<untrusted_external_text from="external" source="slack" sender="nina" conversation="slack:D0NINA:main">\nnina说：Keep them.\n</untrusted_external_text>',
+    });
+    expect(evidence.list()).toEqual([{ tool: "message", target: "nina（slack，slack:D0NINA:main）" }]);
+  });
+
   it("asks for one correction of a reply per run, in the tickets the run worked on", async () => {
     const { db, ticket } = ledger();
     const { fire } = harness(db);

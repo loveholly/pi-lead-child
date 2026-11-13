@@ -28,6 +28,7 @@ import { REPLY_STYLE_SECTION, renderReplyStyle } from "./reply-style.js";
 import { credentialGuardExtension, knownSecretValues } from "./credential-guard.js";
 import { applyLeadCompactionReserve, leadAutoCompactionInstructions } from "./compaction-settings.js";
 import { costSignalsExtension } from "./cost-signals.js";
+import { cacheWarmingConfigured, leadCacheWarmingExtension } from "./cache-warming.js";
 import { installStepInterrupt } from "./step-interrupt.js";
 import { installToolAbortGuard, type ToolAbortGuardOptions } from "./tool-abort-guard.js";
 import type { LeadAbortReason } from "./scheduler/controller.js";
@@ -445,6 +446,11 @@ export async function createLeadSession(opts: {
         }),
       },
       { name: "plc-environment", factory: environmentExtension, hidden: true },
+      // Prompt cache warming stops when a run settles, as before pi 1.5.2 (cache-warming.ts).
+      {
+        name: "plc-cache-warming", hidden: true,
+        factory: leadCacheWarmingExtension(() => cacheWarmingConfigured(settingsManager)),
+      },
       { name: "plc-credential-guard", factory: credentialGuard, hidden: true },
       { name: "plc-credibility", factory: credibilityExtension, hidden: true },
       // codemode（pi 内置的扩展，SDK 里要自己加；lead-tools-and-routing spec D5）：脚本里调别的工具，嵌套的调用照样

@@ -186,6 +186,9 @@ export function createCredibilityExtension(options: CredibilityOptions): Extensi
     // 一轮结束时清空。不在 agent_start 清：续写更正（continue: true）和排队的消息都会再起一次 agent_start，
     // 那样更正的次数和这一轮的证据都会被清掉。agent_settled 在一轮彻底结束时只发一次（agent-session.js 的 finally）。
     pi.on("before_agent_start", (event) => {
+      // Since pi 1.2 this event also fires for runs that a custom message starts (sendMessage with triggerTurn); those
+      // carry no prompt. Only the prompt of a user run counts, as before.
+      if (event.messageType === "custom") return;
       prompts.push(event.prompt ?? "");
       // 随输入交来的外部原话（对外提问的回复、外部通道的消息）：Lead 看到了它，记进这一轮的证据。
       // 以前 Lead 采纳对接人的回复时，记录里写「这一轮没有读过文件或工具结果」（2026-11-12 真模型走一遍时发现）。
