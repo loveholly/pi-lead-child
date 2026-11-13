@@ -590,20 +590,22 @@ describe("MemoryController: connection tests", () => {
   });
 });
 
-// 2026-11-06：公司的 LLM 网关要自定义的鉴权头，值是 key 原文。测试连接走同一个头；记忆服务的重排只会用 Authorization: Bearer，
-// 所以主用要自定义头时重排不用它，设置页说明原因。
+// 2026-11-06: an LLM gateway can want the key in a custom header, as the raw value. The connection test uses that header.
+// The memory reranker keeps working too: hindsight-api only sends Authorization: Bearer, so hindsight-main puts a local
+// header proxy in front of it (rerank-header-proxy.test.ts). The reranker in service.json carries the header name.
 describe("MemoryController: a decision model behind a custom auth header", () => {
-  function withGateway(t: ReturnType<typeof setup>) {
+  function withGateway(t: ReturnType<typeof setup>, authHeader: string | null = "x-gateway-key", keyHost = "llm-gateway.example.com") {
     const file = loadPlcConfig(t.dataDir);
     writePlcConfig({
       ...file,
       decision: {
-        models: [{ id: "gw", name: "decision-1", baseUrl: "http://llm-gateway.example.com/gw", model: "decision-1", authHeader: "x-gateway-key" }],
+        models: [{ id: "gw", name: "decision-1", baseUrl: "http://llm-gateway.example.com/gw", model: "decision-1", ...(authHeader ? { authHeader } : {}) }],
         chain: ["gw"],
       },
     }, t.dataDir);
-    new SealedSecrets<string>(t.db, t.vault).set("decision.apiKey.gw", { value: "gw-key-0123456789", host: "llm-gateway.example.com" });
+    new SealedSecrets<string>(t.db, t.vault).set("decision.apiKey.gw", { value: "gw-key-0123456789", host: keyHost });
   }
+  const restarts = (t: ReturnType<typeof setup>) => t.harness.service.filter((call) => call === "start" || call === "restart").length;
 
   it("tests the connection with the key in that header and no Authorization", async () => {
     const t = setup();
@@ -626,15 +628,64 @@ describe("MemoryController: a decision model behind a custom auth header", () =>
     expect(t.logs.join("\n")).not.toContain("gw-key-0123456789");
   });
 
-  it("does not hand that key to the memory reranker, and says why", async () => {
+  // Regression: the reranker used to be forced to "none" (rrf) whenever the primary had a custom header.
+  it("uses it as the memory reranker after the user agrees, with the header name in service.json and the key sealed", async () => {
     const t = setup();
     withGateway(t);
     await runningLocal(t);
+    // Same consent flow as a Bearer reranker: nothing goes to the gateway before the user agrees.
     expect(readServiceFile(t.dataDir)?.reranker).toEqual({ provider: "none" });
     const memory = t.controller.get();
-    expect(memory.reranker).toMatchObject({ mode: "decision", effective: "none", external: null });
-    expect(memory.pendingSwitch).toBeNull();
-    expect(memory.service.message).toContain("decision-1 用自定义头传 key。记忆服务只会用 Authorization: Bearer 传 key，所以重排不用它");
+    expect(memory.reranker).toMatchObject({ mode: "decision", effective: "none", external: { host: "llm-gateway.example.com", maxCandidates: 50 } });
+    expect(memory.service.message ?? "").not.toMatch(/Bearer/);
+    const pending = memory.pendingSwitch!;
+    expect(pending.dataFlows).toEqual([{ kind: "rerank", host: "llm-gateway.example.com", maxCandidates: 50 }]);
+    expect(t.sealed().decisionApiKey).toBeUndefined();
+
+    const { memory: confirmed } = await t.controller.confirmSwitch(pending.id, true, "user via web");
+    expect(confirmed.reranker.effective).toBe("decision");
+    expect(readServiceFile(t.dataDir)?.reranker).toEqual({
+      provider: "typesafe", baseUrl: "http://llm-gateway.example.com/gw", model: "decision-1", maxCandidates: 50, authHeader: "x-gateway-key",
+    });
+    expect(t.sealed().decisionApiKey).toBe("gw-key-0123456789");
+    for (const file of ["config.json", join("hindsight", "service.json"), join("hindsight", "run.json")]) {
+      let raw = "";
+      try { raw = readFileSync(join(t.dataDir, file), "utf8"); } catch { continue; }
+      expect(raw).not.toContain("gw-key-0123456789");
+    }
+  });
+
+  it("restarts Hindsight when the header changes, and goes back to plain Bearer without asking again", async () => {
+    const t = setup();
+    withGateway(t);
+    await runningLocal(t);
+    await t.controller.confirmSwitch(t.controller.get().pendingSwitch!.id, true, "user via web");
+    const before = restarts(t);
+
+    withGateway(t, "x-other-key");
+    await t.controller.decisionSettingsChanged();
+    expect(readServiceFile(t.dataDir)?.reranker).toMatchObject({ provider: "typesafe", authHeader: "x-other-key" });
+    expect(restarts(t)).toBe(before + 1);
+    // Same host: no new consent.
+    expect(t.controller.get().pendingSwitch).toBeNull();
+
+    // Back to Authorization: Bearer. No authHeader in service.json, so Hindsight talks to the gateway directly.
+    withGateway(t, null);
+    await t.controller.decisionSettingsChanged();
+    expect(readServiceFile(t.dataDir)?.reranker).toEqual({
+      provider: "typesafe", baseUrl: "http://llm-gateway.example.com/gw", model: "decision-1", maxCandidates: 50,
+    });
+    expect(restarts(t)).toBe(before + 2);
+    expect(t.controller.get().pendingSwitch).toBeNull();
+    expect(t.sealed().decisionApiKey).toBe("gw-key-0123456789");
+  });
+
+  it("does not hand the key to the reranker when it is bound to another host", async () => {
+    const t = setup();
+    withGateway(t, "x-gateway-key", "other.example.com");
+    await runningLocal(t);
+    expect(readServiceFile(t.dataDir)?.reranker).toEqual({ provider: "none" });
+    expect(t.controller.get()).toMatchObject({ reranker: { effective: "none", external: null }, pendingSwitch: null });
     expect(t.sealed().decisionApiKey).toBeUndefined();
   });
 });

@@ -318,12 +318,16 @@ export class MemoryController implements MemoryService {
   }
 
   // 用决策模型做 reranker：有 key 时才用，否则不用。
-  // 主用要自定义鉴权头（2026-11-06）时也不用：hindsight-api 1.0.0 的 TypeSafe reranker 只会发 Authorization: Bearer，
-  // 没有改头名的设置；交给它只会每次召回都 401。
+  // A primary with a custom auth header keeps the reranker too: hindsight-api only sends Authorization: Bearer, so
+  // hindsight-main puts a local header proxy in front of it (rerank-header-proxy.ts). The key stays bound to the
+  // primary's host. authHeader is set only for a custom header, so a Bearer reranker keeps the same service.json.
   private decisionReranker(): HindsightReranker {
     const decision = this.decision();
-    return decision.baseUrl && !decision.authHeader && this.decisionKey(decision.host)
-      ? { provider: "typesafe", baseUrl: decision.baseUrl, model: decision.model, maxCandidates: this.rerankMaxCandidates() }
+    return decision.baseUrl && this.decisionKey(decision.host)
+      ? {
+        provider: "typesafe", baseUrl: decision.baseUrl, model: decision.model, maxCandidates: this.rerankMaxCandidates(),
+        ...(decision.authHeader ? { authHeader: decision.authHeader } : {}),
+      }
       : { provider: "none" };
   }
 
@@ -754,7 +758,6 @@ export class MemoryController implements MemoryService {
     const m = this.m();
     const problems = [
       this.serviceMessage, remote.problem, reranker.mode !== "none" ? decision.problem : null,
-      (reranker.mode ?? "decision") === "decision" && decision.baseUrl && decision.authHeader ? m.rerankNeedsBearer(decision.name) : null,
       writes.failed ? m.failedWrites(writes.failed, writes.lastError ?? null) : null,
     ].filter((problem): problem is string => Boolean(problem));
     return {

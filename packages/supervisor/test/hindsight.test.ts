@@ -314,6 +314,27 @@ describe("hindsightEnvironment: what hindsight-main gives hindsight-api", () => 
     });
   });
 
+  // A decision model whose key goes in a custom header: hindsight-api only sends Bearer, so it talks to the local header
+  // proxy that hindsight-main started, with the proxy's token. Without the proxy it falls back to rrf.
+  it("points a custom-header reranker at the local proxy, and uses rrf when the proxy is not running", () => {
+    const custom = { ...service, reranker: { provider: "typesafe" as const, baseUrl: "https://decide.local", model: "decision-1", maxCandidates: 20, authHeader: "x-gateway-key" } };
+    const proxied = hindsightEnvironment({
+      service: custom, secrets: { ...SECRETS, decisionApiKey: "dec-key-123" },
+      env: { no_proxy: "corp.local, 127.0.0.1" }, rerankProxy: { url: "http://127.0.0.1:50123", token: "local-token-123" },
+    });
+    expect(proxied.env).toMatchObject({
+      HINDSIGHT_API_RERANKER_PROVIDER: "typesafe", HINDSIGHT_API_RERANKER_TYPESAFE_BASE_URL: "http://127.0.0.1:50123",
+      HINDSIGHT_API_RERANKER_TYPESAFE_API_KEY: "local-token-123", HINDSIGHT_API_RERANKER_MAX_CANDIDATES: "20",
+      NO_PROXY: "127.0.0.1", no_proxy: "corp.local,127.0.0.1",
+    });
+    expect(Object.values(proxied.env)).not.toContain("dec-key-123");
+
+    const fallback = hindsightEnvironment({ service: custom, secrets: { ...SECRETS, decisionApiKey: "dec-key-123" }, env: {} });
+    expect(fallback.env.HINDSIGHT_API_RERANKER_PROVIDER).toBe("rrf");
+    expect(Object.values(fallback.env)).not.toContain("dec-key-123");
+    expect(fallback.notes.join("\n")).toMatch(/x-gateway-key.*using rrf/);
+  });
+
   // 2026-10-16 发布评审：白名单，不是黑名单。Hindsight 是第三方的 Python 进程。
   it("passes only allow-listed variables: no daemon secrets, no config env, no HINDSIGHT_API_* outside the tuning keys", () => {
     const { env, notes } = hindsightEnvironment({

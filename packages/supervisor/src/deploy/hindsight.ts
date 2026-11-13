@@ -71,8 +71,18 @@ export type HindsightEmbedding =
 export type HindsightReranker =
   | { provider: "local"; model: string; revision: string; path: string }
   // maxCandidates：每次召回最多交给外部 reranker 多少条候选（Hindsight 缺省 300）。
-  | { provider: "typesafe"; baseUrl: string; model: string; maxCandidates: number }
+  // authHeader: the header that carries the key at the target, when it is not `Authorization: Bearer`. hindsight-api only
+  // sends Bearer, so hindsight-main then puts a local header proxy in between (apps/daemon rerank-header-proxy.ts).
+  // Absent for Bearer, so service.json for a Bearer reranker does not change.
+  | { provider: "typesafe"; baseUrl: string; model: string; maxCandidates: number; authHeader?: string }
   | { provider: "none" };
+
+// The local header proxy that hindsight-main runs for a reranker with a custom authHeader: its loopback URL and the
+// Bearer token that Hindsight sends to it. The token is new on each start and is not the decision-model key.
+export interface HindsightRerankProxy {
+  url: string;
+  token: string;
+}
 
 // hindsight-main 需要的密钥。只以密文落盘（secrets.sealed）。
 // databasePassword：内嵌 pg0 的密码。pg0 缺省的 hindsight/hindsight 人人都知道，本机任何进程都能读写全部记忆。
@@ -533,10 +543,13 @@ export function pg0UrlWithPassword(url: string, password: string): string {
 
 // hindsight-main 启动 hindsight-api 用的环境变量：白名单里的系统变量，加上我们算好的这些。
 // 监听地址、端口、数据库、认证、embedding、reranker、LLM 总是我们的；MCP 和 observation 关掉。
+// rerankProxy: the local header proxy that hindsight-main started for a reranker with a custom authHeader.
+// Without it such a reranker falls back to rrf: hindsight-api would send the key as Bearer and fail on every recall.
 export function hindsightEnvironment(input: {
   service: HindsightServiceFile;
   secrets: HindsightSecrets;
   env: Record<string, string | undefined>;
+  rerankProxy?: HindsightRerankProxy | null;
 }): { env: Record<string, string>; notes: string[] } {
   const { service, secrets } = input;
   const notes: string[] = [];
@@ -594,15 +607,30 @@ export function hindsightEnvironment(input: {
       HINDSIGHT_API_RERANKER_LOCAL_MODEL: service.reranker.path,
       HINDSIGHT_API_RERANKER_LOCAL_FORCE_CPU: "1",
     });
-  } else if (service.reranker.provider === "typesafe" && secrets.decisionApiKey) {
+  } else if (service.reranker.provider === "typesafe" && secrets.decisionApiKey
+    && (!service.reranker.authHeader || input.rerankProxy)) {
+    // With a custom header, Hindsight talks to the local proxy with the proxy's own token. The real key stays in
+    // hindsight-main, and the proxy sends it only to service.reranker.baseUrl.
+    const proxy = service.reranker.authHeader ? input.rerankProxy! : null;
     Object.assign(env, {
       HINDSIGHT_API_RERANKER_PROVIDER: "typesafe",
-      HINDSIGHT_API_RERANKER_TYPESAFE_BASE_URL: service.reranker.baseUrl,
+      HINDSIGHT_API_RERANKER_TYPESAFE_BASE_URL: proxy ? proxy.url : service.reranker.baseUrl,
       HINDSIGHT_API_RERANKER_TYPESAFE_MODEL: service.reranker.model,
-      HINDSIGHT_API_RERANKER_TYPESAFE_API_KEY: secrets.decisionApiKey,
+      HINDSIGHT_API_RERANKER_TYPESAFE_API_KEY: proxy ? proxy.token : secrets.decisionApiKey,
       HINDSIGHT_API_RERANKER_MAX_CANDIDATES: String(service.reranker.maxCandidates),
     });
+    if (proxy) {
+      // hindsight-api follows the proxy variables (aiohttp trust_env). The loopback proxy must not go through them.
+      for (const name of ["NO_PROXY", "no_proxy"] as const) {
+        const hosts = (env[name] ?? "").split(",").map((host) => host.trim()).filter(Boolean);
+        env[name] = [...new Set([...hosts, "127.0.0.1"])].join(",");
+      }
+      notes.push(`reranker key goes in header ${service.reranker.authHeader} through the local proxy on ${proxy.url}`);
+    }
   } else {
+    if (service.reranker.provider === "typesafe" && service.reranker.authHeader && secrets.decisionApiKey) {
+      notes.push(`reranker needs the local header proxy for header ${service.reranker.authHeader}, which is not running; using rrf`);
+    }
     // 不用 reranker：Hindsight 的 rrf 只按各路检索的名次融合，不加载模型，也不往外发数据。
     env.HINDSIGHT_API_RERANKER_PROVIDER = "rrf";
   }
