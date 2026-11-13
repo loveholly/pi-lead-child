@@ -22,12 +22,18 @@ export type TicketNeedsUserReason =
   | "acceptance"
   // Run 很久没有动静。
   | "stalled"
+  // Run 暂停超过 PAUSE_OVERDUE_MS，要你决定继续还是取消（工单 #111）。
+  | "paused"
   // 续作在等一个还没部署的能力。
   | "capability"
   // Lead 建的草稿，等你确认才会开始。
   | "confirmation";
 
 // 名字按界面语言（needs-user.messages.ts）。
+
+// 暂停多久算「停太久」，要你决定继续还是取消（工单 #111，设计规范 P7.6）。
+// 24 小时：暂停一般是临时的（降负载、先看看结果），过了一天还停着，多半是忘了。
+export const PAUSE_OVERDUE_MS = 24 * 60 * 60 * 1000;
 
 const TERMINAL: ReadonlySet<TicketSummary["stage"]> = new Set(["done", "cancelled", "acked"]);
 
@@ -73,6 +79,7 @@ export function ticketNeedsUser(ticket: TicketSummary): TicketNeedsUserReason | 
   }
   if (review?.state === "waiting_user" || review?.state === "review_passed") return "acceptance";
   if (ticket.runtime.state === "stale") return "stalled";
+  if (ticket.pause?.overdue === true) return "paused";
   if (ticket.workflowState === "waiting_capability") return "capability";
   if (ticket.stage === "draft") return "confirmation";
   return null;
@@ -97,6 +104,8 @@ export function ticketsNeedingUser<T extends TicketSummary>(tickets: readonly T[
 //   ended    终态（done、cancelled、acked）。派生信号不能盖过 stage。
 //   user     ticketNeedsUser 给出了原因。两条规则永远一致：user ⇔ needsUser 非空。
 //   running  有 Run 在启动或运行；派发已经发出（含自动恢复）；独立核查在排队或在跑。
+//   queued   Run 暂停着（pause），又没有别的在跑：没人在推进，不管它是不是后台工单（工单 #111：
+//            暂停的轻子任务以前算 Lead 的后台工作，进默认收起的组，用户找不到）。companion 再按 pause 分出「已暂停」。
 //   lead     下一步归 Lead 或系统，但现在没有东西在跑：后台工单（例如系统建的学习工单）；
 //            Lead 正在处理的异常（leadHandling，没有升级给你）；停在 review、不等你的工单
 //            （核查还没派发或被挂起）；Lead 在续作。
@@ -116,6 +125,7 @@ export function ticketTurn(ticket: TicketSummary): TicketTurn {
   if (ticket.executionState && DISPATCHED.has(ticket.executionState.state)) return "running";
   const reviewProgress = ticket.reviewState?.reviewProgress;
   if (reviewProgress === "queued" || reviewProgress === "running") return "running";
+  if (ticket.pause) return "queued";
   if (ticket.worklistVisibility === "background") return "lead";
   // Lead 正在处理这张工单上的异常、也没有升级给你（和 ticketNeedsUser 同一个判据）。
   if (ticket.attention.leadHandling === true && ticket.attention.blockerCount === 0) return "lead";

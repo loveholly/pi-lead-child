@@ -4,6 +4,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  PAUSE_OVERDUE_MS,
   ticketNeedsUser,
   ticketNeedsUserLabel,
   ticketsNeedingUser,
@@ -270,3 +271,39 @@ describe("a decision the user owes", () => {
   });
 });
 
+
+// 工单 #111（2026-11-06）：#26、#28 的 Run 从 11-04 起暂停着，#89 刚暂停，三张在「等你」「在执行」「排队」里都没有。
+// 暂停期间 stage 还是 active、runtime 是 idle；#28、#89 是轻子任务，以前算 Lead 的后台工作，进默认收起的组。
+// 现在：暂停着、没有别的在跑的工单轮到「排队」（companion 再分出「已暂停」）；停太久（pause.overdue）算「需要你」。
+describe("a paused run", () => {
+  const idle = { state: "idle" as const, lastActivityAt: null, activeAttemptId: null };
+  const pause = (overdue: boolean) => ({
+    attemptId: 37, since: "2026-11-04T03:28:26.523Z", by: "user" as const, lastCheckpoint: null, overdue,
+  });
+
+  it("is nobody's turn while it is fresh, also for background work that used to hide under Lead", () => {
+    expect(ticketTurn(ticket({ id: 26, runtime: idle, pause: pause(false) }))).toBe("queued");
+    expect(ticketTurn(ticket({ id: 89, runtime: idle, worklistVisibility: "background", pause: pause(false) }))).toBe("queued");
+    expect(ticketNeedsUser(ticket({ id: 26, runtime: idle, pause: pause(false) }))).toBeNull();
+  });
+
+  it("needs the user once it has been paused too long, and the turn follows", () => {
+    const stale = ticket({ id: 28, runtime: idle, worklistVisibility: "background", pause: pause(true) });
+    expect(ticketNeedsUser(stale)).toBe("paused");
+    expect(ticketTurn(stale)).toBe("user");
+    expect(ticketNeedsUserLabel("paused")).toBe("停太久");
+    expect(ticketNeedsUserLabel("paused", "en")).toBe("Paused too long");
+  });
+
+  it("still counts as running while another run of the ticket runs", () => {
+    expect(ticketTurn(ticket({ id: 26, pause: pause(false) }))).toBe("running");
+  });
+
+  it("never counts on a finished ticket", () => {
+    expect(ticketNeedsUser(ticket({ stage: "cancelled", runtime: idle, pause: pause(true) }))).toBeNull();
+  });
+
+  it("uses a one-day threshold", () => {
+    expect(PAUSE_OVERDUE_MS).toBe(24 * 60 * 60 * 1000);
+  });
+});

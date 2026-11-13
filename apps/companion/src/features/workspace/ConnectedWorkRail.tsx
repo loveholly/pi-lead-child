@@ -183,6 +183,9 @@ export function ConnectedWorkRail({
         setComposerDraft('lead', draft);
         setCompactDestination('conversation');
       }}
+      // 停太久的暂停工单：继续的是暂停着的那个 Run，取消就是取消工单（都是工单操作，和 Lead 的 ticket_action 同一个函数）。
+      onResumeTicket={(ticket) => runtime.runTicketAction(Number(ticket.id), 'resume_run', ticket.pause ? { input: { runId: ticket.pause.attemptId } } : {})}
+      onCancelTicket={(ticket) => runtime.runTicketAction(Number(ticket.id), 'cancel')}
       notices={notices}
       upcomingReminders={upcomingReminders}
       onCancelTimer={cancelTimer}

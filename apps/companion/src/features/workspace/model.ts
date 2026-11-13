@@ -11,6 +11,7 @@ import {
   type ResolveKernelInterventionRequest,
   type TicketKind,
   type TicketNeedsUserReason,
+  type TicketPause,
   type TicketStatus,
   type TicketSummary,
   type TicketTurn,
@@ -22,7 +23,7 @@ import { DEFAULT_LOCALE, type Locale } from '@/i18n';
 
 import { leadNameNow } from '@/state/leadName';
 import { resolvedByLabel } from '@/features/chat/resolvedByLabel';
-import type { ControlPlanePhase, ResourceLoadState } from '@/state/types';
+import type { ControlPlanePhase, ResourceLoadState, TicketFilter, TicketGroupId } from '@/state/types';
 import type { ConnectionState } from '@pi-lead-child/client';
 
 import { systemCheckpointText } from './systemCheckpointText';
@@ -42,9 +43,10 @@ export type { TicketKind, TicketStatus };
 
 export type TicketPriority = 'urgent' | 'high' | 'normal' | 'low';
 
-export type TicketFilter = 'all' | 'todo' | 'running' | 'queued';
+// 筛选的取值在 state/types.ts（工作台的 store 记着当前选的哪个），这里不另写一份。
+export type { TicketFilter } from '@/state/types';
 
-export type TicketGroupId = 'needs_intervention' | 'running' | 'queued' | 'lead' | 'background' | 'completed' | 'cancelled';
+export type { TicketGroupId } from '@/state/types';
 
 export type TicketRailState = 'loading' | 'populated' | 'first_use' | 'all_completed' | 'no_results';
 
@@ -107,6 +109,8 @@ export type Ticket = {
   turn: TicketTurn;
   // 后台工单（TicketSummary.worklistVisibility），例如系统建的学习工单。轮到 Lead 时进默认收起的组。
   background?: boolean;
+  // 暂停着的 Run（TicketSummary.pause，工单 #111）：何时、谁暂停的、停在哪一步、是否停太久。
+  pause?: TicketPause;
   progressPercent?: number;
 };
 
@@ -463,7 +467,9 @@ export function ticketRailFilters(locale: Locale = DEFAULT_LOCALE): readonly { i
     { id: 'all', label: m.all },
     { id: 'todo', label: m.todo },
     { id: 'running', label: m.running },
+    { id: 'paused', label: m.paused },
     { id: 'queued', label: m.queued },
+    { id: 'lead', label: m.lead(leadNameNow()) },
   ];
 }
 
@@ -492,6 +498,7 @@ function ticketGroupMetadata(id: TicketGroupId, locale: Locale): Omit<TicketRail
   const metadata: Record<TicketGroupId, Omit<TicketRailGroup, 'items' | 'count'>> = {
     needs_intervention: { id: 'needs_intervention', label: m.needsIntervention, collapsible: true, collapsedByDefault: false },
     running: { id: 'running', label: m.running, collapsible: true, collapsedByDefault: false },
+    paused: { id: 'paused', label: m.paused, collapsible: true, collapsedByDefault: false },
     queued: { id: 'queued', label: m.queued, collapsible: true, collapsedByDefault: false },
     lead: { id: 'lead', label: m.lead(leadName), collapsible: true, collapsedByDefault: false },
     background: { id: 'background', label: m.background(leadName), collapsible: true, collapsedByDefault: true },
@@ -502,7 +509,7 @@ function ticketGroupMetadata(id: TicketGroupId, locale: Locale): Omit<TicketRail
 }
 
 export const TICKET_GROUP_ORDER = [
-  'needs_intervention', 'running', 'lead', 'queued', 'background', 'completed', 'cancelled',
+  'needs_intervention', 'running', 'paused', 'lead', 'queued', 'background', 'completed', 'cancelled',
 ] as const satisfies readonly TicketGroupId[];
 
 export function resolveRailViewDirection(
@@ -709,9 +716,17 @@ function ticketMatchesQuery(ticket: Ticket, query: string): boolean {
   ].filter(Boolean).join(' ').toLocaleLowerCase().includes(query);
 }
 
+// 「已暂停」：有暂停着的 Run 的工单，不管现在轮到谁（停太久的同时也在「等你」里）。
+// 「排队」不再含它们：以前暂停的工单写成「排队 · 没人在动」，看不出是停着（工单 #111）。
+export function isPausedTicket(ticket: Ticket): boolean {
+  return ticket.pause != null && ticket.turn !== 'ended';
+}
+
 function ticketMatchesFilter(ticket: Ticket, filter: TicketFilter): boolean {
   if (filter === 'running') return ticket.turn === 'running';
-  if (filter === 'queued') return ticket.turn === 'queued';
+  if (filter === 'paused') return isPausedTicket(ticket);
+  if (filter === 'queued') return ticket.turn === 'queued' && !isPausedTicket(ticket);
+  if (filter === 'lead') return ticket.turn === 'lead';
   if (filter === 'todo') return isTodoTicket(ticket);
   return true;
 }
@@ -724,6 +739,8 @@ export function groupForTicket(ticket: Ticket): TicketGroupId {
   if (ticket.turn === 'ended') return 'completed';
   if (ticket.turn === 'user') return 'needs_intervention';
   if (ticket.turn === 'running') return 'running';
+  // Run 暂停着、又没有别的在跑（ticketTurn 给的是 queued）：进「已暂停」，后台工单也是（工单 #111）。
+  if (isPausedTicket(ticket)) return 'paused';
   // Lead 正在处理的异常（leadHandling）也是 Lead 的回合，进「Lead 处理中」，不标红。
   if (ticket.turn === 'lead') return ticket.background ? 'background' : 'lead';
   return 'queued';
@@ -742,7 +759,9 @@ export function buildTicketRailPresentation(
     all: items.length,
     todo: items.filter(isTodoTicket).length,
     running: items.filter((ticket) => ticket.turn === 'running').length,
-    queued: items.filter((ticket) => ticket.turn === 'queued').length,
+    paused: items.filter(isPausedTicket).length,
+    queued: items.filter((ticket) => ticketMatchesFilter(ticket, 'queued')).length,
+    lead: items.filter((ticket) => ticket.turn === 'lead').length,
   };
 
   if (options.loading) {
@@ -1185,6 +1204,7 @@ export function ticketSummaryToTicket(
     ...(pendingDecisionCount > 0 ? { pendingDecisionCount } : {}),
     turn: ticketTurn(ticket),
     ...(ticket.worklistVisibility === 'background' ? { background: true } : {}),
+    ...(ticket.pause ? { pause: ticket.pause } : {}),
     leadHandling,
     needsAttention: attention || ticket.runtime.state === 'stale' || (ticket.runtime.state === 'blocked' && !leadHandling)
       || ticket.workflowState === 'waiting_capability' || reviewNeedsAttention || executionNeedsAttention,
@@ -1324,10 +1344,18 @@ export function ticketRailCaption(ticket: Ticket, locale: Locale = DEFAULT_LOCAL
   const attentionReason = ticketAttentionReason(ticket);
   if (attentionReason === 'ticket_blocked') return `#${ticket.id} · ${m.blocked}`;
   if (attentionReason) return `#${ticket.id} · ${ticket.statusLabel || ticket.runtimeLabel} · ${m.needsAction}`;
+  if (ticket.pause && ticket.turn !== 'running') return pausedCaption(ticket.id, ticket.pause, locale);
   if (ticket.turn === 'queued') return `#${ticket.id} · ${m.queued}`;
   if (ticket.turn === 'lead') return `#${ticket.id} · ${ticket.background ? m.background(leadNameNow()) : ticket.statusLabel || leadHandlingLabel(locale)}`;
   const runtime = ticket.runtimeLabel === messages.runtime.running ? m.executing : ticket.runtimeLabel;
   return `#${ticket.id} · ${ticket.agentLabel ?? 'child'} ${runtime}`;
+}
+
+// 「#26 · 你暂停的 · 停在「补测试」」：谁暂停的、暂停前在做什么（最近一个 checkpoint 的标题）。
+function pausedCaption(id: string, pause: TicketPause, locale: Locale): string {
+  const m = workspaceModelMessages(locale).caption;
+  const by = pause.by === 'lead' ? m.pausedBy.lead(leadNameNow()) : m.pausedBy[pause.by];
+  return [`#${id}`, by, pause.lastCheckpoint ? m.pausedAt(pause.lastCheckpoint) : null].filter(Boolean).join(' · ');
 }
 
 export function buildPowMetricPresentation(

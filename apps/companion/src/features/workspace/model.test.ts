@@ -97,7 +97,7 @@ describe('workspace model', () => {
     const todo = buildTicketRailPresentation(groupedTickets, { filter: 'todo' });
 
     // #43 停在 active，但它在等你：不算在执行。
-    expect(all.filterCounts).toEqual({ all: 6, todo: 3, running: 1, queued: 0 });
+    expect(all.filterCounts).toEqual({ all: 6, todo: 3, running: 1, paused: 0, queued: 0, lead: 0 });
     expect(running.groups.flatMap((group) => group.items.map((ticket) => ticket.id))).toEqual(['42']);
     expect(todo.groups.flatMap((group) => group.items.map((ticket) => ticket.id))).toEqual(['43', '41', '38']);
   });
