@@ -45,6 +45,8 @@ export const FAILURE_CLASSES = {
   extension_missing: { scope: "runtime", retry: "never", needs: "config", category: "runtime_configuration" },
   interpreter_mismatch: { scope: "runtime", retry: "never", needs: "config", category: "runtime_configuration" },
   // 会话初始化后 plc 工具通道没有就绪（工单 05，runs 53、54）。agent 没有交接工具，干了也交不了。
+  // 启动超时（TOOL_CHANNEL_START_TIMEOUT_CODES）也落在这一行：内核先在同一个 Run 里重新拉起一次 CLI（工单 #113），
+  // 第一次失败不落库、不进这张表的分类；重试也超时，才按这一行开故障。
   tool_channel_unavailable: { scope: "runtime", retry: "never", needs: "config", category: "runtime_configuration" },
   provider_overloaded: { scope: "attempt", retry: "backoff", needs: "none", category: "model_capacity" },
   provider_unavailable: { scope: "attempt", retry: "backoff", needs: "none", category: "provider_unavailable" },
@@ -172,6 +174,14 @@ export function matchProviderFailure(text: string | null | undefined): FailureCo
     if (pattern.test(text)) return code;
   }
   return null;
+}
+
+// adapter 报的「plc 工具通道启动超时」的错误码（工单 #113）。机器很忙时，plc 的 MCP 服务器来不及在 MCP_TIMEOUT 内握手，
+// 再拉起一次往往就好。配置坏了的失败不用这些码，重试也一样失败。内核据此决定要不要在同一个 Run 里重试一次（manager.ts）。
+export const TOOL_CHANNEL_START_TIMEOUT_CODES: readonly string[] = ["claude_tool_channel_timeout"];
+
+export function toolChannelStartTimedOut(errorCode: string | null | undefined): boolean {
+  return TOOL_CHANNEL_START_TIMEOUT_CODES.includes(errorCode ?? "");
 }
 
 // 进程没能起来时记下的失败码。adapter 的 spawn 失败和内核的派发失败都在这里。

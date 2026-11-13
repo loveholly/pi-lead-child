@@ -9,7 +9,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { tempDir } from "@pi-lead-child/core/testing";
-import { ClaudeRuntime } from "../src/claude.js";
+import { ClaudeRuntime, type ClaudeRuntimeOptions } from "../src/claude.js";
 import { CodexRuntime } from "../src/codex.js";
 import { PiRuntime } from "../src/pi.js";
 import { packageSource } from "@pi-lead-child/core";
@@ -36,9 +36,12 @@ function probeLog(): { path: string; calls: () => string[][] } {
 const codex = (env: Record<string, string>) => new CodexRuntime({
   bin: process.execPath, prefixArgs: ["--import=tsx", resolve("packages/runtime/testing/fake-codex.ts")], env,
 });
-const claude = (env: Record<string, string>) => new ClaudeRuntime({
-  bin: process.execPath, prefixArgs: ["--import=tsx", resolve("packages/runtime/testing/fake-claude.ts")], env,
-});
+// 工单 #113：探针最后一步拉起 plc 的 MCP 服务器。默认用真实的 mcp-server（源码经 tsx 运行），和执行时一样。
+const PLC_MCP_SERVER = { command: process.execPath, args: ["--import=tsx", packageSource("engine", "agent-tools", "mcp-server.ts")] };
+const claude = (env: Record<string, string>, toolChannelServer: ClaudeRuntimeOptions["toolChannelServer"] = PLC_MCP_SERVER) =>
+  new ClaudeRuntime({
+    bin: process.execPath, prefixArgs: ["--import=tsx", resolve("packages/runtime/testing/fake-claude.ts")], env, toolChannelServer,
+  });
 const pi = (env: Record<string, string>) => new PiRuntime({ bin: TSX, prefixArgs: [resolve("packages/runtime/testing/fake-pi.ts")], env });
 
 describe("the Codex probe", () => {
@@ -69,12 +72,13 @@ describe("the Codex probe", () => {
 });
 
 describe("the Claude probe", () => {
-  it("passes with only the version and auth status commands", async () => {
+  it("passes with the version and auth status commands, then a real plc MCP initialize", async () => {
     const log = probeLog();
     const result = await claude({ FAKE_PROBE_LOG: log.path }).probe({ model: null });
-    expect(result).toEqual({ ok: true, checks: ["claude --version", "claude auth status"] });
+    expect(result).toEqual({ ok: true, checks: ["claude --version", "claude auth status", "plc MCP initialize"] });
+    // Claude CLI 只跑了这两条不花钱的命令。MCP 服务器是另一个进程，不经过 CLI。
     expect(log.calls()).toEqual([["--version"], ["auth", "status", "--json"]]);
-  });
+  }, 30_000);
 
   it("reports a login failure without copying the status output", async () => {
     const result = await claude({ FAKE_CLAUDE_AUTH: "logged-out" }).probe({ model: null });
@@ -89,7 +93,36 @@ describe("the Claude probe", () => {
   it("leaves a third-party provider to the canary", async () => {
     // Bedrock、Vertex 这类 provider 用自己的凭据。auth status 只报告 Anthropic 账号，看不出它们是否可用。
     const result = await claude({ FAKE_CLAUDE_AUTH: "third-party" }).probe({ model: null });
-    expect(result).toEqual({ ok: true, checks: ["claude --version", "claude auth status"] });
+    expect(result).toEqual({ ok: true, checks: ["claude --version", "claude auth status", "plc MCP initialize"] });
+  }, 30_000);
+
+  // 工单 #113：以前探针不起 MCP 服务器，plc 握手超时开的故障被探针关掉，下一个执行又超时。
+  // 现在 MCP 服务器在 MCP_TIMEOUT 内不回答 initialize，探针就失败，故障保持打开（health-recovery 只在 ok 时关闭）。
+  it("fails when the plc MCP server does not answer initialize within MCP_TIMEOUT", async () => {
+    const hanging = { command: process.execPath, args: ["-e", "setInterval(() => {}, 1000)"] };
+    const started = Date.now();
+    const result = await claude({ MCP_TIMEOUT: "500" }, hanging).probe({ model: null });
+    expect(result).toMatchObject({
+      ok: false, timedOut: true,
+      checks: ["claude --version", "claude auth status", "plc MCP initialize"],
+      failure: { scope: "runtime", code: "tool_channel_unavailable", evidence: expect.stringContaining("没有回答 initialize") },
+    });
+    expect(Date.now() - started).toBeLessThan(10_000);
+  }, 30_000);
+
+  it("fails when the plc MCP server exits before it answers", async () => {
+    const crashing = { command: process.execPath, args: ["-e", "process.stderr.write('mcp-server: boom\\n'); process.exit(2)"] };
+    const result = await claude({}, crashing).probe({ model: null });
+    expect(result).toMatchObject({
+      ok: false,
+      failure: { code: "tool_channel_unavailable", evidence: expect.stringContaining("mcp-server: boom") },
+    });
+    expect(result.ok === false && result.timedOut).toBeFalsy();
+  });
+
+  it("does not start the plc MCP server when an earlier check fails", async () => {
+    const result = await claude({ FAKE_CLAUDE_AUTH: "logged-out" }).probe({ model: null });
+    expect(result.checks).toEqual(["claude --version", "claude auth status"]);
   });
 });
 
