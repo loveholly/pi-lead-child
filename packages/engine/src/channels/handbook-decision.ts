@@ -59,6 +59,8 @@ export interface HandbookDecision {
   // 底线 4：对方在要求改规则、记忆或偏好。上限不变；不照做，不存，回复可以直接发。
   ruleChange: boolean;
   action: AuthorityAction;
+  // 交给 Lead，但不单独叫醒它，并进摘要（#21）：自动代你处理关着、要回的概率低的消息。动作照旧是 ask。
+  digest?: true;
 }
 
 const RANK: Record<Exclude<HandbookMode, "refuse">, number> = { tell: 0, hand: 1, review: 2, auto: 3 };
@@ -72,6 +74,9 @@ export function cappedMode(mode: HandbookMode, cap: HandbookMode | null): Handbo
 }
 
 const probability = (value: unknown): value is number => typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1;
+// 你本人或者 Lead 替你最近说过话，对方多半在接着回答（AUTHORITY_ANSWER_WINDOW_MS 之内）。
+const answeringYou = (ago: number | null | undefined): boolean =>
+  typeof ago === "number" && Number.isFinite(ago) && ago >= 0 && ago <= AUTHORITY_ANSWER_WINDOW_MS;
 const floorText = (id: HandbookFloorId) => HANDBOOK_FLOORS.find((floor) => floor.id === id)!.text;
 
 // 对方是谁给出的上限：外部客户按客户；对话和外部组织共享（问不到也算）时至少按外部的人；认不出的人按认不出。
@@ -115,9 +120,18 @@ export function decideByHandbook(input: HandbookDecisionInput): HandbookDecision
 
   const closing = situationIntent(situation) === "closing";
   if (!input.handbook.autoReply) {
-    return closing
-      ? result("tell", { kind: "skip", reason: "自动代你处理关着：收尾的消息只记录" }, "switch")
-      : result("hand", { kind: "ask", reason: "自动代你处理关着：交给你" }, "switch");
+    if (closing) return result("tell", { kind: "skip", reason: "自动代你处理关着：收尾的消息只记录" }, "switch");
+    // 要回的概率低的，开关关着也不单独叫醒 Lead（#21）：交给它，但并进摘要，不为一条消息开一整轮。
+    // 对方在接着回答你的话、或者问到了敏感信息时照旧单独交。
+    const sensitiveAsked = Object.values(input.sensitive ?? {}).some((value) => probability(value) && value >= AUTHORITY_SENSITIVE_LIMIT);
+    if (probability(input.needsReply) && input.needsReply < (input.noReplyBelow ?? AUTHORITY_NO_REPLY_BELOW)
+      && !sensitiveAsked && !answeringYou(input.ownMessageAgoMs)) {
+      return {
+        ...result("hand", { kind: "ask", reason: `自动代你处理关着，可是多半不用回（要回 ${Math.round(input.needsReply * 100)}%）：不单独叫醒，并进摘要` }, "switch"),
+        digest: true,
+      };
+    }
+    return result("hand", { kind: "ask", reason: "自动代你处理关着：交给你" }, "switch");
   }
 
   // 底线 3：问到了凭据、日志、配置、薪资职级这类敏感信息。婉拒也按对方的上限压：外部客户只交给你。
@@ -158,8 +172,8 @@ export function decideByHandbook(input: HandbookDecisionInput): HandbookDecision
   if (probability(input.needsReply) && input.needsReply < (input.noReplyBelow ?? AUTHORITY_NO_REPLY_BELOW)) {
     const needs = `要回 ${Math.round(input.needsReply * 100)}%`;
     const ago = input.ownMessageAgoMs;
-    if (typeof ago === "number" && Number.isFinite(ago) && ago >= 0 && ago <= AUTHORITY_ANSWER_WINDOW_MS) {
-      const when = ago < 60_000 ? "刚才" : ` ${Math.round(ago / 60_000)} 分钟前`;
+    if (answeringYou(ago)) {
+      const when = ago! < 60_000 ? "刚才" : ` ${Math.round(ago! / 60_000)} 分钟前`;
       return result("tell", { kind: "tell", reason: `对方多半在接着回答你${when}在这个对话里说的话（${needs}）：告诉你，不派活` }, by, capped);
     }
     return result("tell", { kind: "skip", reason: `${said}，可是多半不用回（${needs}）：只记录` }, by, capped);

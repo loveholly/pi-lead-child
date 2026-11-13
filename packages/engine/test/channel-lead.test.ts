@@ -9,7 +9,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { tempDir } from "@pi-lead-child/core/testing";
 import { MESSAGE_EVENT_KIND } from "@pi-lead-child/protocol";
-import { getChannelCard, listEvents, openDb, type Db } from "@pi-lead-child/store";
+import { getChannelCard, getStandingOrder, listEvents, openDb, proposeStandingOrderChange, type Db } from "@pi-lead-child/store";
 import { AUTHORITY_REFUSAL_TEXT, ChannelHub, ChannelRegistry, createSlackChannelAdapter, type ChannelHubOptions } from "../src/index.js";
 import { agentTaskResult, cardIdOf, FakeAgentTaskDispatcher, FakeSlack, scriptedSmartModel, type ScriptedSmartModel } from "../testing/index.js";
 
@@ -560,5 +560,76 @@ describe("reply first, then work", () => {
     await expect(channels.leadDispatch(request!.seq, { intent: "knowledge", summary: "查 ep-gateway 的维护人" }))
       .rejects.toMatchObject({ code: "invalid_action" });
     expect(dispatcher.requests).toEqual([]);
+  });
+});
+
+// #21（#18 的调查）：自动代你处理关着时，要回的概率低于门槛的消息以前也是 tell 级，每条单独叫醒 Lead（11-03 有 42 条）。
+// 现在是 digest 级：交给 Lead，并进摘要，不单独开一轮，也不拼上下文包（省一次对话摘要的模型调用）。
+describe("auto-handling off: a message that most likely needs no reply", () => {
+  const CONTEXT_EVENT = "message.context_packed";
+  const turnAutoReplyOff = () => {
+    const handbook = getStandingOrder(db, "channel.handbook")!;
+    const off = proposeStandingOrderChange(db, {
+      op: "update", id: "channel.handbook", reason: "测试：先别自动回了",
+      patch: { action: { ...handbook.action, params: { ...(handbook.action as any).params, autoReply: false } } as never },
+    });
+    expect(off.outcome).toBe("applied");
+  };
+  const model = () => jev({
+    needs_reply: (state) => (messageOf(state).includes("顺便说一下") ? 0.12 : 0.9),
+  });
+  const levelsOf = () => messages().map((event) => [event.payload.forSeq, event.level]);
+
+  it("goes to Lead at digest level with no context pack, and the card still opens", async () => {
+    turnAutoReplyOff();
+    const channels = hub(model());
+    const item = await receive(channels, slack.dm("U0ETHAN", "顺便说一下，测试环境下午重启"));
+    expect(getChannelCard(db, item.cardId)).toMatchObject({ state: "open" });
+    expect(messages()).toMatchObject([{ level: "digest", payload: { cardId: item.cardId, forSeq: item.seq } }]);
+    expect(listEvents(db, { kind: CONTEXT_EVENT })).toEqual([]);
+    expect(listEvents(db, { kind: "channel.authority.decided" }).at(-1)).toMatchObject({
+      payload: { forSeq: item.seq, action: "ask", reason: expect.stringContaining("并进摘要") },
+    });
+  });
+
+  it("still wakes Lead for a message that needs a reply", async () => {
+    turnAutoReplyOff();
+    const channels = hub(model());
+    const item = await receive(channels, slack.dm("U0ETHAN", "测试环境什么时候重启？"));
+    expect(levelsOf()).toEqual([[item.seq, "tell"]]);
+  });
+
+  it("batches several such messages from one conversation, but not behind one that is waiting at tell level", async () => {
+    turnAutoReplyOff();
+    const channels = hub(model());
+    const first = await receive(channels, slack.dm("U0ETHAN", "顺便说一下，测试环境下午重启"));
+    const second = await receive(channels, slack.dm("U0ETHAN", "顺便说一下，重启大概十分钟"));
+    expect(levelsOf()).toEqual([[first.seq, "digest"], [second.seq, "digest"]]);
+
+    const question = await receive(channels, slack.dm("U0ETHAN", "测试环境什么时候重启？"));
+    const third = await receive(channels, slack.dm("U0ETHAN", "顺便说一下，重启不影响生产"));
+    expect(levelsOf().slice(2)).toEqual([[question.seq, "tell"], [third.seq, "tell"]]);
+  });
+
+  // 回归：上下文包按交接说明的 digest 跳过，消息事件却因为前面有 tell 级的请求在等而是 tell 级：Lead 单独看它，没有上下文包。
+  it("packs the context for a message that stays at tell level behind a waiting request", async () => {
+    turnAutoReplyOff();
+    const channels = hub(model());
+    await receive(channels, slack.dm("U0ETHAN", "测试环境什么时候重启？"));
+    const third = await receive(channels, slack.dm("U0ETHAN", "顺便说一下，重启不影响生产"));
+    const event = messages().at(-1)!;
+    expect(event).toMatchObject({ level: "tell", payload: { forSeq: third.seq } });
+    expect(listEvents(db, { kind: CONTEXT_EVENT }).map((packed) => packed.payload.messageEvent)).toContain(event.seq);
+  });
+
+  // 回归：收件时判断成紧急的（Lead 接着时系统不直接推送，由 Lead 决定告诉用户），要回的概率再低也不能等摘要。
+  it("still wakes Lead, with a context pack, for an urgent message that needs no reply", async () => {
+    turnAutoReplyOff();
+    const channels = hub(model());
+    const item = await receive(channels, slack.dm("U0ETHAN", "紧急：顺便说一下，生产库十分钟后切换"));
+    const event = messages().at(-1)!;
+    expect(event).toMatchObject({ level: "tell", payload: { forSeq: item.seq, inbound: { urgent: true } } });
+    expect(pushes).toEqual([]);
+    expect(listEvents(db, { kind: CONTEXT_EVENT }).map((packed) => packed.payload.messageEvent)).toEqual([event.seq]);
   });
 });
