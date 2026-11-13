@@ -191,37 +191,59 @@ const DEFAULT_CONTEXT_WINDOW = DEFAULT_LEAD_CONTEXT_WINDOW;
 // Known windows (2026-11-12, prompt cache): a gateway (DeepSeek behind Azure or a self-hosted proxy) often lists a model
 // without its window, and Lead then assumed 128K and compacted about every 20K tokens. pi's built-in catalog knows the
 // real windows of the first-party models (DeepSeek V4: 1M), so a model id that matches one of them gets that window.
-// Only first-party catalogs: aggregators list the same ids with their own, often smaller, limits.
+// First-party catalogs come first: aggregators list the same ids with their own, often smaller, limits.
 const FIRST_PARTY_CATALOGS = [
   "deepseek", "anthropic", "openai", "google", "xai", "mistral", "moonshotai", "zai", "minimax", "xiaomi",
 ];
 // Windows the built-in catalog does not list (yet). deepseek-v4-flash: DeepSeek's pricing page, 1M context.
 const EXTRA_KNOWN_WINDOWS: Record<string, number> = { "deepseek-v4-flash": 1_000_000 };
-let knownWindows: Map<string, number> | null = null;
+let knownWindows: { firstParty: Map<string, number>; other: Map<string, number> } | null = null;
 
-function builtinWindows(): Map<string, number> {
+// The last part of a model id, lowercased: "deepseek-ai/DeepSeek-V4.1-Flash" -> "deepseek-v4.1-flash".
+function modelName(id: string): string {
+  return id.slice(id.lastIndexOf("/") + 1).toLowerCase();
+}
+
+function builtinWindows(): { firstParty: Map<string, number>; other: Map<string, number> } {
   if (knownWindows) return knownWindows;
-  const windows = new Map<string, number>(Object.entries(EXTRA_KNOWN_WINDOWS));
-  const providers = new Set<string>(getBuiltinProviders());
+  const providers = getBuiltinProviders();
+  const available = new Set<string>(providers);
+  const firstParty = new Map<string, number>(Object.entries(EXTRA_KNOWN_WINDOWS));
   for (const provider of FIRST_PARTY_CATALOGS) {
-    if (!providers.has(provider)) continue;
+    if (!available.has(provider)) continue;
     for (const model of getBuiltinModels(provider as Parameters<typeof getBuiltinModels>[0])) {
       const id = model.id.toLowerCase();
-      if (!windows.has(id) && positiveInteger(model.contextWindow)) windows.set(id, model.contextWindow);
+      if (!firstParty.has(id) && positiveInteger(model.contextWindow)) firstParty.set(id, model.contextWindow);
     }
   }
-  return (knownWindows = windows);
+  // A model that no first-party catalog lists yet (deepseek-v4.1-flash in pi-ai 1.5.2 is listed only by aggregators and
+  // resellers): the smallest window any other built-in catalog gives for the same name. The smallest one is the safe
+  // choice, because Lead compacts too late when the window is too large.
+  const other = new Map<string, number>();
+  const firstPartyProviders = new Set<string>(FIRST_PARTY_CATALOGS);
+  for (const provider of providers) {
+    if (firstPartyProviders.has(provider)) continue;
+    for (const model of getBuiltinModels(provider as Parameters<typeof getBuiltinModels>[0])) {
+      const window = positiveInteger(model.contextWindow);
+      if (window === null) continue;
+      const name = modelName(model.id);
+      const previous = other.get(name);
+      if (previous === undefined || window < previous) other.set(name, window);
+    }
+  }
+  return (knownWindows = { firstParty, other });
 }
 
 /**
  * The known context window of a model id, or null. Matches the last part of the id (after a gateway or account prefix
- * such as auto/ or as4/, without the effort suffix) against pi's built-in first-party catalogs.
+ * such as auto/ or as4/, without the effort suffix) against pi's built-in first-party catalogs. When none of them lists
+ * the model, it takes the smallest window that the other built-in catalogs give for the same name.
  */
 export function knownContextWindow(id: string): number | null {
-  const base = splitLeadModelEffort(id).base;
-  const name = base.slice(base.lastIndexOf("/") + 1).toLowerCase();
+  const name = modelName(splitLeadModelEffort(id).base);
   try {
-    return builtinWindows().get(name) ?? null;
+    const { firstParty, other } = builtinWindows();
+    return firstParty.get(name) ?? other.get(name) ?? null;
   } catch {
     return null;
   }

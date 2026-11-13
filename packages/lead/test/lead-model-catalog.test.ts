@@ -149,6 +149,40 @@ describe("the Lead model catalog", () => {
     expect(knownContextWindow("my-private-model")).toBeNull();
   });
 
+  // pi-ai 1.5.2 lists deepseek-v4.1-flash only in aggregator and reseller catalogs (1,000,000 and 1,048,576), not in
+  // DeepSeek's own. A model no first-party catalog lists gets the smallest window the other built-in catalogs give.
+  it("falls back to the smallest window of the other built-in catalogs when no first-party catalog lists the model", async () => {
+    for (const id of [
+      "deepseek-v4.1-flash", "DeepSeek-V4.1-Flash", "auto/DeepSeek-V4.1-Flash", "gateway/auto/deepseek-v4.1-flash",
+      "deepseek-ai/DeepSeek-V4.1-Flash", "deepseek-v4.1-flash(high)", "as4/DeepSeek-V4.1-Flash(max)",
+    ]) {
+      expect(knownContextWindow(id), id).toBe(1_000_000);
+    }
+    // First-party catalogs still come first.
+    expect(knownContextWindow("deepseek-v4-pro")).toBe(1_000_000);
+    expect(knownContextWindow("auto/DeepSeek-V4-Pro")).toBe(1_000_000);
+    expect(knownContextWindow("deepseek-v4-flash")).toBe(1_000_000);
+    expect(knownContextWindow("my-private-model")).toBeNull();
+    expect(knownContextWindow("auto/my-private-model(high)")).toBeNull();
+
+    // Lead still registers it at most at LEAD_CONTEXT_WINDOW_LIMIT.
+    const registered: Array<{ id: string; contextWindow: number }> = [];
+    await registerLeadProviders(
+      { registerProvider(_name: string, input: { models?: typeof registered }) { registered.push(...(input.models ?? [])); } } as never,
+      normalizeLeadModelConfig({
+        providers: {
+          gateway: {
+            baseUrl: "http://127.0.0.1:9/v1", apiKey: { value: "k" }, discover: false, models: ["auto/DeepSeek-V4.1-Flash"],
+          },
+        },
+        models: ["gateway/auto/DeepSeek-V4.1-Flash"],
+      }),
+      {},
+    );
+    expect(LEAD_CONTEXT_WINDOW_LIMIT).toBe(500_000);
+    expect(registered.find((model) => model.id === "auto/DeepSeek-V4.1-Flash")?.contextWindow).toBe(LEAD_CONTEXT_WINDOW_LIMIT);
+  });
+
   it("shows the window the settings page can trust: config.json's, the catalog's, the known one, or none", async () => {
     const { models } = await leadModelCatalog(normalizeLeadModelConfig({
       providers: {
