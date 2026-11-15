@@ -3,8 +3,8 @@ import {
   type ColorToken, type SegmentItem, type TextTone,
 } from '@pi-lead-child/components';
 import {
-  CHANNEL_CARD_TEXT_MAX, channelPolicyLabels, classifyLeadModelError, leadModelFailureShortLabel, type ChannelCardAction, type ChannelCardDto,
-  type LeadStatus,
+  CHANNEL_CARD_TEXT_MAX, channelPolicyLabels, classifyLeadModelError, leadModelFailureShortLabel, sourceLink, type ChannelCardAction,
+  type ChannelCardDto, type LeadStatus,
 } from '@pi-lead-child/protocol';
 import { Fragment, useEffect, useState, type ReactNode } from 'react';
 
@@ -308,6 +308,8 @@ export function ChannelMessageCard({ card, onAction, onOpenTicket, now, lead, le
     act(action);
   };
   const status = statusOf(card, view, m);
+  // 在来源里打开（例如 Slack 的 thread、私信）：daemon 给的地址再过一遍，只认 https。没有时不画。
+  const link = sourceLink(card.link);
   const fairy = fairyLine(card, view, m, leadName, locale, lead);
   const score = scoreOf(card, view, m);
   const header = (
@@ -380,6 +382,11 @@ export function ChannelMessageCard({ card, onAction, onOpenTicket, now, lead, le
     <Column p="card" gap="card-row" testID={`channel-card-${card.id}-panel`}>
       <Row items="center" gap="inline-item">
         <Box flex={1} minW={0}>{header}</Box>
+        {link ? (
+          <Link href={link} underline="hover" size="meta" shrink={0} testID={`channel-card-${card.id}-open-in-source`}>
+            {m.openIn(card.sourceLabel)}
+          </Link>
+        ) : null}
         {inPanel ? null : (
           <IconButton icon="chevron-up" label={m.collapse} size="xs" variant="ghost" onPress={() => setOpen(false)} testID={`channel-card-${card.id}-collapse`} />
         )}

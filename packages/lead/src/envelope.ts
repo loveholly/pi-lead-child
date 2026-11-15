@@ -12,7 +12,7 @@
 import {
   CHANNEL_INTENT_LABELS, CHANNEL_RULE_CHANGE_FLAG, CHAT_IMAGE_ID_PATTERN, channelRuleChangeNotice, isChannelIntent, isChannelRuleChangeKind,
   HANDBOOK_ABILITY_LABELS, HANDBOOK_MODE_LABELS, HANDBOOK_MODE_PHRASES, isHandbookMode, isSenderTrust, messageEventConversationKey, redactAndCap,
-  SENDER_TRUST_LABELS, type HandbookAbility, type HandbookMode,
+  SENDER_TRUST_LABELS, sourceLink, type HandbookAbility, type HandbookMode,
 } from "@pi-lead-child/protocol";
 
 export type LeadSystemEventKind =
@@ -276,6 +276,15 @@ export function cardLinkHint(cardId: number, senderName: string | null): string 
   return `对用户提到这条消息时写成 [${who} 的消息](plc:card/${cardId})，用户在 App 里点了能打开这张卡；card_id=${cardId} 只用在调工具的参数里，不写给用户看。`;
 }
 
+// 在来源里打开这条消息的现成写法（payload 的 link）：用户在 App 和 plc 里点了直接去来源里看。地址是来源插件拼的，
+// 这里再过一遍（只认 https），带括号、空白的不给（会弄坏 Markdown 链接）。发给谁的规则只写在系统提示词里，这里只给写法。
+export function sourceLinkHint(link: unknown, sourceLabel: string): string | null {
+  const url = sourceLink(link);
+  if (!url || /[()\s]/u.test(url)) return null;
+  const label = sourceLabel.replace(/[[\]()\n]/gu, " ").trim().slice(0, 40) || "来源";
+  return `要带用户去 ${label} 里看这段对话时，写成 [在 ${label} 中打开](${url})。`;
+}
+
 /**
  * 一条外部通道的消息事件（message.received）给 Lead 的文字：结构化的事实，加上外部标签里的原话。
  * contextIn：同一个对话里几条消息事件一起交给 Lead 时（工单 10），上下文包只给最新的那一份（它是哪一条的编号）。
@@ -298,6 +307,8 @@ export function leadMessageEventBlock(event: LeadEventLike, options: { contextIn
   lines.push(CHANNEL_SKILL_HINT);
   const cardId = countOf(payload.cardId);
   if (cardId > 0) lines.push(cardLinkHint(cardId, textOf(sender.name)));
+  const openIn = sourceLinkHint(payload.link, textOf(payload.sourceLabel) ?? textOf(payload.source) ?? "");
+  if (openIn) lines.push(openIn);
   const edits = typeof payload.edits === "number" ? payload.edits : 0;
   if (edits > 0) lines.push(`对方编辑过 ${edits} 次，下面是编辑以后的版本。`);
   if (inbound) {

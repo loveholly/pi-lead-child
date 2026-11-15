@@ -41,6 +41,8 @@ export interface ExternalMessageInput {
   summary: string;
   // 上下文包（spec D5，context-pack.ts）。没拼成时是 null。
   context?: MessageContext | null;
+  // 在来源里打开这条消息的地址（hub 按 ChannelAdapter.link 取，已经过了 sourceLink）。没有时是 null。
+  link?: string | null;
 }
 
 const isGrantIntent = (value: string | null): value is GrantIntent => value !== null && (GRANT_INTENTS as readonly string[]).includes(value);
@@ -102,6 +104,7 @@ export function externalMessageEvent(input: ExternalMessageInput): MessageReceiv
     edits: Math.max(input.messages.length - 1, 0),
     cardId: input.cardId,
     summary: input.summary,
+    ...(input.link ? { link: input.link } : {}),
   };
 }
 

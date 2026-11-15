@@ -221,6 +221,8 @@ export interface ChannelRecentConversation {
   updatedAt: string;
   // 道的一行摘要（几条消息、卡的状态）。
   summary: string;
+  // 在来源里打开这个对话最新的一条消息（ChannelAdapter.link，只会是 https）。来源给不出时是 null。
+  link: string | null;
 }
 
 /** 还在等你的一张卡（ChannelHub.openCards）：给 Lead 自查，只有结构化的事实。since 是卡上最新一条消息的时间。 */
@@ -505,6 +507,12 @@ export interface ChannelAdapter {
    * 不能写时 capabilities 里这几项同时是 false：hub、卡片和 Lead 的工具都按 capabilities 判断，这里只给原因。
    */
   writesBlocked?(): string | null;
+  /**
+   * 只读：在来源里打开一条消息的地址（会话卡上的「在 X 中打开」、交给 Lead 的消息事件）。payload 是这个来源的一条入站事件的
+   * payload（适配器自己的字段在里面）。用户本人登录来源以后才看得到，地址里不能有凭据。不调来源的接口；认不出、给不出时返回 null。
+   * hub 只收 https 的地址（protocol 的 sourceLink）。不支持时没有。
+   */
+  link?(payload: Readonly<Record<string, unknown>>): string | null;
   /** 记忆沉淀（channels/memory.ts）。没有时这个来源的对话不沉淀。 */
   readonly memory?: ChannelMemorySpec;
   /**
