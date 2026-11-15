@@ -81,6 +81,9 @@ export interface LeadModelFailover {
   stayOn(spec: string): void;
   // 额度用尽、还在跳过的模型和可以再用的时间（毫秒时间戳）。
   blockedModels(now?: number): Array<{ model: string; until: number }>;
+  // 最早什么时候可能换模型：换回第一个模型的时间（restore 看它），或者某个模型的额度封禁到期。没有时是 null。
+  // daemon 叫醒 Lead 的长退避不等过这个时间（换模型只在一轮开始时做）。
+  returnAt(now?: number): number | null;
   // 手动清掉额度的封禁（判断错了，或者用户说额度已经恢复）：给了模型只清它，不给清全部。返回清掉了哪些。
   clearBlocked(spec?: string): string[];
 }
@@ -353,6 +356,11 @@ export function createLeadModelFailover(options: {
     },
     blockedModels(now = clock()) {
       return Object.entries(blocked).filter(([, until]) => until > now).map(([model, until]) => ({ model, until }));
+    },
+    returnAt(now = clock()) {
+      const times = Object.values(blocked).filter((until) => until > now);
+      if (desired !== 0 && restoreAt !== null) times.push(restoreAt);
+      return times.length ? Math.min(...times) : null;
     },
     clearBlocked(spec) {
       const cleared = Object.keys(blocked).filter((model) => spec === undefined || model === spec);

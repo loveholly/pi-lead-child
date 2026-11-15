@@ -12,6 +12,7 @@ import { leadFairy, leadPresence, type LeadPresence } from './leadPresence';
 // 会话顶栏左侧的 Lead 身份：形象、名字和 Lead 的状态（在线、降级、离线，见 ./leadPresence）。
 // 方案 C（主题 F-7、11.14）：只在手机上和左栏收起时放在顶栏；形象的状态和左栏头部一样（leadFairy）。
 // 已经配对时点它打开设置的「本设备」；还没配对时打开配对页。手机上这里就是设置的入口。
+// Lead 的模型要用户处理时（没有 key、key 错，leadPresence 的 needsModelSetup）打开设置 → 模型。
 export function LeadIdentity({ compact = false }: { compact?: boolean }) {
   const router = useRouter();
   const phase = useConnectionPhase();
@@ -19,7 +20,7 @@ export function LeadIdentity({ compact = false }: { compact?: boolean }) {
   const name = useLeadName();
   const fairy = leadFairy(presence, useLeadBusy());
   const source = useLeadAvatarSource(fairy);
-  const target = isDevicePaired(phase) ? '/settings/device' : '/pair';
+  const target = !isDevicePaired(phase) ? '/pair' : presence.needsModelSetup ? '/settings/model' : '/settings/device';
 
   return (
     <Pressable testID="lead-identity" onPress={() => router.push(target as Href)} h={48} rounded="md" justify="center">

@@ -45,7 +45,9 @@ export function isLeadTransportFailure(raw: string): boolean {
 }
 // auth_unavailable、no auth available 本身不算：代理在所有账号冷却、或者上游暂时 5xx 时也这么回，那是短暂的故障，
 // 系统应该自己再试（发布评审）。带着上游的 401、403 时，靠后面的上游错误认出来。
-const AUTH = /\b40[13]\b|unauthori[sz]ed|forbidden|invalid[ _-]?(?:x-)?api[ _-]?key|authentication failed|认证失败/i;
+// pi 发 prompt 前的检查：这个服务商没有 key（"No API key found for openai."）。不调模型，再试也一样（2026-11：缺省模型没有 key，
+// 每一轮都这样失败了三天，以前分成 unknown，顶栏不显示）。
+const AUTH = /\b40[13]\b|unauthori[sz]ed|forbidden|invalid[ _-]?(?:x-)?api[ _-]?key|no api key found|authentication failed|认证失败/i;
 // 到模型服务的路被拦了：Anthropic 按请求的来源（地区）拒绝，回 403 forbidden "Request not allowed"。代理的
 // 503 auth_unavailable 里也会带着它。2026-11-06：Mac 休眠中短暂唤醒时 DNS 通了，流量却没有走 VPN；同一条路上
 // 不带 key 的请求回 401（地区放行了，只是缺 key）。这不是账号的问题，换模型也一样（所有模型走同一条路）：

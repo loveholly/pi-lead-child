@@ -218,6 +218,15 @@ describe('the gateway address', () => {
     expect(await c.getOwnBinding()).toEqual(binding);
     expect(calls[0]!.url).toBe('http://daemon.test/v1/paired/me');
   });
+
+  // 配对那时存下的 scope 比网关现在给的多（后来按来历去掉了 approvals:respond）：存着的凭证换成网关回的。
+  it('keeps the stored binding in step with the scopes the gateway gives now', async () => {
+    const credentials = memoryCredentials(4);
+    const effective = { ...binding, scopes: binding.scopes.filter((scope) => scope !== 'approvals:respond') };
+    const c = new ControlPlaneClient({ fetch: (async () => response({ binding: effective })) as typeof fetch, credentials });
+    expect(await c.getOwnBinding()).toEqual(effective);
+    expect(credentials.record).toMatchObject({ accessToken: 'secret', lastSeq: 4, binding: effective });
+  });
 });
 
 describe('presence', () => {

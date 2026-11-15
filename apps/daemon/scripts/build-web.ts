@@ -17,7 +17,10 @@ const root = projectRoot();
 const companion = join(root, "apps", "companion");
 // workspaces 会把 expo 提升到仓库根的 node_modules，只有版本冲突时才留在 apps/companion 自己的 node_modules。
 const expo = [join(companion, "node_modules", ".bin", "expo"), join(root, "node_modules", ".bin", "expo")].find(existsSync);
-const dist = distDir();
+// --outdir：supervisor 维护时和 daemon 一起构建到暂存目录（dist/.next），网页包在它下面的 web/（#45）。
+const outdirArg = process.argv.indexOf("--outdir");
+const dist = outdirArg > 0 ? process.argv[outdirArg + 1] : distDir();
+if (!dist) throw new Error("--outdir needs a directory");
 const target = join(dist, "web");
 const staging = join(dist, `.web-staging-${process.pid}`);
 const previous = join(dist, `.web-previous-${process.pid}`);

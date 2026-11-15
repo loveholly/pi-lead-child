@@ -359,11 +359,12 @@ sub-tickets per phase in §8.
 
 ### 部署闸门
 
-- `npm run build` 开始时先删掉 `apps/daemon/dist/build-info.json`，构建成功后再写一份新的：构建的 commit，以及构建时源码有没有没提交的改动。构建中途失败时，闸门看到的是「没有记录」。
+- `npm run build` 开始时先删掉 `apps/daemon/dist/build-info.json`，构建成功后再写一份新的：构建的 commit，以及构建时源码有没有没提交的改动（构建期间 HEAD 变了也算有改动）。构建中途失败时，闸门看到的是「没有记录」。产物先写带 pid 的临时文件再改名，构建记录最后写。
 - 闸门在 Supervisor 的维护入口里（`request_maintenance`），每条重启路径都经过它：Lead 的 `request_runtime_maintenance`、换 Lead 模型以后 daemon 发起的重启、`plc daemon restart` 和 `plc daemon upgrade`。以下情况拒绝，daemon 不动，原因返回给请求方：
   - 主 checkout 里会进构建的代码有没提交的改动：`packages/`、`apps/` 下的改动和新文件，以及仓库根目录下的文件。`docs/`、`artifacts/`、`.scratch/` 和测试文件（`test/` 目录下的、`*.test.*`、`*.spec.*`）不算。
-  - dist 没有构建记录，构建时有改动，或者构建的 commit 不在主 checkout 当前分支的历史里。
-- 换模型的重启被拒绝时，daemon 写一条叫醒 Lead 的 inbox：新模型要等下一次重启才生效。
+  - 构建的 commit 不在主 checkout 当前分支的历史里、不在仓库里，或者 git 说不清（超时）。
+- 主 checkout 干净，dist 却没有构建记录、构建时有改动，或者落后于 HEAD（构建的 commit 是 HEAD 的祖先）时不拒绝：`status` 的 `deploy.rebuild` 为 true，维护在停机之前先从 HEAD 构建（`buildDaemonDist`：先 cli、再 daemon，只给构建 PATH、HOME 这类环境变量，到时 SIGTERM、再 SIGKILL，supervisor 停下时取消；构建期间 phase 是 `building`）。daemon 构建到暂存目录 `dist/.next`，plc 的 cli 构建到 `dist/.next/cli`，dist 和 `apps/cli/dist` 都不动。构建完回到 pending，重新等 Lead 和 Run 排空，再对暂存的构建过闸门；备份成功以后、停机之前才把 daemon 和 cli 一起换进去（逐个改名，构建记录最后，`dist/web` 不动；被换下的旧文件先挪到一边，中途出错就全部换回去）。构建失败、构建出来的不是请求时的 HEAD（构建期间 HEAD 变了）、之后的闸门或备份失败、换不进去，都丢掉暂存的构建，旧 cli 和旧 daemon 都留着，daemon 不停，这次维护记成失败。
+- 换模型的重启被拒绝时，daemon 写一条叫醒 Lead 的 inbox：新模型要等下一次重启才生效。维护被接受以后才在停机前失败的（构建、备份、复查闸门），Supervisor 经 plc.sock 发 `maintenance_failed`（只带维护的 id），daemon 向 Supervisor 核对以后写一条叫醒 Lead 的 inbox。inbox 只写失败的类别（`failureKind`），不写构建输出；同一次维护只报一次。
 - 通过以后，Supervisor 等 Lead 这一轮结束（busy=false）、等接管不了的 Run 排空，再查一次闸门，然后按这个顺序做：
   1. 请 daemon 排空 Lead（drain）。
   2. 在线备份数据库到 `~/.pi-lead-child/backups/`：一步复制全部页面，最多 60 秒。超时或者失败时删掉半成品，不停 daemon，这次维护记成失败；排空了的 daemon 过一会儿自己恢复 Lead 的回合。

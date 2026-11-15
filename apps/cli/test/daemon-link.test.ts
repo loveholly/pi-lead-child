@@ -2,7 +2,7 @@
 import { createServer, type Server } from "node:net";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { tempDir } from "@pi-lead-child/core/testing";
-import { CliError, daemonStatus, ensureDaemon } from "../src/daemon-link.js";
+import { AUTO_START_REFUSED, CliError, DAEMON_STILL_STARTING, daemonStatus, ensureDaemon } from "../src/daemon-link.js";
 import { localRequest, plcSockPath } from "../src/local-socket.js";
 
 let dir: string;
@@ -60,6 +60,18 @@ describe("ensureDaemon", () => {
     await expect(failure).rejects.toThrow("原因见上一行");
     await expect(failure).rejects.not.toThrow("plc daemon start");
     await expect(failure).rejects.not.toThrow("supervisor.log");
+  });
+
+  // 2026-11-02：supervisor 还在等 daemon 就绪时，ops 入口等到期限、退出码 4，并打印了「daemon 仍在启动」。
+  // 这不是启动失败：不给「启动失败、查日志、跑 plc doctor」的提示。
+  it("does not report a failed start when the ops entry says the daemon is still starting (exit code 4)", async () => {
+    const failure = ensureDaemon({ request: localRequest, start: async () => DAEMON_STILL_STARTING, notice: () => {}, dir });
+    await expect(failure).rejects.toBeInstanceOf(CliError);
+    await expect(failure).rejects.toThrow("还在启动");
+    await expect(failure).rejects.not.toThrow("启动失败");
+    await expect(failure).rejects.not.toThrow("plc doctor");
+    expect(DAEMON_STILL_STARTING).toBe(4);
+    expect(DAEMON_STILL_STARTING).not.toBe(AUTO_START_REFUSED);
   });
 
   it("fails with a hint when the start fails", async () => {

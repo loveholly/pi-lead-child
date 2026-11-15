@@ -131,7 +131,7 @@ export function createLookupSessionFactory(input: {
     const modelRuntime = await ModelRuntime.create({
       allowModelNetwork: false, refreshOnCreate: false, ...(input.authPath ? { authPath: input.authPath } : {}),
     });
-    const notes = await registerLeadProviders(modelRuntime, config, env, fetch, { maxOutputTokens: LOOKUP_MAX_OUTPUT_TOKENS });
+    const { notes } = await registerLeadProviders(modelRuntime, config, env, fetch, { maxOutputTokens: LOOKUP_MAX_OUTPUT_TOKENS });
     for (const note of notes) input.log?.(`[lookup] ${note}`);
     const choice = selectSmartModelSpec({
       env,

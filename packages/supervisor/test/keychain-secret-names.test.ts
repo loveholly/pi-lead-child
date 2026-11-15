@@ -3,7 +3,7 @@
 import { describe, expect, it } from "vitest";
 import { KNOWN_SECRET_ENV_NAMES } from "@pi-lead-child/protocol";
 import { sandboxSecrets } from "@pi-lead-child/core";
-import { KEYCHAIN_ENV_KEYS } from "../src/deploy/keychain.js";
+import { KEYCHAIN_ENV_KEYS, keychainServiceName, keychainSetCommand } from "../src/deploy/keychain.js";
 
 describe("the Keychain-injected keys", () => {
   it("are all known secrets for redaction", () => {
@@ -15,5 +15,15 @@ describe("the Keychain-injected keys", () => {
   it("bring NPM_TOKEN into the sandbox only as a placeholder bound to the npm registry", () => {
     expect(KEYCHAIN_ENV_KEYS).toContain("NPM_TOKEN");
     expect(sandboxSecrets({ NPM_TOKEN: "npm_1234567890abcdefABCDEF" }).masked).toEqual([{ name: "NPM_TOKEN", injectHosts: ["registry.npmjs.org"] }]);
+  });
+});
+
+describe("keychainSetCommand", () => {
+  // 给用户照抄的写入命令：服务名和读取时一致；-w 放最后不带值，security 交互式提示输入，命令里不出现明文。
+  it("writes the service name the supervisor reads, and asks for the value interactively", () => {
+    const command = keychainSetCommand("AM_API_KEY");
+    expect(command).toBe('security add-generic-password -U -a "$USER" -s "dev-secret:AM_API_KEY" -w');
+    expect(command).toContain(`-s "${keychainServiceName("AM_API_KEY")}"`);
+    expect(command.endsWith(" -w")).toBe(true);
   });
 });

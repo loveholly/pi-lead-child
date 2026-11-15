@@ -5,8 +5,8 @@
   "description": "The daemon service: the coordinatord entry and the composition root that wires the kernel, gateway, lead and supervisor together.",
   "type": "module",
   "scripts": {
-    "build": "tsx scripts/build.ts",
-    "build:web": "tsx scripts/build-web.ts",
+    "build": "node --import tsx scripts/build.ts",
+    "build:web": "node --import tsx scripts/build-web.ts",
     "test": "cd ../.. && vitest run apps/daemon"
   },
   "dependencies": {
