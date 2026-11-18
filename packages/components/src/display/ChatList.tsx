@@ -1,5 +1,5 @@
 import { LegendList, type LegendListRef } from '@legendapp/list/react-native';
-import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { createContext, useCallback, useContext, useEffect, useImperativeHandle, useMemo, useRef, useState, type ReactNode, type Ref } from 'react';
 import { Platform, View, type ViewProps } from 'react-native';
 
 import { Pressable } from '../primitives/Pressable';
@@ -9,6 +9,12 @@ import { Text } from '../primitives/Text';
 import { Icon } from './Icon';
 import { useMessages } from '../i18n';
 import { displayMessages } from './display.messages';
+
+/** 从外面把列表滚到某一块（会话搜索的「跳到这条」，工单 #339）。 */
+export type ChatListHandle = {
+  /** 滚到 key 那一块，放在可视区偏上的位置。没有这一块时返回 false。 */
+  scrollToKey: (key: string, options?: { animated?: boolean }) => boolean;
+};
 
 export type ChatListProps<T> = {
   /** 会话里的块，从旧到新。 */
@@ -26,8 +32,14 @@ export type ChatListProps<T> = {
   followKey?: string | number | null;
   /** 内容不满一屏时贴在底部，像聊天一样。缺省 true。 */
   bottomAligned?: boolean;
-  /** 离开底部以后有新内容时，底部按钮上的字。 */
+  /** 不在底部时，底部按钮上的字（没有新消息时）。缺省「回到最新」。 */
   newContentLabel?: string;
+  /** 有 n 条新消息时，底部按钮上的字。缺省「n 条新消息」。 */
+  newCountLabel?: (count: number) => string;
+  /** 外面通过它把列表滚到某一块。 */
+  handleRef?: Ref<ChatListHandle>;
+  /** 这一块整条高亮（会话搜索命中的那条）。null 不高亮。 */
+  highlightKey?: string | null;
   /** 相邻两块之间的间距。缺省是会话流的 conversation-block。 */
   gap?: ColumnProps['gap'];
   /** 第一块上面：留白、连接状态、更早的消息的加载状态。 */
@@ -117,12 +129,24 @@ function useGapSeparator(gap: ColumnProps['gap'], testID: string | undefined) {
 
 function VirtualChatList<T>({
   data, keyExtractor, renderItem, extraData, testID, followKey, bottomAligned = true, newContentLabel: newContentLabelProp,
+  newCountLabel, handleRef, highlightKey = null,
   gap = 'conversation-block', header, footer, empty, onStartReached, estimatedItemSize = ESTIMATED_ITEM_SIZE,
 }: ChatListProps<T>) {
   const m = useMessages(displayMessages);
-  const newContentLabel = newContentLabelProp ?? m.newMessages;
   const listRef = useRef<LegendListRef | null>(null);
-  const [newBelow, setNewBelow] = useState(false);
+  // 底部按钮（工单 #339）：不在底部就显示；离开底部以后下面多出来的块数记在 newCount 里，按钮上写条数。
+  // 最后一块在变长（流式输出）时不多出块，newGrowing 只让按钮出现，不写条数。
+  const [atBottom, setAtBottom] = useState(true);
+  const [newCount, setNewCount] = useState(0);
+  const [newGrowing, setNewGrowing] = useState(false);
+  const setNewBelow = useCallback((value: boolean) => {
+    if (!value) {
+      setNewCount(0);
+      setNewGrowing(false);
+    }
+  }, []);
+  const dataRef = useRef(data);
+  dataRef.current = data;
   const Separator = useGapSeparator(gap, testID);
   const lastKey = data.length ? keyExtractor(data[data.length - 1]!) : null;
 
@@ -136,22 +160,33 @@ function VirtualChatList<T>({
   useEffect(() => {
     const state = listRef.current?.getState();
     if (!state) return undefined;
-    const hide = (value: boolean) => { if (value) setNewBelow(false); };
+    const sync = () => {
+      const live = listRef.current?.getState();
+      setAtBottom(live ? live.isFollowingEnd || live.isAtEnd : true);
+    };
+    const hide = (value: boolean) => {
+      if (value) setNewBelow(false);
+      sync();
+    };
+    sync();
     const offFollowing = state.listen('isFollowingEnd', hide);
     const offEnd = state.listen('isAtEnd', hide);
     return () => {
       offFollowing();
       offEnd();
     };
-  }, []);
+  }, [setNewBelow]);
 
-  // 最下面多了一块（不是上面插进了更早的）：你不在底部时说一声。
+  // 最下面多了块（不是上面插进了更早的）：你不在底部时数一数多了几块。
   const previousLastKey = useRef(lastKey);
   useEffect(() => {
     const previous = previousLastKey.current;
     previousLastKey.current = lastKey;
-    if (previous !== null && lastKey !== null && lastKey !== previous && !following()) setNewBelow(true);
-  }, [following, lastKey]);
+    if (previous === null || lastKey === null || lastKey === previous || following()) return;
+    const rows = dataRef.current;
+    const previousIndex = rows.findIndex((item) => keyExtractor(item) === previous);
+    setNewCount((count) => count + (previousIndex >= 0 ? Math.max(1, rows.length - 1 - previousIndex) : 1));
+  }, [following, keyExtractor, lastKey]);
 
   // 你点开、收起一块（useKeepChatBlockInPlace）：锁住这一块的顶部。Legend List 贴底跟随时 anchorVisibleContent 不锁，
   // 内容变矮以后它把列表重新贴底，而且比卡片晚几帧：卡片先收起、底下空一截，接着整个列表往下跳。所以先停下跟随再锁。
@@ -170,7 +205,7 @@ function VirtualChatList<T>({
 
   // 最后一块变长（流式输出、卡片画完）：你不在底部时同样说一声。
   const onItemSizeChanged = useCallback((info: { size: number; previous: number; itemKey: string }) => {
-    if (info.itemKey === previousLastKey.current && info.size > info.previous + 1 && !following()) setNewBelow(true);
+    if (info.itemKey === previousLastKey.current && info.size > info.previous + 1 && !following()) setNewGrowing(true);
     if (!resumeFollow.current) return;
     requestAnimationFrame(() => {
       const state = listRef.current?.getState();
@@ -237,16 +272,31 @@ function VirtualChatList<T>({
   const backToBottom = useCallback(() => {
     setNewBelow(false);
     void listRef.current?.scrollToEnd({ animated: true });
-  }, []);
+  }, [setNewBelow]);
+
+  useImperativeHandle(handleRef, () => ({
+    scrollToKey: (key, options) => {
+      const index = dataRef.current.findIndex((item) => keyExtractor(item) === key);
+      if (index < 0 || !listRef.current) return false;
+      void listRef.current.scrollToIndex({ index, animated: options?.animated ?? true, viewPosition: 0.25 });
+      return true;
+    },
+  }), [keyExtractor]);
 
   const renderBlock = useCallback(({ item, index }: { item: T; index: number }) => {
     const key = keyExtractor(item);
-    return (
+    const block = (
       <View {...blockKeyProps(key)}>
         <ChatBlockScope blockKey={key} keep={keepBlockInPlace}>{renderItem(item, index)}</ChatBlockScope>
       </View>
     );
-  }, [keepBlockInPlace, keyExtractor, renderItem]);
+    // 始终包一层：高亮开关时子树不换类型，卡片里展开的状态、正在加载的图不会被重挂载丢掉。
+    return key === highlightKey
+      ? <Box testID={testID ? `${testID}-highlight` : undefined} bg="accent-soft" rounded="md">{block}</Box>
+      : <Box rounded="md">{block}</Box>;
+  }, [highlightKey, keepBlockInPlace, keyExtractor, renderItem, testID]);
+  // 高亮的那一块变了，看得见的块要重画（列表按 extraData 缓存每一块）。
+  const listExtra = useMemo(() => ({ extraData, highlightKey }), [extraData, highlightKey]);
 
   return (
     <Column testID={testID} flex={1} minH={0} position="relative">
@@ -256,7 +306,7 @@ function VirtualChatList<T>({
         data={data}
         keyExtractor={keyExtractor}
         renderItem={renderBlock}
-        extraData={extraData}
+        extraData={listExtra}
         estimatedItemSize={estimatedItemSize}
         drawDistance={DRAW_DISTANCE}
         alwaysRender={{ bottom: ALWAYS_RENDER_LAST }}
@@ -274,7 +324,13 @@ function VirtualChatList<T>({
         {...(Platform.OS === 'web' ? {} : { keyboardShouldPersistTaps: 'handled' as const })}
         style={LIST_STYLE}
       />
-      {newBelow ? <NewContentButton testID={testID} label={newContentLabel} onPress={backToBottom} /> : null}
+      {!atBottom ? (
+        <NewContentButton
+          testID={testID}
+          label={newCount > 0 ? (newCountLabel ?? m.newMessagesCount)(newCount) : newContentLabelProp ?? (newGrowing ? m.newMessages : m.backToLatest)}
+          onPress={backToBottom}
+        />
+      ) : null}
     </Column>
   );
 }

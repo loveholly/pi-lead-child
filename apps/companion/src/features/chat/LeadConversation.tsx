@@ -1,7 +1,7 @@
 import { Density, PopoverAnchorView, type PopoverAnchor, type PopoverAnchorHandle } from '@pi-lead-child/components';
 import {
-  AbsenceTail, Box, Button, Card, ChatList, Column, ConversationColumn, Dot, Icon, IconButton, ImageThumbnail, KeyboardArea, LeadAvatar, MessageBubble, NoticeRow,
-  Pressable, Row,
+  AbsenceTail, Box, Button, Card, ChatList, type ChatListHandle, Column, ConversationColumn, Dot, Icon, IconButton, ImageThumbnail, KeyboardArea, LeadAvatar, MessageBubble, NoticeRow,
+  Pressable, Row, isWeb,
   Spacer,
   Text,
 } from '@pi-lead-child/components';
@@ -14,13 +14,17 @@ import {
   type TicketSummary,
   validateUiSurface,
 } from '@pi-lead-child/protocol';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter } from 'expo-router';
 import { ticketsNeedingUser } from '@pi-lead-child/protocol';
 
 import { useLocale, type Locale } from '@/i18n';
 
 import { conversationMessages } from './conversation.messages';
+import { rowKeyForTurn } from './conversationSearch';
+import { ConversationSearchPanel } from './ConversationSearchPanel';
+import { conversationSearchMessages } from './conversationSearch.messages';
+import type { SearchEntry } from './useConversationSearch';
 import { placementCopyFor, steeredNoticeFor } from './steeredNotice';
 import { assistantMessageHasContent } from './assistantContent';
 import { leadSenderLabel, systemNoticeLabel } from './senderLabel';
@@ -324,6 +328,84 @@ export function LeadConversation({ compact = false, railOpen = true, onOpenRail,
     if (conversationCardPage?.hasMore && (retry || !historyRequest.error)) void loadOlderConversationCards();
   };
 
+  // 会话搜索（工单 #339）。Cmd/Ctrl+F 或搜索钮打开；命中的那一条整条高亮 2 秒；关掉时清除高亮，滚动位置不动。
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [highlightKey, setHighlightKey] = useState<string | null>(null);
+  const listHandle = useRef<ChatListHandle | null>(null);
+  const highlightTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // 连按「下一条」时只认最后一次跳转：前面的取更早轮次、补滚都作废。
+  const jumpToken = useRef(0);
+  const jumpAbort = useRef<AbortController | null>(null);
+  const settleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // 取到更早的轮次以后，要用最新的行去找命中的那一行：记在 ref 里。
+  const latest = useRef({ rows, messagesById, turnsById });
+  latest.current = { rows, messagesById, turnsById };
+  const cancelJump = useCallback(() => {
+    jumpToken.current += 1;
+    jumpAbort.current?.abort();
+    jumpAbort.current = null;
+    if (settleTimer.current) clearTimeout(settleTimer.current);
+    settleTimer.current = null;
+  }, []);
+  const clearHighlight = useCallback(() => {
+    if (highlightTimer.current) clearTimeout(highlightTimer.current);
+    highlightTimer.current = null;
+    setHighlightKey(null);
+  }, []);
+  const closeSearch = useCallback(() => {
+    setSearchOpen(false);
+    cancelJump();
+    clearHighlight();
+  }, [cancelJump, clearHighlight]);
+  useEffect(() => () => {
+    cancelJump();
+    if (highlightTimer.current) clearTimeout(highlightTimer.current);
+  }, [cancelJump]);
+  useEffect(() => {
+    if (!isWeb) return undefined;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if ((event.metaKey || event.ctrlKey) && !event.shiftKey && !event.altKey && event.key.toLowerCase() === 'f') {
+        event.preventDefault();
+        setSearchOpen(true);
+      }
+    };
+    document.addEventListener('keydown', onKeyDown);
+    return () => document.removeEventListener('keydown', onKeyDown);
+  }, []);
+  const searchClient = useMemo(() => ({
+    search: (input: Parameters<typeof runtime.searchConversation>[0], signal?: AbortSignal) => runtime.searchConversation(input, signal),
+    agent: (description: string, signal?: AbortSignal) => runtime.findConversationWithAgent(description, signal),
+  }), [runtime]);
+  const jumpToSearchEntry = useCallback(async (entry: SearchEntry): Promise<boolean> => {
+    cancelJump();
+    const token = jumpToken.current;
+    const controller = new AbortController();
+    jumpAbort.current = controller;
+    const loaded = Boolean(latest.current.turnsById[entry.turnId]);
+    if (!loaded) {
+      if (!await runtime.revealConversationTurn(entry.turnId, controller.signal)) {
+        if (token !== jumpToken.current) return true;
+        throw new Error('turn not loaded');
+      }
+      // 新取到的轮次要等界面重画一次，才有对应的行。
+      await new Promise((resolve) => setTimeout(resolve, 60));
+    }
+    if (token !== jumpToken.current) return true;
+    const key = rowKeyForTurn(latest.current.rows, latest.current.messagesById, entry);
+    if (!key) return false;
+    listHandle.current?.scrollToKey(key);
+    // 虚拟列表第一次滚动时下面的块还是估算的高度，隔一会儿再对一次。
+    settleTimer.current = setTimeout(() => {
+      settleTimer.current = null;
+      listHandle.current?.scrollToKey(key, { animated: false });
+    }, 250);
+    if (highlightTimer.current) clearTimeout(highlightTimer.current);
+    setHighlightKey(key);
+    highlightTimer.current = setTimeout(() => { highlightTimer.current = null; setHighlightKey(null); }, HIGHLIGHT_MS);
+    return true;
+  }, [cancelJump, runtime]);
+  const searchText = conversationSearchMessages(locale);
+
   // 一块要画的东西都在 rowContext 里：它变了，看得见的块重画（ChatList 的 extraData）。
   const rowContext = useMemo(() => ({
     cardsById, collapsedCardIds, compact, firedReminderIds, latestLeadMessageId, messagesById, selectedTicketId, suppressions,
@@ -434,6 +516,16 @@ export function LeadConversation({ compact = false, railOpen = true, onOpenRail,
         {compact && onOpenAll ? (
           <IconButton icon="sidebar" label={m.header.openWorkspace} onPress={onOpenAll} size="lg" iconSize={19} badge />
         ) : null}
+        {!compact ? (
+          <IconButton
+            testID="conversation-search-toggle"
+            icon="search"
+            label={searchOpen ? searchText.close : searchText.open}
+            onPress={() => (searchOpen ? closeSearch() : setSearchOpen(true))}
+            size="lg"
+            iconColor={searchOpen ? 'accent' : undefined}
+          />
+        ) : null}
         {/* 视图（主题 11.14 第 7 项）：最右边。面板开着时是选中态（I-6：图标变成强调色）。 */}
         {onToggleViews ? (
           <IconButton
@@ -451,8 +543,11 @@ export function LeadConversation({ compact = false, railOpen = true, onOpenRail,
       {/* 会话流（ChatList，2026-11-04 换成 Legend List，只画看得见的块）：打开时落在最底下；贴底时跟随新消息和流式输出；
           你往上翻时不拽回来，只给「新消息 ↓」；你发了消息就回到底部；往上滚到头时取更早的消息。
           内容不满一屏时照旧从上往下排（空会话的提示要居中）。 */}
+      <Column flex={1} minH={0} position="relative">
       <ChatList
         key={sessionId ?? 'no-session'}
+        handleRef={listHandle}
+        highlightKey={highlightKey}
         testID="lead-conversation-scroll"
         data={hydrated ? rows : NO_ROWS}
         keyExtractor={conversationRowKey}
@@ -468,6 +563,15 @@ export function LeadConversation({ compact = false, railOpen = true, onOpenRail,
           ? <EmptyConversation title={m.empty.title} body={m.empty.body(leadName)} />
           : <EmptyConversation title={m.empty.notConnectedTitle(leadName)} body={m.empty.notConnectedBody(leadName)} />}
       />
+      {/* 搜索面板浮在会话上方，不推动会话内容（会话列表不能跳）。上边和左右留 page 边距，靠浮起的阴影（E-2）和消息分开。 */}
+      {searchOpen ? (
+        <Box position="absolute" t="page-y" l={0} r={0} items="center" pointerEvents="box-none">
+          <Box w="100%" maxW={700} px="page-x" pointerEvents="auto">
+            <ConversationSearchPanel client={searchClient} leadName={leadName} onJump={jumpToSearchEntry} onClose={closeSearch} />
+          </Box>
+        </Box>
+      ) : null}
+      </Column>
 
       {/* 输入框放进和会话同样的内容列：同样的留白、同样最宽 700、同样居中，左右边和上面的对话对齐。
           原来输入框上方那一行「执行中 · 需要处理 + 工单标签 + 查看全部」去掉了（方案 C，主题 11.14）：
@@ -540,6 +644,8 @@ export function LeadConversation({ compact = false, railOpen = true, onOpenRail,
 }
 
 const NO_ROWS: LeadConversationRow[] = [];
+// 搜索命中的那一条高亮多久。
+const HIGHLIGHT_MS = 2_000;
 const conversationRowKey = (row: LeadConversationRow) => row.key;
 
 type ConversationRowContext = {

@@ -41,7 +41,7 @@ export type { ScreenProps } from './primitives/Screen';
 
 // 展示
 export { ChatList, useKeepChatBlockInPlace } from './display/ChatList';
-export type { ChatListProps } from './display/ChatList';
+export type { ChatListHandle, ChatListProps } from './display/ChatList';
 export { Avatar } from './display/Avatar';
 export type { AvatarProps, AvatarTone } from './display/Avatar';
 export { Badge } from './display/Badge';

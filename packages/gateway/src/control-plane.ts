@@ -5,6 +5,11 @@
 // 下面所有 ticketId / attemptId / parentTicketId / status / activeTickets … 都是
 // **有意的映射**，右侧的取值才是内部词汇。改动任一侧都必须同时改这里。
 // 值层面的转换（Run 状态）走 src/wire-vocabulary.ts，不要在这里手写 switch。
+import { findConversationWithAgent, type ConversationTextModel } from "./conversation-agent-search.js";
+import {
+  searchConversation as searchConversationTurns, type ConversationSearchQuery,
+} from "@pi-lead-child/store";
+import type { ConversationAgentSearchResult, ConversationSearchResult } from "@pi-lead-child/protocol";
 import type {
   ActivityDto,
   AgendaItem,
@@ -125,6 +130,8 @@ export interface ControlPlaneOptions {
   dataDir?: string;
   // 健康账本按哪个 profile 查核查员能不能用。daemon 注入派发 gate 用的同一个；不注入时用 runtime 的默认 profile。
   runtimeProfile?: (runtime: RuntimeId) => RuntimeProfile;
+  // 「让 agent 找」用的文本模型（Lead 的便宜模型）。返回 null 或不注入：退回关键词搜索。
+  textModel?: () => ConversationTextModel | null;
 }
 
 function iso(value: string | null): string | null {
@@ -1570,6 +1577,18 @@ export function createControlPlaneService(db: Db, options: ControlPlaneOptions) 
     // ids：只要这几轮（Lead 说完一句以后客户端只校正那一轮，2026-11-04）。
     listConversationTurns(opts?: ConversationTurnQuery & { ids?: readonly string[] }): ConversationTurn[] {
       return conversationTurnsOf(db, listTurns(db, opts), opts);
+    },
+
+    // 会话记录搜索（工单 #339）：只读，逐行读库，只回命中的一页。
+    searchConversation(input: ConversationSearchQuery): ConversationSearchResult {
+      return searchConversationTurns(db, input);
+    },
+
+    // 「让 agent 找」：模型在会话消息里挑最多 10 条；模型不能用时退回关键词结果（source: keywords）。
+    findConversationWithAgent(
+      input: { description: string; itemId?: number; signal?: AbortSignal },
+    ): Promise<ConversationAgentSearchResult> {
+      return findConversationWithAgent(db, { ...input, complete: options.textModel?.() ?? null });
     },
 
     // 往前翻一页：排在 before 这一轮前面的最多 limit 轮，从旧到新；hasMore 说还有没有更早的。

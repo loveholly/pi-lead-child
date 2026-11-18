@@ -190,6 +190,27 @@ describe("createLeadSmartModel", () => {
     store.close();
   });
 
+  // 工单 #340：go 服务商（OpenCode）要求每次请求带会话 id（pi-ai 把 options.sessionId 写成 x-opencode-session），
+  // 缺了返回 400 MissingSessionID，会话搜索的「让 agent 找」因此一直退回关键词。
+  it("sends one stable session id with every completion so routed providers accept it", async () => {
+    const sessionIds: unknown[] = [];
+    const runtime = {
+      ...(fakeRuntime(["vibeproxy/claude-haiku-5-5"], {}).runtime as object),
+      completeSimple: async (_model: unknown, _context: unknown, options?: { sessionId?: string }) => {
+        sessionIds.push(options?.sessionId);
+        return { stopReason: "stop", content: [{ type: "text", text: "[]" }] };
+      },
+    };
+    const built = createLeadSmartModel({
+      modelRuntime: runtime as never, config: CONFIG, leadSpec: "acme/gpt-5.5", dataDir: tempDir("plc-lead-smart-"), env: {},
+    });
+    await built.complete!("one", { purpose: "conversation_search" });
+    await built.complete!("two", { purpose: "conversation_search" });
+    expect(typeof sessionIds[0]).toBe("string");
+    expect(sessionIds[0]).toBeTruthy();
+    expect(sessionIds[1]).toBe(sessionIds[0]);
+  });
+
   it("has no free-text completion without an LLM backend", () => {
     const { runtime } = fakeRuntime([], {});
     const built = createLeadSmartModel({

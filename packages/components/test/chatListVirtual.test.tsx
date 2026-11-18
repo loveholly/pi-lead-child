@@ -18,6 +18,7 @@ const legend = vi.hoisted(() => {
     node: null as HTMLElement | null,
     state: { isFollowingEnd: true, isAtEnd: true, distanceFromEnd: 0 },
     scrollToEnd: vi.fn(async () => {}),
+    scrollToIndex: vi.fn(async (_params?: unknown) => {}),
     // Legend List 的 cancelScroll 会停下贴底跟随。
     cancelScroll: vi.fn(function cancelScroll(this: void) { legend.state.isFollowingEnd = false; }),
     anchorVisibleContent: vi.fn((_options?: { key?: string }) => undefined),
@@ -53,6 +54,7 @@ vi.mock('@legendapp/list/react-native', () => ({
         },
       }),
       scrollToEnd: legend.scrollToEnd,
+      scrollToIndex: (params: unknown) => legend.scrollToIndex(params),
       getScrollableNode: () => legend.node,
       cancelScroll: legend.cancelScroll,
       anchorVisibleContent: legend.anchorVisibleContent,
@@ -102,7 +104,7 @@ describe('the chat list on Legend List', () => {
       maintainScrollAtEnd: true,
       maintainVisibleContentPosition: true,
       alignItemsAtEnd: false,
-      extraData: { latest: 'b' },
+      extraData: { extraData: { latest: 'b' }, highlightKey: null },
     });
     expect(props.recycleItems).toBe(false);
     expect(props.keyExtractor(block('x'))).toBe('x');
@@ -117,17 +119,37 @@ describe('the chat list on Legend List', () => {
     act(() => legend.emit('isAtEnd', false));
     rerender(<List data={[block('a'), block('b'), block('c')]} />);
 
+    expect(screen.getByTestId('chat-new').textContent).toContain('1 new message');
+    rerender(<List data={[block('a'), block('b'), block('c'), block('d'), block('e')]} />);
+    expect(screen.getByTestId('chat-new').textContent).toContain('3 new messages');
+
     fireEvent.click(screen.getByTestId('chat-new'));
     expect(legend.scrollToEnd).toHaveBeenCalledWith({ animated: true });
+    // 回到底部以后按钮消失，条数清零。
+    act(() => legend.emit('isAtEnd', true));
+    expect(screen.queryByTestId('chat-new')).toBeNull();
+    act(() => legend.emit('isFollowingEnd', false));
+    act(() => legend.emit('isAtEnd', false));
+    expect(screen.getByTestId('chat-new').textContent).toContain('Back to latest');
+  });
+
+  it('shows the back-to-latest button whenever you are away from the bottom, and hides it at the bottom', () => {
+    renderUI(<List data={[block('a'), block('b')]} />);
+    expect(screen.queryByTestId('chat-new')).toBeNull();
+    act(() => legend.emit('isFollowingEnd', false));
+    act(() => legend.emit('isAtEnd', false));
+    expect(screen.getByTestId('chat-new').textContent).toContain('Back to latest');
+    act(() => legend.emit('isAtEnd', true));
     expect(screen.queryByTestId('chat-new')).toBeNull();
   });
 
-  it('says nothing when older blocks come in above', () => {
+  it('does not count older blocks that come in above as new messages', () => {
     const { rerender } = renderUI(<List data={[block('c'), block('d')]} />);
     act(() => legend.emit('isFollowingEnd', false));
     act(() => legend.emit('isAtEnd', false));
     rerender(<List data={[block('a'), block('b'), block('c'), block('d')]} />);
-    expect(screen.queryByTestId('chat-new')).toBeNull();
+    expect(screen.getByTestId('chat-new').textContent).toContain('Back to latest');
+    expect(screen.getByTestId('chat-new').textContent).not.toMatch(/new message/);
   });
 
   it('says there is something new when the last block grows while you read further up, and stops once you are back at the bottom', () => {
@@ -135,12 +157,35 @@ describe('the chat list on Legend List', () => {
     act(() => legend.emit('isFollowingEnd', false));
     act(() => legend.emit('isAtEnd', false));
     act(() => legend.props!.onItemSizeChanged({ size: 320, previous: 200, itemKey: 'a', index: 0 }));
-    expect(screen.queryByTestId('chat-new')).toBeNull();
+    expect(screen.getByTestId('chat-new').textContent).toContain('Back to latest');
     act(() => legend.props!.onItemSizeChanged({ size: 320, previous: 200, itemKey: 'b', index: 1 }));
-    expect(screen.getByTestId('chat-new')).toBeTruthy();
+    expect(screen.getByTestId('chat-new').textContent).toContain('New messages');
 
     act(() => legend.emit('isAtEnd', true));
     expect(screen.queryByTestId('chat-new')).toBeNull();
+  });
+
+  it('scrolls to a block by key and highlights it', () => {
+    const handle: { current: { scrollToKey: (key: string) => boolean } | null } = { current: null };
+    const scrollToIndex = vi.fn(async () => {});
+    legend.scrollToIndex = scrollToIndex;
+    const data = [block('a'), block('b'), block('c')];
+    const view = (highlightKey: string | null) => (
+      <ChatList
+        testID="chat" data={data} keyExtractor={(item) => item.id} handleRef={handle}
+        renderItem={(item) => <Text>{item.id}</Text>} highlightKey={highlightKey}
+      />
+    );
+    const { rerender } = renderUI(view(null));
+    expect(handle.current!.scrollToKey('c')).toBe(true);
+    expect(scrollToIndex).toHaveBeenCalledWith(expect.objectContaining({ index: 2, animated: true }));
+    expect(handle.current!.scrollToKey('missing')).toBe(false);
+    expect(screen.queryByTestId('chat-highlight')).toBeNull();
+    rerender(view('b'));
+    expect(screen.getAllByTestId('chat-highlight')).toHaveLength(1);
+    expect(screen.getByTestId('chat-highlight').textContent).toBe('b');
+    rerender(view(null));
+    expect(screen.queryByTestId('chat-highlight')).toBeNull();
   });
 
   it('follows along without a hint while you are at the bottom', () => {

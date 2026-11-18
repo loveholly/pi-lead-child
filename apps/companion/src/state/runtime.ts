@@ -200,7 +200,7 @@ export type CompanionTransport = Pick<
 > & Partial<Pick<
   ControlPlaneClient,
   | 'getLeadActivity' | 'getLeadActivityView' | 'acknowledgeLeadInterrupt' | 'getChannelCards' | 'actOnChannelCard'
-  | 'getOlderConversationTurns' | 'getConversationTurnsById'
+  | 'getOlderConversationTurns' | 'getConversationTurnsById' | 'searchConversation' | 'findConversationWithAgent'
   | 'getLeadQueue' | 'leadQueueAction' | 'followUpAction'
   | 'rescheduleReminder' | 'checkConnection' | 'connectionLost' | 'getOwnBinding' | 'listBindings' | 'revokeBinding'
   | 'listUiActions' | 'performUiAction' | 'getSurfaceActions' | 'getUiForm' | 'submitUiForm'
@@ -282,6 +282,9 @@ const REPLAY_SETTLE_MS = 250;
 // 主会话打开、重连时只取最近这么多轮；往上滚到头时一页取这么多轮更早的（2026-11-04，原来每次整份取 100 轮）。
 export const CONVERSATION_WINDOW_TURNS = 30;
 export const CONVERSATION_PAGE_TURNS = 30;
+// 搜索命中的消息很早以前时，一页多取一些（daemon 一次最多 500 轮）。
+const REVEAL_PAGE_TURNS = 100;
+const REVEAL_MAX_PAGES = 300;
 // Lead 说完一句以后只取那一轮。一次攒下的轮次比这还多（例如重连后重放了很多事件）时，改取最近一段。
 const MAX_TURN_CORRECTIONS = 20;
 
@@ -2280,7 +2283,7 @@ export class CompanionStateRuntime {
   }
 
   // 往上滚到头：取游标前面的一页（2026-11-04）。同一时间只取一页；daemon 不支持、没有更早的了、或者还没取到最近一段时什么都不做。
-  loadOlderConversationTurns(): Promise<void> {
+  loadOlderConversationTurns(pageSize = CONVERSATION_PAGE_TURNS): Promise<void> {
     if (this.olderTurnsLoad) return this.olderTurnsLoad;
     const { client } = this.dependencies;
     const sessionId = this.activeSessionId;
@@ -2292,7 +2295,7 @@ export class CompanionStateRuntime {
     const epoch = this.lifecycle;
     const controller = this.controller();
     this.control.getState().setConversationHistory({ loading: true, error: null });
-    const load = client.getOlderConversationTurns(cursor, { limit: CONVERSATION_PAGE_TURNS }, controller.signal).then((page) => {
+    const load = client.getOlderConversationTurns(cursor, { limit: pageSize }, controller.signal).then((page) => {
       // 取的这段时间里重连换了会话，或者最近一段重新算了游标：这一页接不上了，丢掉。
       if (!this.isCurrent(epoch) || this.activeSessionId !== sessionId) return;
       const current = this.control.getState().conversationHistory;
@@ -2315,6 +2318,38 @@ export class CompanionStateRuntime {
     });
     this.olderTurnsLoad = load;
     return load;
+  }
+
+  // 会话记录搜索（工单 #339）：daemon 在库里搜，这里只转交。旧 daemon 没有这个接口时抛错，界面说「搜索暂时不可用」。
+  searchConversation(
+    input: Parameters<ControlPlaneClient['searchConversation']>[0],
+    signal?: AbortSignal,
+  ) {
+    const { client } = this.dependencies;
+    if (typeof client.searchConversation !== 'function') return Promise.reject(new Error('conversation search is not supported'));
+    return client.searchConversation(input, signal);
+  }
+
+  findConversationWithAgent(description: string, signal?: AbortSignal) {
+    const { client } = this.dependencies;
+    if (typeof client.findConversationWithAgent !== 'function') return Promise.reject(new Error('agent search is not supported'));
+    return client.findConversationWithAgent(description, signal);
+  }
+
+  // 命中的那一轮要先在会话里：往上一页一页取，直到它进来（一页 100 轮，最多 300 页）。取到头还没有、或者取的时候出错，返回 false。
+  async revealConversationTurn(turnId: string, signal?: AbortSignal): Promise<boolean> {
+    const sessionId = this.activeSessionId;
+    for (let page = 0; page < REVEAL_MAX_PAGES; page += 1) {
+      const state = this.control.getState();
+      if (state.turnsById[turnId]) return true;
+      if (signal?.aborted || !state.conversationHistory.hasMore || this.activeSessionId !== sessionId) return false;
+      const oldestBefore = state.conversationHistory.oldest?.id;
+      await this.loadOlderConversationTurns(REVEAL_PAGE_TURNS);
+      const after = this.control.getState().conversationHistory;
+      // 出错，或这一页没把游标往前推（没有游标、daemon 不支持）：再取也是空转。
+      if (after.error || after.oldest?.id === oldestBefore) return false;
+    }
+    return Boolean(this.control.getState().turnsById[turnId]);
   }
 
   private applyStreamMutation(mutation: StreamMutation): void {

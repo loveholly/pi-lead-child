@@ -35,7 +35,8 @@ import {
   CHAT_IMAGE_ID_PATTERN,
   TICKET_ATTACHMENT_ID_PATTERN,
   CHAT_IMAGES_CAPABILITY,
-  CHAT_IMAGES_INCLUDE,
+  CHAT_IMAGES_INCLUDE, CONVERSATION_AGENT_QUERY_MAX, CONVERSATION_SEARCH_LIMIT_MAX, CONVERSATION_SEARCH_MODES,
+  CONVERSATION_SEARCH_QUERY_MAX, type ConversationSearchMode,
   CONVERSATION_ANSWER_STARTED_INCLUDE,
   CONVERSATION_INTERRUPTED_INCLUDE,
   LEAD_AVATAR_CAPABILITY,
@@ -2663,6 +2664,44 @@ export async function startPairedServer(
           throw new HttpError(400, "invalid_request", `call: 1 to ${SURFACE_ACTIONS_QUERY_LIMIT} render_ui call ids`);
         }
         json(req, res, 200, { actions: listSurfaceActions(bridge.db, calls) });
+        return;
+      }
+
+      // 会话记录搜索（工单 #339，protocol 的 conversation-search.ts）。只读：只回命中的一页，不回全部消息。
+      // ?q=搜索词 &mode=exact|fuzzy（缺省 fuzzy）&whole_word=1（精确模式只认整个词）&offset= &limit= &ticket_id=
+      if (req.method === "GET" && url.pathname === "/v1/conversation/search") {
+        requireAuth(req, "chat");
+        const query = (url.searchParams.get("q") ?? "").trim();
+        if (!query || query.length > CONVERSATION_SEARCH_QUERY_MAX) {
+          throw new HttpError(400, "invalid_request", `q: 1 to ${CONVERSATION_SEARCH_QUERY_MAX} characters`);
+        }
+        const mode = url.searchParams.get("mode") ?? "fuzzy";
+        if (!(CONVERSATION_SEARCH_MODES as readonly string[]).includes(mode)) throw new HttpError(400, "invalid_request", "invalid mode");
+        const itemId = integerParam(url.searchParams.get("ticket_id"), "ticket_id", { min: 1 });
+        json(req, res, 200, service().searchConversation({
+          query,
+          mode: mode as ConversationSearchMode,
+          wholeWord: url.searchParams.get("whole_word") === "1",
+          offset: integerParam(url.searchParams.get("offset"), "offset", { defaultValue: 0 })!,
+          limit: integerParam(url.searchParams.get("limit"), "limit", { defaultValue: 20, min: 1, max: CONVERSATION_SEARCH_LIMIT_MAX })!,
+          ...(itemId === undefined ? {} : { itemId }),
+        }));
+        return;
+      }
+
+      // 「让 agent 找」：?q=一句话描述。模型不能用时回关键词结果，source 是 keywords。
+      if (req.method === "GET" && url.pathname === "/v1/conversation/search/agent") {
+        requireAuth(req, "chat");
+        const description = (url.searchParams.get("q") ?? "").trim();
+        if (!description || description.length > CONVERSATION_AGENT_QUERY_MAX) {
+          throw new HttpError(400, "invalid_request", `q: 1 to ${CONVERSATION_AGENT_QUERY_MAX} characters`);
+        }
+        const itemId = integerParam(url.searchParams.get("ticket_id"), "ticket_id", { min: 1 });
+        const aborted = new AbortController();
+        res.on("close", () => { if (!res.writableEnded) aborted.abort(); });
+        json(req, res, 200, await service().findConversationWithAgent({
+          description, signal: aborted.signal, ...(itemId === undefined ? {} : { itemId }),
+        }));
         return;
       }
 

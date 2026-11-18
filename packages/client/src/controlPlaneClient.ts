@@ -1,4 +1,8 @@
 import {
+  ConversationAgentSearchResultSchema, ConversationSearchResultSchema,
+  type ConversationAgentSearchResult, type ConversationSearchMode, type ConversationSearchResult,
+} from '@pi-lead-child/protocol';
+import {
   OwnerActionResponseSchema,
   type OwnerActionDto,
   type OwnerActionResponse,
@@ -1260,6 +1264,26 @@ export class ControlPlaneClient {
     if (Value.Check(ConversationTurnPageSchema, payload)) return payload;
     const items = collection<ConversationTurn>(ConversationTurnSchema, payload);
     return { items: items.filter((turn) => compareConversationTurns(turn, before) < 0), hasMore: false };
+  }
+
+  // 会话记录搜索（工单 #339）：daemon 在库里搜，只回命中的一页。旧 daemon 没有这个路由（404）时抛错，界面说「搜索暂时不可用」。
+  async searchConversation(
+    input: { query: string; mode: ConversationSearchMode; wholeWord?: boolean; offset?: number; limit?: number },
+    signal?: AbortSignal,
+  ): Promise<ConversationSearchResult> {
+    const params = new URLSearchParams({ q: input.query, mode: input.mode });
+    if (input.wholeWord) params.set('whole_word', '1');
+    if (input.offset) params.set('offset', String(input.offset));
+    if (input.limit) params.set('limit', String(input.limit));
+    return this.request<ConversationSearchResult>(`/v1/conversation/search?${params}`, ConversationSearchResultSchema, { signal });
+  }
+
+  // 「让 agent 找」：一句话描述，Lead 的模型挑最多 10 条。模型不能用时 source 是 keywords。
+  async findConversationWithAgent(description: string, signal?: AbortSignal): Promise<ConversationAgentSearchResult> {
+    const params = new URLSearchParams({ q: description });
+    return this.request<ConversationAgentSearchResult>(
+      `/v1/conversation/search/agent?${params}`, ConversationAgentSearchResultSchema, { signal },
+    );
   }
 
   // 只取这几轮（Lead 说完一句以后只校正那一轮，2026-11-04）。不存在的不回。

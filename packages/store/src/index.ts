@@ -15,6 +15,7 @@ export * from "./companion-inbox.js";
 export * from "./connections.js";
 export * from "./continuations.js";
 export * from "./conversation-cards.js";
+export * from "./conversation-search.js";
 export * from "./conversations.js";
 export * from "./data-corrections.js";
 export * from "./db.js";

@@ -5,6 +5,7 @@
 //   1. PLC_SMART_MODEL（provider/model）；
 //   2. 否则是 Lead 的 provider 配置里第一个名字带 haiku 的模型；
 //   3. 否则是 Lead 自己正在用的模型。
+import { randomUUID } from "node:crypto";
 import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import {
   createSmartModel, decisionPurpose, LLM_BACKEND, SmartModelBackendError, smartModelDecisionLogPath,
@@ -173,6 +174,8 @@ export function createLeadSmartModel(input: {
     missingChoice = spec;
     return resolved;
   };
+  // 有的服务商（go / OpenCode）按会话 id 路由，请求里没有就回 400 MissingSessionID：每个 SmartModel 带一个固定的 id。
+  const routingSessionId = randomUUID();
   // 一个都注册不到时没有 LLM 后端（和以前一样）：不因为设置页选了模型就多出一个总是失败的后端。
   const llm = resolved
     ? async (prompt: string, signal: AbortSignal | undefined, maxTokens: number) => {
@@ -182,10 +185,11 @@ export function createLeadSmartModel(input: {
         return replyText(await input.modelRuntime.completeSimple(
           target,
           { messages: [{ role: "user", content: prompt, timestamp: Date.now() }] },
-          { ...(signal ? { signal } : {}), maxTokens },
+          { ...(signal ? { signal } : {}), maxTokens, sessionId: routingSessionId },
         ));
       } catch (error) {
-        input.hold?.failed("decision", errorMessage(error));
+        // 调用方自己取消的（用户换了搜索词、请求超时）不是模型的故障，不能累计到熔断里。
+        if (!signal?.aborted) input.hold?.failed("decision", errorMessage(error));
         throw error;
       }
     }

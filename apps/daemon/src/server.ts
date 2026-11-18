@@ -6321,6 +6321,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
   const gatewayPlan = resolveGatewayListen(opts.gatewayPort, process.env);
   const controlPlane = createControlPlaneService(db, {
     dataDir: opts.dataDir,
+    textModel: () => leadComplete ?? null,
     runtimeProfile: (runtime) => childRuntimeProfile(schedDeps, runtime),
     runtime: () => {
       const status = statusData();

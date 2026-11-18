@@ -1340,6 +1340,7 @@ export * from "./reviews.ts";
 export * from "./local-sockets.ts";
 export * from "./system-turns.ts";
 export * from "./object-links.ts";
+export * from "./conversation-search.ts";
 export * from "./conversation-tool-calls.ts";
 export * from "./redaction.ts";
 export * from "./service-url.ts";
