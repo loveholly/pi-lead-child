@@ -38,7 +38,7 @@ async function boot(slack: FakeSlack): Promise<string[]> {
   daemon = await startDaemon({
     dataDir: dir, dbPath, sessionFactory: fakePiLead(async () => ({ say: "好的。" })).factory as never, log: (line) => logs.push(line),
     triageShadow: false,
-    channels: { live: { fetch: slack.fetch, socket: { createClient: slack.createSocketClient, retryBaseMs: 5, retryMaxMs: 50 } } },
+    channels: { live: { fetch: slack.fetch, socket: { createClient: slack.createSocketClient, retryBaseMs: 5, retryMaxMs: 50, catchUpSpacingMs: 0 } } },
   });
   return logs;
 }

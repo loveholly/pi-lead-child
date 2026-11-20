@@ -26,7 +26,7 @@ afterEach(() => {
 
 function setup(options: { socket?: boolean } = {}): { hub: ChannelHub; adapter: ChannelAdapter } {
   const adapter = createSlackChannelAdapter({
-    api: slack.api, ...(options.socket ? { socket: { createClient: slack.createSocketClient, retryBaseMs: 5, retryMaxMs: 40 } } : {}),
+    api: slack.api, ...(options.socket ? { socket: { createClient: slack.createSocketClient, retryBaseMs: 5, retryMaxMs: 40, catchUpSpacingMs: 0 } } : {}),
   });
   const hub = new ChannelHub({
     db, registry: new ChannelRegistry([adapter]), credentials: { credential: async () => slack.credential }, log: (line) => logs.push(line),

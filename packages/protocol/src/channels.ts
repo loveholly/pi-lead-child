@@ -326,13 +326,20 @@ export const CHANNEL_KERNEL_EVENT_KINDS: readonly EventKindDefinition[] = [
     sources: ["system"],
     payload: Type.Object({
       channel: Type.String({ minLength: 1 }),
-      // 补的是哪一段：从（断线前最后确认收到的时刻，或者时间窗的起点）到（补拉开始的时刻），ISO 时间。
+      // 补的是哪一段：从（断线前最后确认收到的时刻往回留了余量，或者时间窗的起点）到（补拉开始的时刻），ISO 时间。不是断线的时段。
       from: Type.String({ minLength: 1 }),
       to: Type.String({ minLength: 1 }),
       // 补到了几条。
       caught: Type.Integer({ minimum: 0 }),
-      // 没补全的原因（来源写的话，不含外部的原文）。
+      // 没补全的原因（来源写的话，不含外部的原文），含 setup 里的配置问题。
       reasons: Type.Array(Type.String({ minLength: 1 }), { minItems: 1 }),
+      // 其中长期的配置问题（例如缺权限）：只在第一次提醒，之后只有这一类时不再记这个事件。
+      setup: Type.Optional(Type.Array(Type.String({ minLength: 1 }))),
+      // 真实的断线：连着的连接第一次断开、重新连上的时刻（ISO），断了几秒，中间断开了几次。daemon 启动以后第一次连上时是 null。
+      disconnectedAt: Type.Optional(Nullable(Type.String({ minLength: 1 }))),
+      reconnectedAt: Type.Optional(Nullable(Type.String({ minLength: 1 }))),
+      disconnectedSeconds: Type.Optional(Nullable(Type.Integer({ minimum: 0 }))),
+      drops: Type.Optional(Nullable(Type.Integer({ minimum: 1 }))),
       summary: Type.String(),
     }),
     description: "断线或者 daemon 重启以后，补拉这段时间里的消息没有补全（超过上限、调用失败）：这段时间里可能有消息没收到。",
