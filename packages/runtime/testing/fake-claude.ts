@@ -129,7 +129,10 @@ function mcpServers(): Array<{ name: string; status: string }> {
   return [...userServers, ...flagServers];
 }
 
+// 工单 #113：FAKE_CLAUDE_INIT_DELAY_MS 让 init 晚到，模拟 CLI 等 plc 握手等到 MCP_TIMEOUT 才放弃。
 function init(): void {
+  const delayMs = Number(process.env.FAKE_CLAUDE_INIT_DELAY_MS ?? 0);
+  if (delayMs > 0) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, delayMs);
   const servers = mcpServers();
   out({
     type: "system",

@@ -42,7 +42,7 @@ import {
 } from "@pi-lead-child/store";
 import {
   failureCategory, failureNextStep, healthLevel, leadDecides, runtimeDisplayName, runtimeFailureTitle,
-  sameTargetRetry, typedFailure, usageLimitLeadNextStep, type SameTargetRetry,
+  sameTargetRetry, toolChannelStartTimedOut, typedFailure, usageLimitLeadNextStep, type SameTargetRetry,
 } from "@pi-lead-child/runtime";
 import {
   classifyFailure, createLocalRuntime, LOCAL_RUNTIME_ID, runtimeProfileOf,
@@ -1077,6 +1077,53 @@ async function runItemLifecycle(
     }
     return "started";
   };
+  // plc 工具通道启动超时（工单 #113）：机器很忙时 plc 的 MCP 服务器来不及在 MCP_TIMEOUT 内握手。
+  // 在同一个 Run 里用同一个请求重新拉起一次 CLI，只重试一次。重试也失败，才按原来的逻辑记失败、开故障。
+  // 配置坏了这类不是超时的失败不重试（adapter 给的错误码，typed-failure.ts 的 toolChannelStartTimedOut）。
+  // 和开新会话一样，第一次的失败事件不落库、不交给调用方。改为在这个 Run 的事件里记一条说明，工单上也记一条决定。
+  let toolChannelRetried = false;
+  const retryToolChannelStart = async (
+    failed: Extract<RuntimeEvent, { type: "run.failed" }>,
+  ): Promise<"started" | "declined" | "detached"> => {
+    if (adopt || toolChannelRetried || progressed || !toolChannelStartTimedOut(failed.errorCode)) return "declined";
+    await handle.interrupt("plc tool channel start timed out");
+    await processDone;
+    if (isDetached) return "detached";
+    const state = getRun(db, runId)?.state;
+    if (state !== "starting" && state !== "running") return "declined";
+    toolChannelRetried = true;
+    const agent = runtimeDisplayName(runtime.id);
+    const reason = `${agent} 的 plc 工具通道启动超时，这个 Run 重新拉起 ${agent}，重试一次。原因：${failed.error}`;
+    // 一条运行事件，接在已经落库的事件后面：在这个 Run 的事件里能看出超时后重试了一次。
+    const notice = shiftEvent(
+      new RuntimeEventSequencer(runId).event({ type: "runtime.stderr", text: `${reason}\n` }), processedSeq, null,
+    );
+    eventStore.persist(notice);
+    processedSeq = notice.seq;
+    addActivity(db, {
+      itemId, runId, actor: "system", kind: "decision",
+      payload: {
+        decision: "tool_channel_start_retried", runtime: runtime.id, errorCode: failed.errorCode, reason,
+      },
+    });
+    opts.onEvent?.(notice, { itemId, runId });
+    seqBase = processedSeq;
+    try {
+      handle = await runtime.start(startRequest(opts.prompt, opts.resumeSessionId, opts.forkSession === true));
+      recordLaunch(seqBase);
+    } catch (error) {
+      handle = failedStart(runId, runtime.id, String(error));
+    }
+    storedCursor = undefined;
+    watchHandle();
+    if (detaching) child.detach?.();
+    // 重新拉起的这段时间里用户暂停或停止了 Run：马上中断新进程（和开新会话同一条规则）。
+    const stateAfterStart = getRun(db, runId)?.state;
+    if (stateAfterStart !== "starting" && stateAfterStart !== "running") {
+      await handle.interrupt("run paused or stopped while the runtime restarted after a tool channel timeout").catch(() => {});
+    }
+    return "started";
+  };
   // 接管时，adapter 从输出文件的开头重放。seq 不超过 event_cursor 的事件已经落库，跳过。
   // 例外：事件落库以后、处理之前 daemon 崩溃了。这时生命周期事件按 Run 的状态补做，否则 Run 一直停在 running。
   const lifecycleEventPending = (event: RuntimeEvent): boolean => {
@@ -1144,7 +1191,8 @@ async function runItemLifecycle(
       }
     }
     if (event.type === "run.failed") {
-      const recovery = await startFreshSession(event);
+      let recovery = await retryToolChannelStart(event);
+      if (recovery === "declined") recovery = await startFreshSession(event);
       if (recovery === "started") continue;
       if (recovery === "detached") {
         await toolBridge?.close();

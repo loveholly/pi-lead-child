@@ -16,7 +16,9 @@ import type {
   RuntimeAttachRequest,
   RuntimeStartRequest,
 } from "./types.js";
-import { runInstallChecks, statusJson, type ProbeCommand, type ProbeStep, type ProbeStepOutput } from "./probe.js";
+import {
+  probeMcpServer, runInstallChecks, statusJson, type McpServerCommand, type ProbeCommand, type ProbeStep, type ProbeStepOutput,
+} from "./probe.js";
 import type { RuntimeAdapter, RuntimeEnv } from "./types.js";
 import { findRuntimeExecutable, resolveRuntimeExecutable } from "./executable.js";
 import { claudeModelsFromHelp, cliEffortValue, runDiscoveryCommand, type ModelDiscovery } from "./model-discovery.js";
@@ -24,7 +26,7 @@ import {
   matchProviderFailure, residualFailureCode, typedFailure, type FailureEvidence,
 } from "./typed-failure.js";
 import {
-  claudeSandboxSettings, dataDir, sandboxCacheEnv, sandboxPolicy, sandboxTrustEnv, type TypedFailure,
+  agentMcpServer, claudeSandboxSettings, dataDir, sandboxCacheEnv, sandboxPolicy, sandboxTrustEnv, type TypedFailure,
   warmGitDirs, warmSandboxTrustBundle,
 } from "@pi-lead-child/core";
 import { adapterProfile, type RuntimeProfile } from "./profile.js";
@@ -41,6 +43,22 @@ const REVIEW_TOOLS = "Read,Glob,Grep,Bash";
 const MAX_STDERR_TAIL_CHARS = 16_000;
 // 内核给 agent 的工具通道在 --mcp-config 里叫这个名字。
 const TOOL_CHANNEL_SERVER = "plc";
+// MCP 服务器的启动时限（工单 #113）。官方文档（https://code.claude.com/docs/en/env-vars）：
+// 「MCP_TIMEOUT: Timeout in milliseconds for MCP server startup (default: 30000, or 30 seconds)」。
+// 2026-11-06 机器很忙时，plc 握手用了 31–59 秒，30 秒的默认值不够；空闲时 1–2 秒。所以放到 90 秒。
+const DEFAULT_MCP_TIMEOUT_MS = 90_000;
+
+// 带 plc 工具通道启动 CLI 时补上的 MCP_TIMEOUT。用户自己设了的（daemon 的环境、adapter 或请求的 env）不改。
+// 用户在 Claude Code 的 settings.json 的 env 里设的值由 CLI 自己读，这里看不到，也不覆盖它。
+export function claudeMcpTimeoutEnv(env: Record<string, string | undefined>): Record<string, string> {
+  return env.MCP_TIMEOUT?.trim() ? {} : { MCP_TIMEOUT: String(DEFAULT_MCP_TIMEOUT_MS) };
+}
+
+// child 实际收到的 MCP 启动时限，毫秒。认不出时按默认值。
+export function claudeMcpTimeoutMs(env: Record<string, string | undefined>): number {
+  const value = Number(env.MCP_TIMEOUT?.trim());
+  return Number.isFinite(value) && value > 0 ? value : DEFAULT_MCP_TIMEOUT_MS;
+}
 
 // executor 和核查员的命令在 Claude Code 自带的沙箱里跑（lead-tools-and-routing spec D2、D15；buildArgs 的 --settings）：
 // 沙箱里的 Bash 不用审批，所以这份清单只在沙箱起不来时有用（Claude Code 回到普通的许可判断）。
@@ -108,6 +126,8 @@ export interface ClaudeRuntimeOptions {
   killGraceMs?: number;
   // PLC 内置给 child 的 skill（child-skills.ts）的根目录。不给时用 engine 的 src/child-skills，null 表示不加载。
   childSkillsRoot?: string | null;
+  // 探针拉起的 plc MCP 服务器（工单 #113）。不给时用执行时的同一个（core 的 agentMcpServer），null 表示探针不检查它。
+  toolChannelServer?: McpServerCommand | null;
 }
 
 interface ResultState {
@@ -292,7 +312,9 @@ type JsonRecord = Record<string, unknown>;
 export function classifyClaudeFailure(evidence: FailureEvidence): TypedFailure {
   // agent 用完了回合数：它确实在做任务，只是没做完。
   if (evidence.errorCode === "claude_error_max_turns") return typedFailure("task_failed", evidence);
-  if (evidence.errorCode === "claude_tool_channel_unavailable") return typedFailure("tool_channel_unavailable", evidence);
+  if (evidence.errorCode === "claude_tool_channel_unavailable" || evidence.errorCode === "claude_tool_channel_timeout") {
+    return typedFailure("tool_channel_unavailable", evidence);
+  }
   if (SESSION_NOT_FOUND.test(evidence.message ?? "")) return typedFailure("session_not_found", evidence);
   if (MODEL_NOT_AVAILABLE.test(evidence.message ?? "")) return typedFailure("model_unsupported", evidence);
   return typedFailure(matchProviderFailure(evidence.message) ?? residualFailureCode(evidence), evidence);
@@ -322,6 +344,31 @@ export function toolChannelProblem(init: JsonRecord): string | null {
   const status = stringValue(entry.status) ?? "unknown";
   return status === "connected" ? null : `MCP 服务器 ${server} 的状态是 ${status}，plc 工具通道没有就绪`;
 }
+
+// plc 工具通道没有就绪，是不是因为启动超时（工单 #113）。
+// init 事件只给 status=failed，不给原因。原因只写在 Claude Code 自己的 MCP 日志里（CONNECT_TIMEOUT），
+// 那个文件在 CLI 的缓存目录下，路径格式没有文档，所以不读它。这里用一个自己量得到的信号：
+// plc 设了 alwaysLoad，CLI 在发 init 之前等它连完。启动超时的话，从拉起 CLI 到收到 init 至少过了 MCP_TIMEOUT。
+// 配置坏了（mcp_server_errors）、需要认证这类失败不算超时。服务器一启动就崩溃时 init 来得早，也不算。
+// 只有机器忙到 CLI 自己启动加上 hooks 都超过 MCP_TIMEOUT 时，才会把崩溃误判成超时：那只多重试一次。
+export function toolChannelTimedOut(init: JsonRecord, elapsedMs: number, timeoutMs: number): boolean {
+  if (elapsedMs < timeoutMs) return false;
+  const records = (value: unknown) => (Array.isArray(value) ? value.map(jsonRecord) : []);
+  if (records(init.mcp_server_errors).some((entry) => entry?.name === TOOL_CHANNEL_SERVER)) return false;
+  const entry = records(init.mcp_servers).find((candidate) => candidate?.name === TOOL_CHANNEL_SERVER);
+  return entry?.status === "failed";
+}
+
+// 探针拉起 plc MCP 服务器时给它的变量（工单 #113）。mcp-server 启动时要求这几个变量。
+// 给了工具桥的 socket 和 token，它就只转发工具调用、不打开账本（mcp-server.ts 的 proxyThroughBridge）。
+// 探针只发 initialize，不调用工具，所以这个 socket 不存在、PLC_DB 指向不存在的文件都没关系。token 是占位，不是凭据。
+const TOOL_CHANNEL_PROBE_ENV: Record<string, string> = {
+  PLC_DB: join(tmpdir(), "plc-mcp-probe", "unused.db"),
+  PLC_TICKET_ID: "1",
+  PLC_ATTEMPT_ID: "1",
+  PLC_AGENT_TOOL_SOCKET: join(tmpdir(), "plc-mcp-probe", "unused.sock"),
+  PLC_AGENT_TOOL_TOKEN: "probe",
+};
 
 // plc 工具通道的 MCP 配置文件（工单 10）。配置的 env 里有工具桥 token，所以配置不进 argv。
 // 配置写进一个只有当前用户能读写的文件。目录由 mkdtemp 创建，权限是 0700。文件的权限是 0600。
@@ -369,6 +416,7 @@ export class ClaudeRuntime implements AgentRuntime {
   private readonly env: Record<string, string>;
   private readonly killGraceMs: number;
   private readonly childSkillsRoot: string | null;
+  private readonly toolChannelServer: McpServerCommand | null | undefined;
 
   constructor(options: ClaudeRuntimeOptions = {}) {
     this.bin = options.bin ?? "claude";
@@ -376,6 +424,7 @@ export class ClaudeRuntime implements AgentRuntime {
     this.env = { ...(options.env ?? {}) };
     this.killGraceMs = Math.max(0, options.killGraceMs ?? DEFAULT_KILL_GRACE_MS);
     this.childSkillsRoot = options.childSkillsRoot === undefined ? defaultChildSkillsRoot() : options.childSkillsRoot;
+    this.toolChannelServer = options.toolChannelServer;
   }
 
   // 模型目录（工单 05）：Claude 不接受带 provider 前缀的模型名，例如 openai/gpt-5.4-mini（run 63）。
@@ -406,11 +455,39 @@ export class ClaudeRuntime implements AgentRuntime {
 
   // 健康探针（工单 04），按 Claude Code 2.1.258 核实：`auth status --json` 输出 loggedIn 字段，
   // 未登录时退出码 1。两条命令都不发起模型调用。安装检查和 preflight 共用。
-  probe(request: RuntimeProbeRequest): Promise<RuntimeProbeResult> {
-    return runInstallChecks(this.probeCommand(request.signal), [
+  // 工单 #113：最后一步真的拉起 plc 的 MCP 服务器，等它回答 initialize。以前探针只跑这两条命令，
+  // plc 握手超时开的故障被探针关掉，下一个执行又超时，故障反复开关（2026-11-06 一天 10 次）。
+  async probe(request: RuntimeProbeRequest): Promise<RuntimeProbeResult> {
+    const installed = await runInstallChecks(this.probeCommand(request.signal), [
       this.versionStep,
       { label: "claude auth status", args: ["auth", "status", "--json"], failure: "auth_required", judge: claudeAuthStatus },
     ], this.profile.interpreter);
+    const server = this.toolChannelServer === undefined ? agentMcpServer() : this.toolChannelServer;
+    if (!installed.ok || server === null) return installed;
+    return this.toolChannelCheck(server, installed.checks, request.signal);
+  }
+
+  // 探针的代价：每次多起一个 node 进程，加载 mcp-server 的模块，空闲时 1–2 秒。探针只在故障开着时按退避间隔跑
+  // （engine 的 health-recovery.ts），前两步没过就不跑这一步，所以不会在机器忙的时候成批地起进程。
+  // 等待上限用真实执行的 MCP_TIMEOUT：机器忙到真实执行会超时，探针也超时，故障保持打开。
+  private async toolChannelCheck(
+    server: McpServerCommand, checks: string[], signal?: AbortSignal,
+  ): Promise<RuntimeProbeResult> {
+    const label = "plc MCP initialize";
+    const outcome = await probeMcpServer(server, {
+      env: childEnvironment(this.profile.environment, this.env, TOOL_CHANNEL_PROBE_ENV),
+      timeoutMs: claudeMcpTimeoutMs({ ...process.env, ...this.env }),
+      signal,
+    });
+    const ran = [...checks, label];
+    if (outcome.problem === null) return { ok: true, checks: ran };
+    return {
+      ok: false, checks: ran,
+      failure: typedFailure("tool_channel_unavailable", {
+        errorCode: "probe_failed", message: `${label}：${outcome.problem}`, stderr: outcome.stderr,
+      }),
+      ...(outcome.timedOut ? { timedOut: true } : {}),
+    };
   }
 
   async start(request: RuntimeStartRequest): Promise<RuntimeHandle> {
@@ -421,17 +498,20 @@ export class ClaudeRuntime implements AgentRuntime {
     // 沙箱策略要的 git 目录和根证书先在子进程里查好：buildArgs 和下面的环境只读缓存（2026-11-03）。
     await Promise.all([warmGitDirs([request.workdir]), warmSandboxTrustBundle()]);
     const args = this.buildArgs(request, mcpConfig?.path ?? null);
+    const userEnv = { ...process.env, ...this.env, ...request.env };
+    // 包管理器的缓存指到临时目录（沙箱里写不了 home 下面的缓存）。Run 自己给的同名变量优先。
+    // 根证书（core 的 sandboxTrustEnv）：Claude Code 沙箱里的 curl、Python 也要能验证证书。用户自己设了的不改。
+    // MCP_TIMEOUT（工单 #113）：只在带 plc 工具通道时补，用户自己设了的不改。它对用户自己的 MCP 服务器也生效。
+    const env = childEnvironment(this.profile.environment, this.env, {
+      ...sandboxCacheEnv(), ...sandboxTrustEnv(userEnv), ...(mcpConfig ? claudeMcpTimeoutEnv(userEnv) : {}), ...request.env,
+    });
+    const launchedAt = Date.now();
 
     let proc: LaunchedProcess;
     try {
       // CLI 经启动垫片运行（工单 14）。daemon 进程退出时，Claude 不会因为管道断开而退出。
       proc = await launchProcess({
-        runId: request.runId, command: this.bin, args, cwd: request.workdir,
-        // 包管理器的缓存指到临时目录（沙箱里写不了 home 下面的缓存）。Run 自己给的同名变量优先。
-        // 根证书（core 的 sandboxTrustEnv）：Claude Code 沙箱里的 curl、Python 也要能验证证书。用户自己设了的不改。
-        env: childEnvironment(this.profile.environment, this.env, {
-          ...sandboxCacheEnv(), ...sandboxTrustEnv({ ...process.env, ...this.env, ...request.env }), ...request.env,
-        }),
+        runId: request.runId, command: this.bin, args, cwd: request.workdir, env,
         baseDir: request.launchDir, removeOnExit: mcpConfig ? [mcpConfig.dir] : [],
       });
     } catch (error) {
@@ -463,7 +543,11 @@ export class ClaudeRuntime implements AgentRuntime {
     }
     return this.supervise(
       proc,
-      { runId: request.runId, model: request.model, toolChannel: request.mcpServer !== undefined, resumed: Boolean(request.resumeSessionId) },
+      {
+        runId: request.runId, model: request.model, toolChannel: request.mcpServer !== undefined,
+        resumed: Boolean(request.resumeSessionId),
+        toolChannelStart: mcpConfig ? { launchedAt, timeoutMs: claudeMcpTimeoutMs(env) } : null,
+      },
       mcpConfig,
     );
   }
@@ -474,15 +558,24 @@ export class ClaudeRuntime implements AgentRuntime {
   async attach(request: RuntimeAttachRequest): Promise<RuntimeHandle> {
     return this.supervise(
       attachProcess(request.launch, { hasStdin: false }),
-      { runId: request.runId, model: request.model, toolChannel: request.toolChannel, resumed: Boolean(request.resumeSessionId) },
+      {
+        runId: request.runId, model: request.model, toolChannel: request.toolChannel,
+        resumed: Boolean(request.resumeSessionId), toolChannelStart: null,
+      },
       null,
     );
   }
 
   // toolChannel：启动时有没有给 plc 工具通道。初始化消息里要检查它的状态。resumed：进程是不是 --resume 起的（用量要减去恢复进来的那份）。
+  // toolChannelStart：这个进程什么时候拉起、MCP 启动时限多少，用来认出启动超时（toolChannelTimedOut）。
+  // 接管的进程不知道拉起的时间，不认超时：内核也不在接管的 Run 里重试。
   private supervise(
     proc: LaunchedProcess,
-    request: Pick<RuntimeStartRequest, "runId" | "model"> & { toolChannel: boolean; resumed: boolean },
+    request: Pick<RuntimeStartRequest, "runId" | "model"> & {
+      toolChannel: boolean;
+      resumed: boolean;
+      toolChannelStart: { launchedAt: number; timeoutMs: number } | null;
+    },
     mcpConfig: { remove(): void } | null,
   ): RuntimeHandle {
     const queue = new AsyncEventQueue<ReturnType<RuntimeEventSequencer["event"]>>();
@@ -495,6 +588,7 @@ export class ClaudeRuntime implements AgentRuntime {
     let spawnError: string | null = null;
     // plc 工具通道没有就绪（工单 05）。这时 Run 在初始化阶段就结束，agent 不在没有交接工具的情况下工作。
     let channelError: string | null = null;
+    let channelTimedOut = false;
     let interruptedReason: string | null = null;
     let closed = false;
     let malformedLines = 0;
@@ -568,6 +662,13 @@ export class ClaudeRuntime implements AgentRuntime {
           if (!request.toolChannel || channelError !== null) return;
           channelError = toolChannelProblem(init);
           if (channelError === null) return;
+          const start = request.toolChannelStart;
+          const elapsedMs = start ? Date.now() - start.launchedAt : 0;
+          if (start && toolChannelTimedOut(init, elapsedMs, start.timeoutMs)) {
+            channelTimedOut = true;
+            channelError += `：启动超时（从拉起 CLI 到初始化用了 ${Math.round(elapsedMs / 1000)} 秒，`
+              + `MCP_TIMEOUT 是 ${Math.round(start.timeoutMs / 1000)} 秒）`;
+          }
           terminate();
         },
       });
@@ -585,6 +686,7 @@ export class ClaudeRuntime implements AgentRuntime {
         externalSessionId,
         spawnError,
         channelError,
+        channelTimedOut,
         interruptedReason,
         protocolError,
         resultState,
@@ -910,6 +1012,7 @@ function resolveExit(input: {
   externalSessionId: string | null;
   spawnError: string | null;
   channelError: string | null;
+  channelTimedOut: boolean;
   interruptedReason: string | null;
   protocolError: string | null;
   resultState: ResultState | null;
@@ -921,7 +1024,8 @@ function resolveExit(input: {
     errorCode = "claude_spawn_error";
     errorMessageValue = input.spawnError;
   } else if (input.channelError) {
-    errorCode = "claude_tool_channel_unavailable";
+    // 启动超时的码在 typed-failure.ts 的 TOOL_CHANNEL_START_TIMEOUT_CODES 里，内核据此重试一次。
+    errorCode = input.channelTimedOut ? "claude_tool_channel_timeout" : "claude_tool_channel_unavailable";
     errorMessageValue = input.channelError;
   } else if (input.interruptedReason) {
     errorCode = "claude_interrupted";

@@ -761,6 +761,69 @@ describe("ClaudeRuntime", () => {
 });
 
 // auto 模式不能用的账号上，PLC_CLAUDE_PERMISSION_MODE 退回 acceptEdits。写错的值不认，仍然用 auto。
+// 工单 #113：机器很忙时 plc 的 MCP 服务器 30 秒内握不上手（Claude Code 默认的 MCP_TIMEOUT）。
+// 启动带 plc 时把时限放到 90 秒；init 报 plc failed 时，认出是不是启动超时，内核据此重试一次。
+describe("ClaudeRuntime and the plc tool channel start timeout", () => {
+  const PLC_SERVER = { command: "node", args: ["mcp-server.mjs"] };
+
+  it("starts with MCP_TIMEOUT at 90 seconds when it gives the plc tool channel", async () => {
+    const { events } = await runFake("inspect", { mcpServer: PLC_SERVER, env: { FAKE_CAPTURE_ENV: "MCP_TIMEOUT" } });
+    expect(JSON.parse(completedText(events)).values).toEqual({ MCP_TIMEOUT: "90000" });
+  });
+
+  it("keeps the user's own MCP_TIMEOUT", async () => {
+    const { events } = await runFake(
+      "inspect", { mcpServer: PLC_SERVER, env: { FAKE_CAPTURE_ENV: "MCP_TIMEOUT" } }, { env: { MCP_TIMEOUT: "120000" } },
+    );
+    expect(JSON.parse(completedText(events)).values).toEqual({ MCP_TIMEOUT: "120000" });
+  });
+
+  it("does not add MCP_TIMEOUT without the plc tool channel", async () => {
+    const { events } = await runFake("inspect", { env: { FAKE_CAPTURE_ENV: "MCP_TIMEOUT" } });
+    expect(JSON.parse(completedText(events)).values).toEqual({ MCP_TIMEOUT: process.env.MCP_TIMEOUT ?? null });
+  });
+
+  it("reports a start timeout when plc failed and init came after MCP_TIMEOUT", async () => {
+    const { events, exit } = await runFake("happy", { mcpServer: PLC_SERVER }, {
+      env: { FAKE_CLAUDE_MCP_STATUS: "failed", FAKE_CLAUDE_INIT_DELAY_MS: "600", MCP_TIMEOUT: "300" },
+    });
+    expect(exit).toMatchObject({ ok: false, errorCode: "claude_tool_channel_timeout" });
+    const failed = events.find((event) => event.type === "run.failed");
+    expect(failed).toMatchObject({
+      errorCode: "claude_tool_channel_timeout",
+      error: expect.stringContaining("启动超时"),
+      failure: { code: "tool_channel_unavailable", scope: "runtime" },
+    });
+  });
+
+  it("does not call it a timeout when plc failed before MCP_TIMEOUT", async () => {
+    const { exit } = await runFake("happy", { mcpServer: PLC_SERVER }, {
+      env: { FAKE_CLAUDE_MCP_STATUS: "failed", MCP_TIMEOUT: "60000" },
+    });
+    expect(exit).toMatchObject({ ok: false, errorCode: "claude_tool_channel_unavailable" });
+  });
+
+  it("adds MCP_TIMEOUT only when the user has not set it, and reads the value the child gets", async () => {
+    const { claudeMcpTimeoutEnv, claudeMcpTimeoutMs } = await import("../src/claude.js");
+    expect(claudeMcpTimeoutEnv({})).toEqual({ MCP_TIMEOUT: "90000" });
+    expect(claudeMcpTimeoutEnv({ MCP_TIMEOUT: " " })).toEqual({ MCP_TIMEOUT: "90000" });
+    expect(claudeMcpTimeoutEnv({ MCP_TIMEOUT: "45000" })).toEqual({});
+    expect(claudeMcpTimeoutMs({ MCP_TIMEOUT: "45000" })).toBe(45_000);
+    expect(claudeMcpTimeoutMs({ MCP_TIMEOUT: "soon" })).toBe(90_000);
+    expect(claudeMcpTimeoutMs({})).toBe(90_000);
+  });
+
+  it("only counts a failed plc that is not a config error as a timeout", async () => {
+    const { toolChannelTimedOut } = await import("../src/claude.js");
+    const failed = { mcp_servers: [{ name: "plc", status: "failed" }] };
+    expect(toolChannelTimedOut(failed, 90_000, 90_000)).toBe(true);
+    expect(toolChannelTimedOut(failed, 89_999, 90_000)).toBe(false);
+    expect(toolChannelTimedOut({ ...failed, mcp_server_errors: [{ name: "plc" }] }, 95_000, 90_000)).toBe(false);
+    expect(toolChannelTimedOut({ mcp_servers: [{ name: "plc", status: "needs-auth" }] }, 95_000, 90_000)).toBe(false);
+    expect(toolChannelTimedOut({ mcp_servers: [] }, 95_000, 90_000)).toBe(false);
+  });
+});
+
 describe("claudePermissionMode", () => {
   it("defaults to auto and accepts only known modes", async () => {
     const { claudePermissionMode } = await import("../src/claude.js");

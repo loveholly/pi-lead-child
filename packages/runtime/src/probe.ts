@@ -152,6 +152,89 @@ export async function runInstallChecks(
   return interpreterResult ? { ...result, checks: [...interpreterResult.checks, ...result.checks] } : result;
 }
 
+// 工具通道的探针（工单 #113）：拉起 MCP 服务器，发一次 initialize，等它回答。和 CLI 连 plc 时走同一段路：
+// 起 node、加载 mcp-server 的模块、回答握手。不调用工具，不发起模型调用。
+// 等待的上限和真实执行的 MCP_TIMEOUT 一样：机器忙到真实执行会超时，探针也超时，故障就不关闭。
+export interface McpServerCommand {
+  command: string;
+  args: string[];
+}
+
+export interface McpProbeOutcome {
+  // null 表示服务器回答了 initialize。
+  problem: string | null;
+  stderr: string;
+  timedOut: boolean;
+}
+
+const MCP_PROBE_KILL_GRACE_MS = 2_000;
+
+export function probeMcpServer(
+  server: McpServerCommand,
+  options: { env: NodeJS.ProcessEnv; timeoutMs: number; signal?: AbortSignal },
+): Promise<McpProbeOutcome> {
+  return new Promise((resolve) => {
+    let stderr = "";
+    let buffer = "";
+    let problem: string | null = null;
+    let answered = false;
+    let timedOut = false;
+    let child: ReturnType<typeof spawn>;
+    try {
+      child = spawn(server.command, server.args, {
+        env: options.env,
+        stdio: ["pipe", "pipe", "pipe"],
+        ...(options.signal ? { signal: options.signal } : {}),
+      });
+    } catch (error) {
+      resolve({ problem: `无法启动：${(error as Error).message}`, stderr, timedOut });
+      return;
+    }
+    let killTimer: ReturnType<typeof setTimeout> | undefined;
+    // 拿到结论就停掉服务器。它收到 SIGTERM 会自己退出（mcp-server.ts），不退出就 SIGKILL。
+    const stop = (): void => {
+      child.kill("SIGTERM");
+      killTimer ??= setTimeout(() => child.kill("SIGKILL"), MCP_PROBE_KILL_GRACE_MS);
+    };
+    const timer = setTimeout(() => {
+      timedOut = true;
+      problem = `${Math.round(options.timeoutMs / 1000)} 秒内没有回答 initialize`;
+      stop();
+    }, options.timeoutMs);
+    child.stdout!.setEncoding("utf8").on("data", (chunk: string) => {
+      if (answered || problem !== null) return;
+      buffer = (buffer + chunk).slice(-MAX_OUTPUT_CHARS);
+      for (const line of buffer.split("\n").slice(0, -1)) {
+        const reply = statusJson(line);
+        if (reply?.id !== 1) continue;
+        answered = true;
+        if (!reply.result) problem = `initialize 返回了错误：${JSON.stringify(reply.error ?? null).slice(0, 300)}`;
+        clearTimeout(timer);
+        stop();
+        return;
+      }
+    });
+    child.stderr!.setEncoding("utf8").on("data", (chunk: string) => {
+      stderr = (stderr + chunk).slice(-MAX_STDERR_CHARS);
+    });
+    // 服务器没读 stdin 就退出时，写入会报 EPIPE。退出码在 close 里报。
+    child.stdin!.on("error", () => {});
+    child.once("error", (error: NodeJS.ErrnoException) => {
+      problem ??= `无法启动：${error.message}`;
+    });
+    child.once("close", (exitCode, signal) => {
+      clearTimeout(timer);
+      if (killTimer) clearTimeout(killTimer);
+      if (!answered && problem === null) problem = `没有回答 initialize 就退出了（${exitCode ?? signal}）`;
+      resolve({ problem, stderr, timedOut });
+    });
+    child.stdin!.write(`${JSON.stringify({
+      jsonrpc: "2.0", id: 1, method: "initialize",
+      params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "plc-probe", version: "1.0.0" } },
+    })}\n`);
+  });
+}
+
 export async function runProbe(command: ProbeCommand, steps: ProbeStep[]): Promise<RuntimeProbeResult> {
   const checks: string[] = [];
   for (const step of steps) {
