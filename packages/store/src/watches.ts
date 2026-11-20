@@ -400,6 +400,16 @@ export function watchOrigin(watch: Watch): TimerOrigin {
   }
 }
 
+/** 用户本人在他那一轮里让 Lead 设的检查记下的那一轮（FollowUpSetBy）。Lead 自己设的、外部来源要求的是 null。 */
+export function watchSetBy(watch: Watch): FollowUpSetBy | null {
+  if (!watch.set_by_json) return null;
+  try {
+    return JSON.parse(watch.set_by_json) as FollowUpSetBy;
+  } catch {
+    return null;
+  }
+}
+
 export function watchAgentChoice(watch: Watch): WatchAgentChoice {
   if (!watch.agent_json) return {};
   try {

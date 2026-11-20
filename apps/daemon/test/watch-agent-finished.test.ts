@@ -7,7 +7,8 @@ import { tempDir } from "@pi-lead-child/core/testing";
 import { createWatchRunner } from "@pi-lead-child/engine";
 import { createWatchLightTask } from "@pi-lead-child/lead";
 import {
-  createRun, createWatch, getItem, getWatch, isLightTask, listWatchChecks, openDb, transitionRunState, watchAgentChoice, type Db,
+  activePairedUserTurn, createLoopbackBinding, createRun, createWatch, getItem, getWatch, isLightTask, listWatchChecks, openDb,
+  transitionRunState, watchAgentChoice, type Db, type FollowUpSetBy,
 } from "@pi-lead-child/store";
 import { recordRunFinished } from "../src/run-finished.js";
 
@@ -27,14 +28,14 @@ function deliver(db: Db, itemId: number, summary: string): number {
   return runId;
 }
 
-function runFinished(db: Db, itemId: number): { summary: string; payload: Record<string, unknown> } {
+function runFinished(db: Db, itemId: number): { id: number; summary: string; payload: Record<string, unknown> } {
   const row = db.prepare(
-    "SELECT summary, payload FROM inbox WHERE item_id=? AND json_extract(payload, '$.kind')='run_finished' ORDER BY id DESC LIMIT 1",
-  ).get(itemId) as { summary: string; payload: string };
-  return { summary: row.summary, payload: JSON.parse(row.payload) };
+    "SELECT id, summary, payload FROM inbox WHERE item_id=? AND json_extract(payload, '$.kind')='run_finished' ORDER BY id DESC LIMIT 1",
+  ).get(itemId) as { id: number; summary: string; payload: string };
+  return { id: row.id, summary: row.summary, payload: JSON.parse(row.payload) };
 }
 
-async function startAgentWatch(origin: Parameters<typeof createWatch>[1]["origin"]) {
+async function startAgentWatch(origin: Parameters<typeof createWatch>[1]["origin"], setBy?: (db: Db) => FollowUpSetBy) {
   const dir = tempDir("plc-watch-agent-");
   const db = openDb(join(dir, "plc.db"));
   const spawned: number[] = [];
@@ -51,6 +52,7 @@ async function startAgentWatch(origin: Parameters<typeof createWatch>[1]["origin
   const watchId = createWatch(db, {
     label: "PR #119 的回复", check: { kind: "agent", brief: "看 PR #119 有没有新的评审意见", agent: { runtime: "pi" } }, mode: "until",
     everySeconds: 300, untilAt: new Date(T0.getTime() + 3_600_000).toISOString(), note: "有回复就总结给用户", origin,
+    ...(setBy ? { setBy: setBy(db) } : {}),
   }, T0);
   await runner.tick();
   return { db, dir, watchId, itemId: spawned[0]! };
@@ -89,5 +91,24 @@ describe("an agent check from start to hand-back", () => {
     const told = runFinished(db, itemId);
     expect(told.payload).toMatchObject({ external: true });
     expect(told.summary).toContain("这个检查是外部来源要求设的");
+  });
+
+  // 维护者定（2026-11-04）：用户本人设的检查交回时，叫醒 Lead 的那一轮按 setBy 算用户的一轮（timer:<inbox 编号>），和用户设的跟进一样。
+  it("lets the hand-back of a watch the user set count as the user's turn, and not one Lead set", async () => {
+    const mine = await startAgentWatch({ kind: "user", turnId: "turn-set" }, (db) => ({
+      turnId: "turn-set", bindingId: createLoopbackBinding(db, { name: "Mac 网页" }).binding.id, startedAt: T0.toISOString(),
+    }));
+    recordRunFinished(mine.db, { itemId: mine.itemId, runId: deliver(mine.db, mine.itemId, "有 1 条新意见。") });
+    const told = runFinished(mine.db, mine.itemId);
+    expect(told.payload).toMatchObject({ setBy: { turnId: "turn-set" } });
+    expect(activePairedUserTurn(mine.db, `timer:${told.id}`, "x", "tickets:create")).toMatchObject({
+      id: `timer:${told.id}`, origin_kind: "paired:timer", created_at: T0.toISOString(),
+    });
+
+    const own = await startAgentWatch({ kind: "system" });
+    recordRunFinished(own.db, { itemId: own.itemId, runId: deliver(own.db, own.itemId, "没有新回复。") });
+    const ownTold = runFinished(own.db, own.itemId);
+    expect(ownTold.payload).not.toHaveProperty("setBy");
+    expect(() => activePairedUserTurn(own.db, `timer:${ownTold.id}`, "x", "tickets:create")).toThrow(/not a follow-up the user set/);
   });
 });

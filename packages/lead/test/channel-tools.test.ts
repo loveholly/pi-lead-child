@@ -96,6 +96,8 @@ describe("Lead's channel tools", () => {
     };
     const tools = createChannelCardTools(source);
     expect(tools.map((candidate) => candidate.name).sort()).toEqual(["dispatch_agent_task", "read_channel_conversation"]);
+    // 「自动代你处理」关着时通道不回「正在处理」（issue 07），工具说明要跟上（评审，2026-11-03）。
+    expect(tool(tools, "dispatch_agent_task").description).toContain("「自动代你处理」关着时不回「正在处理」，结果交回给你");
     const done = JSON.parse((await tool(tools, "dispatch_agent_task").execute("call", {
       event: 5, summary: "review 订单服务的重试改动", connections: ["cdp"], review_events: ["COMMENT"],
     })).content[0].text);
