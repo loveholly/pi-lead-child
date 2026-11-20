@@ -59,12 +59,36 @@ export class RuntimeSettings implements RuntimeSettingsService {
   private readonly env: Record<string, string | undefined>;
   private readonly before: string | undefined;
   private queue: Promise<unknown> = Promise.resolve();
+  // 从 config.json 的 runtimes.defaults 写进环境变量的名字：close 时只删这些。
+  private readonly defaultEnvKeys: string[] = [];
 
   constructor(private readonly options: RuntimeSettingsOptions) {
     this.env = options.env ?? process.env;
     this.before = this.env[DISABLED_RUNTIMES_ENV];
     const configured = this.configured();
     if (configured) this.apply(configured);
+    this.applyDefaults();
+  }
+
+  // 派活不点名模型和强度时用的值（config.json 的 runtimes.defaults，工单 #373）。环境变量已经设了的不覆盖。
+  private applyDefaults(): void {
+    let defaults: unknown;
+    try {
+      defaults = loadPlcConfig(this.options.dataDir).runtimes?.defaults;
+    } catch {
+      return; // configured() 已经记过读不了 config.json
+    }
+    if (!defaults || typeof defaults !== "object") return;
+    for (const [runtime, choice] of Object.entries(defaults as Record<string, { model?: unknown; effort?: unknown }>)) {
+      if (!isRuntimeId(runtime) || !choice || typeof choice !== "object") continue;
+      for (const [field, value] of [["MODEL", choice.model], ["EFFORT", choice.effort]] as const) {
+        const key = `PLC_${runtime.toUpperCase()}_${field}`;
+        if (typeof value !== "string" || !value.trim() || this.env[key]?.trim()) continue;
+        this.env[key] = value.trim();
+        this.defaultEnvKeys.push(key);
+      }
+    }
+    if (this.defaultEnvKeys.length) this.options.log?.(`runtime settings: default model/effort from config.json: ${this.defaultEnvKeys.join(",")}`);
   }
 
   // config.json 的 runtimes.disabled。没有这一项、或者读不了 config.json 时返回 null。
@@ -189,6 +213,7 @@ export class RuntimeSettings implements RuntimeSettingsService {
   }
 
   close(): void {
+    for (const key of this.defaultEnvKeys) delete this.env[key];
     if (this.before === undefined) delete this.env[DISABLED_RUNTIMES_ENV];
     else this.env[DISABLED_RUNTIMES_ENV] = this.before;
   }

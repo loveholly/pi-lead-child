@@ -17,3 +17,9 @@ export function resolveRuntimeModel(
   if (!value) return undefined;
   return runtimeAdapter(runtime).models.resolve(value);
 }
+
+// 没有指定推理强度时用的强度（PLC_<RUNTIME>_EFFORT，daemon 从 config.json 的 runtimes.defaults 写入）。
+// 返回 undefined 时，由 CLI 自己决定。
+export function defaultRuntimeEffort(runtime: RuntimeId, env: Record<string, string | undefined> = process.env): string | undefined {
+  return env[`PLC_${runtime.toUpperCase()}_EFFORT`]?.trim() || undefined;
+}

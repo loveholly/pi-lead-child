@@ -270,7 +270,13 @@ export interface PlcConfigFile {
   // 执行器（设置页「执行器」，2026-10-19）：disabled 是停用的 runtime id。daemon 启动时和设置改了以后
   // 把它写进 PLC_DISABLED_RUNTIMES（apps/daemon 的 runtime-settings.ts），内核从环境变量读。手改这里要重启 daemon。
   // disabledBy（2026-10-22，Lead 也能停用）：谁停用的、为什么、什么时候。没有这一项的停用当作用户停用的。
-  runtimes?: { disabled?: string[]; disabledBy?: Record<string, RuntimeDisabledBy> };
+  // defaults（工单 #373）：派活时没点名模型、推理强度，用这里这个 runtime 的值，不再交给 CLI 自己的默认档（往往最贵）。
+  // 键是 runtime id（claude、codex、pi）。daemon 启动时写进 PLC_<RUNTIME>_MODEL、PLC_<RUNTIME>_EFFORT（apps/daemon 的 runtime-settings.ts）；
+  // 环境变量已经设了的不覆盖。模型名不在代码里写死，换默认只改这里。
+  runtimes?: {
+    disabled?: string[]; disabledBy?: Record<string, RuntimeDisabledBy>;
+    defaults?: Record<string, { model?: string; effort?: string }>;
+  };
   // 外部通道。daemon 启动时读一次，改了要重启 daemon。
   channels?: PlcChannelsConfig;
 }

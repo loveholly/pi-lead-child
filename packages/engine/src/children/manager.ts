@@ -455,10 +455,10 @@ async function runItemLifecycle(
   const existingRun = opts.runId === undefined ? undefined : getRun(db, opts.runId);
   // 核查 Run 用这张工单现在的核查员（reviewer-choice.ts，按能不能用换过的）的模型和推理强度。
   const reviewer = adopt ? null : reviewerProfileFor(db, itemId, role);
-  const model = adopt ? opts.model : runModelFor({ explicit: opts.model, role, runtime: runtime.id, item, reviewer });
+  const model = adopt ? opts.model : runModelFor({ explicit: opts.model, role, runtime: runtime.id, item, reviewer, logDefault: true });
   const effort = adopt
     ? opts.effort ?? existingRun?.effort ?? undefined
-    : opts.effort ?? existingRun?.effort ?? runEffortFor(db, { itemId, role, purpose, runtime: runtime.id, model, reviewer });
+    : opts.effort ?? existingRun?.effort ?? runEffortFor(db, { itemId, role, purpose, runtime: runtime.id, model, reviewer, logDefault: true });
   // Resolve/provision the workspace only after runtime/model preflight, but before changing
   // item stage or creating a Run. This avoids a failed model selection leaving a workspace row.
   const preparation = workspaceForRun(db, item, itemId, {

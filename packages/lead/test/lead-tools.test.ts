@@ -692,6 +692,30 @@ describe("lead tools", () => {
     await vi.waitFor(() => expect(runningChildren().has(itemId)).toBe(false));
   });
 
+  // 工单 #373：recover_ticket_run 重发工单对话、换了 runtime 时把模型清成 null。null 要和没给一样：取配置的默认模型，
+  // 不能跳过 runModelFor 落到 CLI 自己的默认档。
+  it("a ticket chat resent with a null model uses the configured default model", async () => {
+    const runtime = new CapturingRuntime();
+    deps = { ...deps, childPi: undefined, runtimeRegistry: new RuntimeRegistry([runtime]) };
+    process.env.PLC_CODEX_MODEL = "model-from-config";
+    process.env.PLC_CODEX_EFFORT = "medium";
+    const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      const itemId = createItem(db, { title: "chat", brief: "b", createdBy: "system", runtime: "codex" });
+      transition(db, { itemId, to: "active", actor: "system", reason: "start" });
+      const failed = createRun(db, { itemId, role: "executor", purpose: "execution", runtime: "codex" });
+      updateRun(db, failed, { state: "failed", endedAt: true });
+      const routed = routeTicketMessageToAgentRun(deps, { itemId, message: "hi", runtime: "codex", model: null, effort: null });
+      expect(getRun(db, routed.runId)).toMatchObject({ model: "model-from-config", effort: "medium" });
+      expect(log.mock.calls.flat().join("\n")).toContain("using configured default model-from-config");
+      await vi.waitFor(() => expect(runningChildren().has(itemId)).toBe(false));
+    } finally {
+      delete process.env.PLC_CODEX_MODEL;
+      delete process.env.PLC_CODEX_EFFORT;
+      log.mockRestore();
+    }
+  });
+
   it("routes ticket detail messages as conversation runs without consuming execution retry budget", async () => {
     const runtime = new CapturingRuntime();
     deps = {
@@ -1090,7 +1114,7 @@ describe("lead tools", () => {
 
   // 执行器目录写进建工单和派发的工具说明，get_runtime_health 也返回它，每一轮发给模型服务商：
   // 用户目录下的执行器路径写成 ~/…，不带账号名；用户目录以外的路径照原样。
-  it("writes executables under the home directory as ~/… in tool descriptions and get_runtime_health", async () => {
+  it("keeps executable paths out of tool descriptions and writes them under the home directory as ~/… in get_runtime_health", async () => {
     vi.stubEnv("HOME", "/Users/alice");
     try {
       const capabilities = new CapturingRuntime().capabilities;
@@ -1108,9 +1132,9 @@ describe("lead tools", () => {
       };
       for (const name of ["create_task", "spawn_child"]) {
         const description = tool(name).description as string;
-        expect(description).toContain("claude: 可用 (~/.local/bin/claude)");
-        expect(description).toContain("pi: 可用 (~/Workspace/acme/node_modules/.bin/pi)");
-        expect(description).toContain("codex: 可用 (/opt/homebrew/bin/codex)");
+        // 工单 #373：说明里不再放 runtime 目录（可执行文件路径、健康状态），它们进 get_runtime_health 的返回结果。
+        expect(description).not.toContain(".local/bin/claude");
+        expect(description).not.toContain("/opt/homebrew/bin/codex");
         expect(description).not.toContain("/Users/alice");
       }
       const health = (await tool("get_runtime_health").execute("health", {})).content[0].text as string;
