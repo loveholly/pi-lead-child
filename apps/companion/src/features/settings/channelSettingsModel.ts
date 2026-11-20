@@ -57,6 +57,11 @@ export function secretPlaceholder(secret: ChannelSecretSetting, locale: Locale):
   return m.savedReplace;
 }
 
+// 建应用的链接显示成什么：去掉查询串（链接里可以带上整份清单，很长），点开的还是完整的链接。
+export function setupLinkText(url: string): string {
+  return url.split(/[?#]/)[0] || url;
+}
+
 // 「断开」只删设置页存的密钥（DELETE 不动 Keychain 和环境变量），所以只有密钥来自设置页时才出现。
 export function canDisconnect(source: ChannelSourceSettingsDto): boolean {
   return source.editable && source.secrets.some((secret) => secret.present && secret.origin === 'vault');

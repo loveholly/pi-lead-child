@@ -3,10 +3,10 @@
 // 权限要从 x-oauth-scopes 头里读（WebClient 放进 response_metadata.scopes）。Slack 一律是假的。
 import { describe, expect, it } from "vitest";
 import { Value } from "typebox/value";
-import { ChannelSecretsTestResultSchema, ChannelSecretSettingSchema } from "@pi-lead-child/protocol";
+import { CHANNEL_SETUP_URL_MAX, ChannelSecretsTestResultSchema, ChannelSecretSettingSchema } from "@pi-lead-child/protocol";
 import {
-  builtinChannelAdapters, ChannelRegistry, createSlackChannelAdapter, createSlackWebApi, SLACK_USER_SCOPES, slackAppManifest,
-  validateChannelAdapter, type ChannelAdapter,
+  builtinChannelAdapters, ChannelRegistry, createSlackChannelAdapter, createSlackWebApi, SLACK_USER_EVENTS, SLACK_USER_SCOPES, slackAppManifest,
+  slackSetupUrl, validateChannelAdapter, type ChannelAdapter,
 } from "../src/index.js";
 import { FAKE_SLACK_APP_TOKEN, FAKE_SLACK_BOT_TOKEN, FAKE_SLACK_TOKEN, FakeSlack } from "../testing/index.js";
 
@@ -48,9 +48,22 @@ describe("the Slack settings", () => {
     expect(settings.secrets.map((secret) => secret.name)).toEqual(adapter.auth.secrets);
     expect(settings.secrets.map((secret) => secret.prefix)).toEqual(["xapp-", "xoxp-"]);
     for (const secret of settings.secrets) {
-      expect(Value.Check(ChannelSecretSettingSchema, { ...secret, present: false, origin: null })).toBe(true);
+      for (const locale of ["en", "zh"] as const) {
+        expect(Value.Check(ChannelSecretSettingSchema, { ...secret, hint: secret.hint(locale), present: false, origin: null })).toBe(true);
+      }
     }
-    expect(settings.setupUrl).toBe("https://api.slack.com/apps");
+    expect(settings.setupUrl).toBe(slackSetupUrl(settings.manifest!));
+    // 令牌的说明有英文和中文（界面缺省是英文）。
+    expect(settings.secrets[1]!.hint("en")).toContain("copy the User OAuth Token (not the Bot User OAuth Token)");
+    expect(settings.secrets[1]!.hint("zh")).toContain("复制 User OAuth Token（不是 Bot User OAuth Token）");
+    // 建应用的要点（2026-11-02）：权限加在 User Token Scopes，用户事件按 SLACK_USER_EVENTS 订阅；改了要重装、重填。
+    // 令牌的说明里不再重复这些（同一页不出现两遍）。
+    for (const locale of ["en", "zh"] as const) {
+      const note = settings.setupNote!(locale);
+      for (const part of ["User Token Scopes", "Bot Token Scopes", "Subscribe to events on behalf of users", "Reinstall to Workspace",
+        "User OAuth Token", ...SLACK_USER_EVENTS]) expect(note).toContain(part);
+      expect(settings.secrets[1]!.hint(locale)).not.toContain("User Token Scopes");
+    }
     // 应用名是助手名（Slack 在代发的消息下面写「Sent using @Paimon」），说明里写主人名。
     expect(settings.manifest).toContain('name: "Paimon"');
     expect(settings.manifest).toContain('description: "替 Leo 查资料'); 
@@ -65,6 +78,48 @@ describe("the Slack settings", () => {
     expect(slackAppManifest(null)).toContain('name: "Paimon"');
     expect(slackAppManifest(null, "Nova")).toContain('name: "Nova"');
     expect(validateChannelAdapter(adapter)).toEqual([]);
+  });
+
+  // 2026-11-02：手建应用时漏了 User Token Scopes 和用户事件，连上了却一个事件都收不到。建应用的链接带上清单，打开就填好了。
+  it("links to the app-creation page with the manifest filled in, and falls back to the plain page when it is too long", () => {
+    const settings = settingsOf(createSlackChannelAdapter({ api: new FakeSlack().api, ownerName: "韩梅梅" }));
+    const url = new URL(settings.setupUrl!);
+    expect(`${url.origin}${url.pathname}`).toBe("https://api.slack.com/apps");
+    expect(url.searchParams.get("new_app")).toBe("1");
+    expect(url.searchParams.get("manifest_yaml")).toBe(settings.manifest);
+    expect(settings.setupUrl!.length).toBeLessThanOrEqual(CHANNEL_SETUP_URL_MAX);
+    // 名字最长时（主人名、应用名各 20 个汉字）也放得下。
+    const longest = slackAppManifest("韩".repeat(40), "李".repeat(40));
+    expect(slackSetupUrl(longest)).toContain("manifest_yaml=");
+    expect(slackSetupUrl("x".repeat(CHANNEL_SETUP_URL_MAX))).toBe("https://api.slack.com/apps");
+  });
+
+  // 连上了却收不到事件时的提醒：没人发消息时可以忽略；否则在哪里订阅哪 4 个用户事件、User Token Scopes 要哪些，重装、重存令牌，
+  // 共享应用时的 authorizations:read，怎样验证。
+  it("says where to subscribe the user events and add the user scopes when no events come in", () => {
+    const settings = settingsOf(createSlackChannelAdapter({ api: new FakeSlack().api }));
+    for (const locale of ["en", "zh"] as const) {
+      const text = settings.noEventsWarning!(locale);
+      for (const part of ["Subscribe to events on behalf of users", "User Token Scopes", "Reinstall to Workspace", "User OAuth Token",
+        "message.im", "message.mpim", "message.channels", "message.groups", ...SLACK_USER_SCOPES]) {
+        expect(text).toContain(part);
+      }
+      expect(text.length).toBeLessThanOrEqual(1_000);
+    }
+    // 判不出是少了设置还是没人发消息（PR #2 审阅）：先说没人发消息时可以忽略。
+    expect(settings.noEventsWarning!("en")).toContain("If nobody messaged you or posted in your channels in that time");
+    expect(settings.noEventsWarning!("zh")).toContain("如果这段时间没人给你发消息、你所在的频道里也没人说话");
+    expect(settings.noEventsWarning!("en")).not.toContain("probably");
+    expect(settings.noEventsWarning!("zh")).not.toContain("多半");
+    // 别人也装了这个应用时，App-Level Token 缺 authorizations:read 会把用户能看到的消息也丢掉（visibleToUser）。
+    expect(settings.noEventsWarning!("en")).toContain("If others also installed this app, the App-Level Token needs authorizations:read");
+    expect(settings.noEventsWarning!("zh")).toContain("别人也装了这个应用时，App-Level Token 还要有 authorizations:read");
+    // 验证用别人发来的私信：给自己发私信会不会推 message.im 没有确认过。
+    expect(settings.noEventsWarning!("en")).toContain("ask someone to send you a direct message");
+    expect(settings.noEventsWarning!("zh")).toContain("请别人在 Slack 里给你发一条私信");
+    // 收到任何一个事件提醒就消失：说清楚，免得只订了频道消息时以为私信也好了。
+    expect(settings.noEventsWarning!("en")).toContain("goes away after any one event comes in");
+    expect(settings.noEventsWarning!("zh")).toContain("收到任何一个事件后这条提醒就会消失");
   });
 
   it("refuses an adapter whose settings name a secret it does not declare", () => {
