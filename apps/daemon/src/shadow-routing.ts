@@ -60,13 +60,18 @@ const INTERNAL_KEY_PREFIXES = new Set([
   "connection", "connections", "daemon", "user", "workspace", "approval", "agenda", "widget",
 ]);
 
-/** 事件属于哪个来源（设置里的 sources）。 */
+const ESCALATED_KIND = "event.escalated";
+
+/**
+ * 事件属于哪个来源（设置里的 sources）。channel 只认外部消息本身和它的升级：不认识的前缀不等于外部对话
+ * （2026-11-20：清理扫描问「这个目录要不要删」，对象是 workspace-orphan:…，按 channel 分给了 shadow）。
+ */
 export function shadowSourceOf(event: Pick<EventRecord, "kind" | "entityKey">): LeadShadowSource {
   if (event.kind === MESSAGE_EVENT_KIND) return "channel";
   const prefix = /^([a-z][a-z0-9_-]*):/u.exec(event.entityKey)?.[1] ?? "";
   if (prefix === "ticket" || prefix === "run" || prefix === "item") return "ticket";
   // 外部通道里没人回的消息到时限升级（event.escalated，对象是 slack:… 这样的对话）。
-  if (prefix && !INTERNAL_KEY_PREFIXES.has(prefix)) return "channel";
+  if (event.kind === ESCALATED_KIND && prefix && !INTERNAL_KEY_PREFIXES.has(prefix)) return "channel";
   return "other";
 }
 

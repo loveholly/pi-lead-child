@@ -16,11 +16,12 @@ export {
   compareSlackTs, createSlackChannelAdapter, SLACK_EVENT_KINDS, SLACK_MESSAGE_BLOCKS_MAX, SLACK_REPLY_METADATA_TYPE, SLACK_SECRET_NAMES,
   SLACK_ASSISTANT_EMOJI_DEFAULT, SLACK_EMOJI_SCOPE_MISSING, SLACK_SOURCE, SLACK_TEXT_OBJECT_MAX, slackDisclosureBlocks, slackEmojiCode,
   slackCatchUpWindow, slackMemoryExclusion, slackMrkdwnFromMarkdown, slackTsOf,
-  slackAttachmentsOnly, slackDisplayText, slackMarkupIds, slackMessageText, SLACK_SESSION_SECRET_NAMES, slackSecretNames,
+  slackAttachmentsOnly, slackDisplayText, slackMarkupIds, slackMentionsFromNames, slackMessageText, SLACK_SESSION_SECRET_NAMES, slackSecretNames,
   slackBroadcastOf, slackThreadAddressee,
 } from "./sources/slack.js";
 export type {
-  SlackAddressee, SlackAddresseeBasis, SlackBroadcastRange, SlackChannelOptions, SlackConnection, SlackMemoryExclusion, SlackWebApi,
+  SlackAddressee, SlackAddresseeBasis, SlackBroadcastRange, SlackChannelOptions, SlackConnection, SlackMemoryExclusion, SlackMentionPerson,
+  SlackWebApi,
 } from "./sources/slack.js";
 export type { SlackSessionNetwork } from "./sources/slack-session.js";
 export { SLACK_SESSION_ENDED } from "./sources/slack-session-transport.js";

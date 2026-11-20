@@ -126,6 +126,19 @@ describe("outbound: Lead writes Markdown", () => {
     expect(JSON.stringify(message.blocks)).toContain("*Done.* See <https://example.com/doc|the doc>");
   });
 
+  // 2026-11-20：Lead 代用户写「@Nina Wang 麻烦…」，发出去还是纯文字，Slack 不通知对方。只出现在别人消息里的人，
+  // 模型看到的是「@名字」（slackDisplayText），没有编号。发送时按工作区的名单把「@名字」换回提及。
+  it("turns @names in Lead's words into Slack mentions, so the person gets notified", async () => {
+    slack.users.set("U0NINA", { name: "Nina Wang (ENG - SRE)", realName: "Nina Wang" });
+    const { hub } = setup();
+    await hub.sendMessage("slack:D0ETHAN:main", {
+      text: "@Nina Wang 麻烦把表里的数改一下，谢谢。", words: "assistant", by: "lead", forUser: false,
+    });
+    const message = slack.sent("D0ETHAN").at(-1)!;
+    expect(message.text).toContain("<@U0NINA> 麻烦把表里的数改一下");
+    expect(JSON.stringify(message.blocks)).toContain("<@U0NINA> 麻烦");
+  });
+
   it("sends the user's own words as they are", async () => {
     const { hub } = setup();
     await hub.sendMessage("slack:D0ETHAN:main", { text: "*bold* in Slack syntax", words: "user", by: "user", forUser: true });

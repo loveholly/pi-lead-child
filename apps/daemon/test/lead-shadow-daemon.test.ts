@@ -195,6 +195,20 @@ describe("the background shadow", () => {
     expect(shadow.batches).toEqual([]);
   });
 
+  // 2026-11-20 线上：分给 channel 50%、ticket 和 other 0 时，清理扫描问「这个目录要不要删」的 inbox（对象 workspace-orphan:…）
+  // 被当成外部对话交给了 shadow；shadow 只能交回来。它是 other，按设置留给主会话。
+  it("does not take an inbox row on an internal object as an external conversation", async () => {
+    const { lead, shadow, setShadow } = await boot(() => []);
+    await setShadow({ mode: "on", shares: { channel: 100, ticket: 0, other: 0 } });
+    addInbox(db, {
+      dedupScope: "workspace-orphan:0123456789abcdef", severity: "attention", source: "structural", lossless: true,
+      summary: "~/work/x.plc-workspaces/item-1 不属于任何工单，里面还有文件；没有删，等用户决定",
+      payload: { inboxKind: "workspace_orphan_decision", path: "~/work/x.plc-workspaces/item-1", wakeLead: true, needsUser: true },
+    });
+    await vi.waitFor(() => expect(lead.calls.some((entry) => has(entry, "等用户决定"))).toBe(true), { timeout: 3_000 });
+    expect(shadow.batches).toEqual([]);
+  });
+
   it("gathers events that arrive close together into one batch", async () => {
     vi.stubEnv("PLC_SHADOW_GATHER_MS", "400");
     const { shadow, setShadow } = await boot((ids) => [

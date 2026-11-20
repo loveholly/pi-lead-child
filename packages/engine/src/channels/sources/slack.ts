@@ -233,6 +233,67 @@ function slackOutgoing(text: string, parts: ChannelOutboundRequest["parts"]): { 
   return { text: body ? `${parts.byline}\n${body}` : parts.byline, parts: { byline: parts.byline, body } };
 }
 
+/** 工作区里的一个人（users.list），把「@名字」换回提及时用。 */
+export type SlackMentionPerson = { id: string; name: string; realName: string; displayName: string };
+
+// 代码块、行内代码、已经是 Slack 标记的 <…>：里面的字不动。
+const SLACK_MENTION_SKIP = /(```[\s\S]*?```|`[^`\n]+`|<[^<>\n]+>)/u;
+const ASCII_WORD = /[A-Za-z0-9_]/u;
+// 换了会提醒整个频道的词：不当成人名。
+const SLACK_BROADCAST_WORDS = new Set(["here", "channel", "everyone"]);
+
+/**
+ * 助手写的正文里的「@名字」换成 Slack 的提及 <@U…>，和 slackDisplayText 反过来。模型读到的别人消息里，提到的人已经换成了
+ * 「@名字」，没有编号；照着写回去，Slack 只当成纯文字，不通知对方（2026-11-20）。名字认 users.list 的显示名、全名和账号名，
+ * 也认去掉末尾括号（例如部门）的写法；最长的写法优先。最长的写法对上不止一个人时不换，留成纯文字。
+ */
+export function slackMentionsFromNames(mrkdwn: string, people: readonly SlackMentionPerson[]): string {
+  if (!mrkdwn.includes("@") || !people.length) return mrkdwn;
+  const byName = new Map<string, Set<string>>();
+  const add = (name: string, id: string) => {
+    const key = name.trim().toLowerCase();
+    if (key.length < 2 || SLACK_BROADCAST_WORDS.has(key)) return;
+    const ids = byName.get(key) ?? new Set<string>();
+    ids.add(id);
+    byName.set(key, ids);
+  };
+  for (const person of people) {
+    for (const name of [person.displayName, person.realName, person.name]) {
+      if (!name) continue;
+      add(name, person.id);
+      add(name.replace(/\s*[(（][^()（）]*[)）]\s*$/u, ""), person.id);
+    }
+  }
+  const names = [...byName.keys()].sort((a, b) => b.length - a.length);
+  return mrkdwn.split(SLACK_MENTION_SKIP).map((part, index) => {
+    if (index % 2 === 1 || !part.includes("@")) return part;
+    let out = "";
+    let at = 0;
+    while (at < part.length) {
+      const sign = part.indexOf("@", at);
+      if (sign < 0) break;
+      out += part.slice(at, sign);
+      at = sign + 1;
+      // 邮件地址里的 @ 不是提到人。
+      if (sign > 0 && /[A-Za-z0-9_.+-]/u.test(part[sign - 1]!)) {
+        out += "@";
+        continue;
+      }
+      const rest = part.slice(sign + 1).toLowerCase();
+      const found = names.find((name) => rest.startsWith(name)
+        && !(ASCII_WORD.test(name.at(-1)!) && ASCII_WORD.test(rest[name.length] ?? "")));
+      const ids = found ? byName.get(found)! : null;
+      if (!found || ids!.size !== 1) {
+        out += "@";
+        continue;
+      }
+      out += `<@${[...ids!][0]}>`;
+      at = sign + 1 + found.length;
+    }
+    return out + part.slice(at);
+  }).join("");
+}
+
 /** Slack 通道要的两个 daemon 专用密钥（core 的 SLACK_APP_TOKEN_ENV、SLACK_USER_TOKEN_ENV）。 */
 export const SLACK_SECRET_NAMES = [SLACK_APP_TOKEN_ENV, SLACK_USER_TOKEN_ENV] as const;
 /** 浏览器会话方式要的 daemon 专用密钥：会话 cookie（core 的 SLACK_SESSION_COOKIE_ENV）。 */
@@ -1244,6 +1305,25 @@ export function createSlackChannelAdapter(options: SlackChannelOptions): Channel
     return list;
   }
 
+  // 助手写的正文（带署名的）里的「@名字」换成提及（slackMentionsFromNames）。用户本人的原话原样发，不换。
+  // 名单拿不到时照原样发：消息比提醒要紧。
+  async function withMentions(
+    outgoing: ReturnType<typeof slackOutgoing>, context: ChannelAdapterContext,
+  ): Promise<ReturnType<typeof slackOutgoing>> {
+    const body = outgoing.parts?.body;
+    if (!outgoing.parts || !body?.includes("@")) return outgoing;
+    let list: SlackPerson[];
+    try {
+      list = await directory(context);
+    } catch (error) {
+      context.log(`users.list failed, @names stay plain text: ${errorText(error)}`);
+      return outgoing;
+    }
+    const linked = slackMentionsFromNames(body, list);
+    if (linked === body) return outgoing;
+    return { text: `${outgoing.parts.byline}\n${linked}`, parts: { byline: outgoing.parts.byline, body: linked } };
+  }
+
   async function membership(context: ChannelAdapterContext): Promise<SlackJoined[]> {
     if (joined && now().getTime() - joined.at < JOINED_TTL_MS) return joined.list;
     const channels = await allPages(
@@ -2242,7 +2322,7 @@ export function createSlackChannelAdapter(options: SlackChannelOptions): Channel
         throw new Error(`slack reactions.add: ${isString(result.error) ? result.error : "not ok"}`);
       }
       if (!isString(request.text)) throw new Error("slack: a reply needs text");
-      const outgoing = slackOutgoing(request.text, request.parts);
+      const outgoing = await withMentions(slackOutgoing(request.text, request.parts), context);
       if (request.action === "edit") {
         if (!isString(request.target.ts)) throw new Error("slack: nothing to edit (no ts)");
         // 同样的内容改两次结果一样，所以改写本身是幂等的。不带署名的样式时清掉原来的 blocks（不传时 Slack 会留着旧的）。

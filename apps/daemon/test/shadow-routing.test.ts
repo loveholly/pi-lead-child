@@ -33,6 +33,10 @@ describe("shadowSourceOf", () => {
     expect(shadowSourceOf({ kind: "run.failed", entityKey: "run:3" })).toBe("ticket");
     expect(shadowSourceOf({ kind: "inbox.attention", entityKey: "lead-job:job_1" })).toBe("other");
     expect(shadowSourceOf({ kind: "signal.received", entityKey: "signal:google" })).toBe("other");
+    // 2026-11-20：清理扫描的「这个目录要不要删」（inbox.attention，对象 workspace-orphan:…）按外部对话分给了 shadow。
+    // 不认识的前缀不是外部对话：只有消息事件和对话的升级算 channel。
+    expect(shadowSourceOf({ kind: "inbox.attention", entityKey: "workspace-orphan:0123456789abcdef" })).toBe("other");
+    expect(shadowSourceOf({ kind: "inbox.attention", entityKey: "slack:C1:main" })).toBe("other");
   });
 });
 
@@ -61,6 +65,8 @@ describe("shadowRoute", () => {
     expect(shadowRoute(handedBack, facts({ escalated: [handedBack.seq] }))).toEqual({ shadow: false, why: "shadow_escalated" });
     expect(shadowRoute(event({ entityKey: "ticket:7" }), facts({ lead: ["ticket:7"] }))).toEqual({ shadow: false, why: "lead_on_it" });
     expect(shadowRoute(event({}), facts({ shares: { ticket: 0 } }))).toEqual({ shadow: false, why: "share_off" });
+    const orphan = event({ kind: "inbox.attention", entityKey: "workspace-orphan:abc", payload: { needsUser: true } });
+    expect(shadowRoute(orphan, facts({ shares: { channel: 50, other: 0 } }))).toEqual({ shadow: false, why: "share_off" });
   });
 
   it("splits a source by object: one conversation or ticket always lands on the same side, and a larger share only adds", () => {
