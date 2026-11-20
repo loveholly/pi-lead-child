@@ -277,7 +277,7 @@ describe("threads the user started", () => {
     await hub.idle();
     expect(getChannelCard(db, reply.cardId!)!.state).not.toBe("open");
 
-    // Lead 代用户发的根消息起头的 thread：同事回别人的话也照旧进卡（工单 #303 的行为）。
+    // Lead 代用户发的根消息起头的 thread：同事回别人的话也照旧进卡（Lead 代发起头的线程原有的行为）。
     await hub.receive("slack", slack.mention("U0LEO", "请看一下", { channel: "C0PROJ" }));
     await hub.sendMessage("slack:C0PROJ:main", { text: "<@U0NINA> 退货运费这周能定吗？", words: "assistant", forUser: true, by: "lead for user via turn:turn-1" });
     const posted = slack.sent("C0PROJ").at(-1)!;
