@@ -89,6 +89,28 @@ describe("create_task with template=pr_review", () => {
     });
   });
 
+  // 工单 #17：评审 Run 一次花半小时、4–8M token，因为 agent 自己建副本、全量构建、起浏览器测试、cat 整个日志。
+  it("tells the reviewer to work in the PR head checkout, skip browser tests and full builds, and read output as summaries", async () => {
+    for (const deliver of ["post", "return"]) {
+      const { db, createTask } = setup();
+      const result = await createTask.execute("c", {
+        title: "评审 PR #101", brief: "", template: "pr_review", deliver,
+        pr_review: { pr: "Acme/agent-app#101", focus: FOCUS, acceptance: ACCEPTANCE },
+      });
+      const brief = getItem(db, Number(/#(\d+)/.exec(result.content[0].text)![1]))!.brief;
+      expect(brief).toContain("## 验证");
+      expect(brief).toContain("PR head 的临时检出");
+      expect(brief).toContain("不跑要起浏览器的测试");
+      // 不起浏览器的 e2e 测试（例如 vitest 跑的 *-e2e.test.ts）是 PR 改了的测试时照样要跑：不能一概说不跑 e2e。
+      expect(brief).not.toContain("不跑浏览器测试和 e2e 测试");
+      expect(brief).not.toContain("master");
+      expect(brief).toContain("不做全量构建");
+      expect(brief).toContain("只跑和这个 PR 改动相关的测试");
+      expect(brief).toContain("命令输出只看摘要");
+      expect(brief).toContain("request_decision");
+    }
+  });
+
   it("hands the review back without posting when Lead asks for deliver=return", async () => {
     const { db, createTask } = setup();
     const result = await createTask.execute("c", {
