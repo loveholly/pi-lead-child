@@ -372,6 +372,33 @@ describe("orphan directories under <repo>.plc-workspaces", () => {
     await sweepWorkspaces(db, new Date());
     expect(inboxOf("workspace_orphan_decision")).toHaveLength(2);
   });
+
+  // 子工单在父工单的 worktree 里开自己的隔离 worktree：它登记在 <父 worktree>.plc-workspaces/<子> 下。
+  // 扫描以前只比较第一层目录和登记路径是否相等，把 <父 worktree>.plc-workspaces 当成孤儿去问用户。
+  it("keeps a directory that holds a registered nested workspace, and still asks about look-alikes", async () => {
+    const parentPath = isolatedFor(codingTicket()).path;
+    const childTicket = createItem(db, { title: "nested", brief: "b", createdBy: "lead", workdir: parentPath });
+    const child = isolatedFor(childTicket);
+    const container = workspaceRootFor(realpathSync(repo));
+    const holder = workspaceRootFor(realpathSync(parentPath));
+    expect(realpathSync(child.path).startsWith(`${holder}/`)).toBe(true);
+    expect(realpathSync(holder).startsWith(`${realpathSync(container)}/`)).toBe(true);
+    // 名字是登记子路径的字符串前缀，但里面没有登记的工作区。
+    const prefix = join(container, `${parentPath.split("/").pop()}.plc-work`);
+    mkdirSync(prefix);
+    writeFileSync(join(prefix, "file.txt"), "someone's files\n");
+    // 同样的形状，但里面的子目录没有登记。
+    const stale = join(container, "item-9-stale.plc-workspaces");
+    mkdirSync(join(stale, "item-10-gone"), { recursive: true });
+    writeFileSync(join(stale, "item-10-gone", "file.txt"), "left over\n");
+    for (const path of [holder, prefix, stale]) age(path, 10);
+
+    const result = await sweepWorkspaces(db, new Date());
+    expect(result).toMatchObject({ cleaned: 0, awaitingDecision: 2, failed: [] });
+    expect(existsSync(join(child.path, "source.txt"))).toBe(true);
+    const asked = inboxOf("workspace_orphan_decision").map((row) => JSON.parse(row.payload).path as string);
+    expect(asked.sort()).toEqual([realpathSync(prefix), realpathSync(stale)].sort());
+  });
 });
 
 // 完整的持久化流程：派发 → child 在 worktree 里提交 → 工单完成 → 扫描问合并 → 合并 → 清理，中间重开数据库。

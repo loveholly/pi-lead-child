@@ -1169,6 +1169,13 @@ async function sweepOrphans(
     "SELECT path, branch FROM workspaces WHERE state NOT IN ('cleaned','archived')",
   ).all() as Array<{ path: string; branch: string | null }>;
   const registered = new Set(live.map((row) => realpathOr(row.path)));
+  // 子工单在父工单的 worktree 里开的隔离 worktree 登记在 <父 worktree>.plc-workspaces/<子> 下：
+  // 第一层的 <父 worktree>.plc-workspaces 自己没有登记，但它装着登记的工作区，不是孤儿。按路径段比较，名字相似的目录不算。
+  const holdsRegistered = (path: string): boolean => {
+    const prefix = path + sep;
+    for (const registeredPath of registered) if (registeredPath.startsWith(prefix)) return true;
+    return false;
+  };
   const liveRefs = new Set(live.map((row) => row.branch).filter((branch): branch is string => Boolean(branch)));
   let cleaned = 0;
   let awaiting = 0;
@@ -1203,7 +1210,7 @@ async function sweepOrphans(
       if (name === WORKTREE_TRASH_DIR) continue;
       // 不跟随符号链接：链接指向的可能是容器外面用户自己的 worktree（审查 2026-10-19 第 8 条）。plc 只在这里建真目录。
       const path = join(containerPath, name);
-      if (registered.has(path)) continue;
+      if (registered.has(path) || holdsRegistered(path)) continue;
       try {
         const entry = lstatSync(path);
         if (entry.isSymbolicLink() || !entry.isDirectory()) continue;
