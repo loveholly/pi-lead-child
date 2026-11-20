@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { tempDir } from "@pi-lead-child/core/testing";
 import { Vault, connectionSecretAad, fileKeySource } from "../src/vault.js";
-import { discover, parseBearerChallenge, requestedScope, OAuthError } from "../src/oauth.js";
+import { discover, exchangeCode, parseBearerChallenge, requestedScope, OAuthError } from "../src/oauth.js";
 import { McpHttpClient } from "../src/mcp-client.js";
 import { backoffMs, pickAccount } from "../src/hub.js";
 import { loadConnectionsConfig, normalizeCustomServerUrl } from "../src/catalog.js";
@@ -47,6 +47,47 @@ describe("OAuth discovery", () => {
     await expect(discover(fetchImpl, vendor.mcpUrl)).rejects.toThrow(/not https:\/\/mcp.fake.test\/mcp/);
   });
 
+  // MCP 服务器在 /mcp。401 的 resource_metadata 指向 hint（null 时不带，走 well-known 回退）；只有 at 这个地址返回元数据。
+  function metadataAt(vendor: FakeVendor, input: { hint: string | null; at: string; resource: string }): typeof vendor.fetch {
+    return async (url, init) => {
+      if (url === vendor.mcpUrl && init?.method === "POST" && !new Headers(init.headers).has("authorization")) {
+        return new Response(null, { status: 401, headers: input.hint ? { "www-authenticate": `Bearer resource_metadata="${input.hint}"` } : {} });
+      }
+      if (url === input.at) return new Response(JSON.stringify({ resource: input.resource, authorization_servers: [vendor.issuer] }), { status: 200 });
+      if (url.includes("oauth-protected-resource")) return new Response(null, { status: 404 });
+      return vendor.fetch(url, init);
+    };
+  }
+
+  it("accepts the origin as resource when the metadata comes from the origin's own well-known address (Slack's shape)", async () => {
+    const vendor = new FakeVendor(() => Date.now());
+    const root = "https://mcp.fake.test/.well-known/oauth-protected-resource";
+    for (const hint of [root, null]) {
+      const discovery = await discover(metadataAt(vendor, { hint, at: root, resource: "https://mcp.fake.test" }), vendor.mcpUrl);
+      expect(discovery.resource?.resource).toBe("https://mcp.fake.test");
+    }
+  });
+
+  it("rejects a parent resource from any other metadata document (RFC 9728 §3.3)", async () => {
+    const vendor = new FakeVendor(() => Date.now());
+    for (const at of ["https://mcp.fake.test/.well-known/oauth-protected-resource/mcp", "https://mcp.fake.test/mcp/metadata.json"]) {
+      await expect(discover(metadataAt(vendor, { hint: at, at, resource: "https://mcp.fake.test" }), vendor.mcpUrl)).rejects.toThrow(/resource metadata is for/);
+    }
+  });
+
+  it("rejects resource metadata for a sibling path, a lookalike prefix, another scheme or another port", async () => {
+    const vendor = new FakeVendor(() => Date.now());
+    for (const resource of ["https://mcp.fake.test/mcp2", "https://mcp.fake.test/m", "https://mcp.fake.test/other", "https://mcp.fake.test.evil.test", "http://mcp.fake.test", "https://mcp.fake.test:8443"]) {
+      const fetchImpl: typeof vendor.fetch = async (input, init) => {
+        if (input.includes("oauth-protected-resource")) {
+          return new Response(JSON.stringify({ resource, authorization_servers: [vendor.issuer] }), { status: 200 });
+        }
+        return vendor.fetch(input, init);
+      };
+      await expect(discover(fetchImpl, vendor.mcpUrl)).rejects.toThrow(/resource metadata is for/);
+    }
+  });
+
   it("finds the metadata of an issuer with a path at the RFC 8414 address", async () => {
     const vendor = new FakeVendor(() => Date.now(), { issuer: "https://auth.fake.test/tenant-1" });
     const discovery = await discover(vendor.fetch, vendor.mcpUrl);
@@ -61,6 +102,21 @@ describe("OAuth discovery", () => {
 
   it("refuses plain HTTP to anything but loopback", async () => {
     await expect(discover(async () => new Response(null), "http://mcp.example.test/mcp")).rejects.toBeInstanceOf(OAuthError);
+  });
+});
+
+describe("token exchange", () => {
+  const server = { issuer: "https://auth.fake.test", authorization_endpoint: "https://auth.fake.test/authorize", token_endpoint: "https://auth.fake.test/token", token_endpoint_auth_methods_supported: ["client_secret_post"] };
+  const input = { code: "c", verifier: "v", redirectUri: "http://127.0.0.1:1/oauth/callback", resource: "https://mcp.fake.test/mcp" };
+
+  it("reports the error code of a 200 response that carries ok:false and no token", async () => {
+    const fetchImpl = async () => new Response(JSON.stringify({ ok: false, error: "bad_redirect_uri" }), { status: 200 });
+    await expect(exchangeCode(fetchImpl, server, { clientId: "id", clientSecret: "s" }, input)).rejects.toThrow(/no access_token \(the server says: bad_redirect_uri\)/);
+  });
+
+  it("never echoes the response body into the message", async () => {
+    const fetchImpl = async () => new Response(JSON.stringify({ ok: false, error: "x y z", refresh_token: "secret-refresh" }), { status: 200 });
+    await expect(exchangeCode(fetchImpl, server, { clientId: "id", clientSecret: "s" }, input)).rejects.toThrow(/^token response has no access_token$/);
   });
 });
 
