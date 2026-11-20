@@ -1072,9 +1072,13 @@ export class FakeSlack {
     });
   }
 
-  /** 频道里没有提到用户的消息（thread：发在这个线程里）。 */
-  chatter(from: string, text: string, channel = "C0PROJ", options: { thread?: string } = {}): ChannelDelivery {
-    return this.post({ channel, channel_type: "channel", user: from, text, ...(options.thread ? { thread_ts: options.thread } : {}) });
+  /** 频道里没有提到用户的消息（thread：发在这个线程里；bot：发信人是一个应用；blocks：消息的 block，例如 rich_text）。 */
+  chatter(from: string, text: string, channel = "C0PROJ", options: { thread?: string; bot?: boolean; blocks?: unknown[] } = {}): ChannelDelivery {
+    return this.post({
+      channel, channel_type: "channel", user: from, text, ...(options.thread ? { thread_ts: options.thread } : {}),
+      ...(options.bot ? { bot_id: `B0${from.slice(2)}` } : {}),
+      ...(options.blocks ? { blocks: options.blocks } : {}),
+    });
   }
 
   /** 用户本人在 Slack 里回复了。 */

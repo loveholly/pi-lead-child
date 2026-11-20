@@ -116,13 +116,15 @@ describe("threads the user follows, by Slack's own rules", () => {
     expect(adapter.memory!.kinds["slack.followed.message"]).toBe("message");
   });
 
-  it("follows a thread the user started", async () => {
+  // 2026-11-20（用户授权）：用户本人起头的 thread 不再只记录。同事没 @ 用户、接着用户的话说，是在回用户，进会话卡；
+  // 回别人的进摘要。细节见 channel-slack-ambient.test.ts。
+  it("takes a reply to the user in a thread the user started into a card", async () => {
     const { hub } = setup();
     const started = slack.selfReply("C0QUIET", "大家看下这个提案");
     const mine = (await hub.receive("slack", started)).items[0]!;
     expect(mine).toMatchObject({ role: "self_reply", delivery: "record" });
     const reply = (await hub.receive("slack", slack.chatter("U0ZHANG", "我觉得可以", "C0QUIET", { thread: threadOf(started) }))).items[0]!;
-    expect(reply).toMatchObject({ kind: "slack.followed.message", delivery: "record", objectKey: mine.objectKey });
+    expect(reply).toMatchObject({ kind: "slack.thread.message", delivery: "card", objectKey: mine.objectKey });
   });
 
   it("does not follow threads in excluded channels, nor anything in direct messages", async () => {
@@ -139,7 +141,8 @@ describe("threads the user follows, by Slack's own rules", () => {
 });
 
 // Lead 代用户发的消息（推回来是 echo）起头的 thread 是用户的 thread：同事在里面的回复是在回用户让 Lead 问的话，进会话卡。
-// 用户本人在 Slack 里起头、回复过的 thread 仍然只记录（上面的「关注」，用户 2026-10-21，2026-11-09 再确认）。
+// 用户只回复过的 thread 仍然只记录（上面的「关注」，用户 2026-10-21，2026-11-09 再确认）；用户本人起头的 thread 按回谁分
+// （2026-11-20，见 channel-slack-ambient.test.ts）。
 // 回归：Lead 代用户在订阅频道里发了一条 @ 同事的消息，同事在它的 thread 里回了一个问题，只被记成订阅频道的普通消息。
 describe("threads Lead started for the user", () => {
   const by = "lead for user via turn:turn-1";

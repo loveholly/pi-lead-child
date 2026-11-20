@@ -106,6 +106,10 @@ export interface ChannelInbound {
   // 推回来的话（role echo）起头了它所在的对象（例如 Slack 频道里一个 thread 的根消息）：系统替用户发的消息起头的对象是
   // 用户的，interest.started 认它。用户本人的话（self_reply）不带它：用户自己起头的只关注（2026-10-21）。只和 follows 一起用。
   starts?: boolean;
+  // 别人发来的消息（role message）不是对用户说的（2026-11-20）：例如发给整个频道的广播、用户起头的对话里回别人或者说不清回谁的话。
+  // 用户在场，要知道，但不用处理：hub 把投递方式封顶在摘要（digest），不开道、不开卡、不问请求 A，所以不会代办或代回；
+  // 这个对象已经有道时只进道的上下文。不问紧急程度。投递指令说只记录时照样只记录。
+  ambient?: boolean;
 }
 
 /**
@@ -351,6 +355,9 @@ export interface ChannelInterest {
   followed(objectKey: string): boolean;
   // 这个对象是系统替用户发的消息起头的（记过带 starts 的推回来的话）。别人在里面接着说，是在回用户让系统发的话。
   started(objectKey: string): boolean;
+  // 这个对象是用户本人起头的（2026-11-20）：记过用户本人在这个对象里说的、编号是 messageId 的话（例如一个讨论串的第一条消息）。
+  // 用户只回复过的对象不算；系统替用户发的话（echo）也不算，那是 started。
+  ownerStarted(objectKey: string, messageId: string): boolean;
 }
 
 export interface ChannelAdapterContext {

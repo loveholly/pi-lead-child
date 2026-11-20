@@ -35,6 +35,8 @@ export function channelInboundPayload<T extends TProperties>(extra: T) {
     // 谁看得到回复：direct 1 对 1 私信；group 群聊；channel 频道。见 ChannelInbound.audience。
     audience: Type.Optional(Type.Union([Type.Literal("direct"), Type.Literal("group"), Type.Literal("channel")])),
     replyTo: Type.Optional(Type.Object({ objectKey: Type.String(), ref: Type.String() })),
+    // 不是对用户说的（ChannelInbound.ambient）：投递最多到摘要，不开卡。
+    ambient: Type.Optional(Type.Boolean()),
     // 要开卡的消息，先判断要不要用户回，再开卡（hub 的 settlePendingCard）：判断以前记下开卡要用的投递方式和回复的位置。
     cardPending: Type.Optional(Type.Object({
       delivery: Type.String(), replyTarget: Type.Record(Type.String(), Type.String()), at: Type.String(),

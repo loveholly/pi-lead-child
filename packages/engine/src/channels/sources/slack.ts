@@ -8,6 +8,9 @@
 //       别人发给用户的私信（slack.dm.received）、别人在频道里提到用户（slack.mention.received）、
 //       用户本人的回复（slack.self.reply，触发「别处已处理」）、
 //       用户的线程（已经有道，或者系统替用户发的消息起头的 thread）里没有提到用户的后续消息（slack.thread.message）、
+//       用户本人起头的 thread 里没有提到用户的消息（2026-11-20）：按结构判断回谁（slackThreadAddressee），回用户的也是
+//       slack.thread.message（走会话卡、请求 A 和授权表），回别人的、说不清的是 slack.owner_thread.message（进摘要、沉淀进记忆）、
+//       用户所在频道里的全频道广播（slack.broadcast.message，2026-11-20：进摘要、沉淀进记忆；没有订阅的频道只收内部频道的）、
 //       别人改了、删了道里的一条消息（slack.message.edited、slack.message.deleted：对已有的道，只更新没结束的卡；
 //       订阅频道里没有道的线程也收，只记录，给记忆沉淀用）、
 //       订阅频道里的普通消息（slack.channel.message：只记录。这个频道 14 天内有过道就算订阅，hub 用 channel_lanes 回答；
@@ -49,7 +52,7 @@
 //     水位：连着、并且这次连上以后的补拉做完时，每分钟记一次；断了（状态不是 connected）就不推。记的时刻往回留两分钟：
 //     会话方式快速重连时状态可能不变，搜索的索引也有延迟，余量盖住这一小段，重复的靠投递编号去重。
 //   - 默认常设指令：打断阈值很高（只有你信任的人发来的私信、并且系统判断你需要马上看到时才推送）；私信和同事的提及进会话卡；
-//     外部的提及进摘要；订阅频道的消息、改和删只记录。模板代回、代查和按信心代回（channel.slack.delegate、.lookup、.reply）
+//     外部的提及进摘要；全频道广播、你起头的 thread 里不是回你的话进摘要，不开卡（ChannelInbound.ambient）；订阅频道的消息、改和删只记录。模板代回、代查和按信心代回（channel.slack.delegate、.lookup、.reply）
 //     已经退役（落地计划 A5、D1），停用不删；能替你做什么由授权表（channel.authority）决定。
 //   - 紧急程度不在这里判断（用户 2026-10-19：理解自然语言不用正则）。这里只交出事实（发信人、信任、频道类型、文字、
 //     是不是机器人），由通道内核问 SmartModel，结果写进事件的 urgent（channels/urgency.ts）。
@@ -253,6 +256,11 @@ export const SLACK_EVENT_KINDS = {
   channel: "slack.channel.message",
   // 用户关注的 thread（用户在里面发起或者回复过、系统替用户回复过，照 Slack 的自动关注规则）里别人的消息，没有提到用户。只记录，沉淀进记忆。
   followed: "slack.followed.message",
+  // 用户所在频道里别人发的全频道广播（@channel、@here、@everyone），没有提到用户本人（2026-11-20）。进摘要、沉淀进记忆，不开卡。
+  broadcast: "slack.broadcast.message",
+  // 用户本人起头的 thread 里别人的消息，没有提到用户，看结构不是在回用户：回别人，或者说不清回谁（2026-11-20）。
+  // 进摘要、沉淀进记忆，不开卡。看结构是在回用户的，按 thread（slack.thread.message）走会话卡和授权表。
+  ownerThread: "slack.owner_thread.message",
 } as const;
 
 export interface SlackChannelOptions {
@@ -331,6 +339,12 @@ const SlackFields = {
   externalShared: Type.Optional(Type.Union([Type.Boolean(), Type.Null()])),
   // 频道名（不带 #）。私信、问不到时是 null。记忆沉淀用它做笔记的标题、按名字排除频道。
   channelName: Type.Optional(Type.Union([Type.String(), Type.Null()])),
+  // 全频道广播的范围（slackBroadcastOf）：channel、here、everyone。不是广播时没有。
+  broadcast: Type.Optional(Type.String()),
+  // 用户本人起头的 thread 里别人的消息在回谁（slackThreadAddressee）：owner 回用户，other 回别人，unclear 说不清；
+  // addresseeBasis 是依据。别的消息没有这两个字段。
+  addressee: Type.Optional(Type.String()),
+  addresseeBasis: Type.Optional(Type.String()),
 };
 
 const MINUTE = 60_000;
@@ -351,6 +365,8 @@ const SLACK_EDIT_GONE = new Set(["message_not_found", "cant_update_message", "ed
 // 重连以后补拉：最多看几条道，每条道最多补几条消息。
 const BACKFILL_LANES = 20;
 const BACKFILL_MESSAGES = 50;
+// 判断用户起头的 thread 里一条消息回谁时，最多读几页 thread（一页 REPLIES_PAGE 条）。
+const THREAD_READ_PAGES = 5;
 // 断线这段时间的补拉：最多往回补多久、最多补几条（缺省，SlackChannelOptions.catchUp 可以改）；最多读几个对话；
 // 读一个对话每页几条、最多几页；搜索每页几条、最多几页；列出私信时最多读几个（client.counts 调不了时）。
 const GAP_WINDOW_MS = 3 * DAY;
@@ -380,6 +396,8 @@ const PLACE_CONVERSATION = /^slack:([A-Z0-9]{6,20}):(main|\d{9,11}\.\d{6})$/;
 const MESSAGE_SUBTYPES = new Set(["thread_broadcast", "file_share"]);
 // 线程和改、删的投递条件：同事和你信任的人进会话卡，别人进摘要。
 const CONVERSATION_KINDS = [SLACK_EVENT_KINDS.mention, SLACK_EVENT_KINDS.thread, SLACK_EVENT_KINDS.edited, SLACK_EVENT_KINDS.deleted];
+// 不是对用户说的消息（ChannelInbound.ambient）：全频道广播、用户起头的 thread 里回别人或者说不清回谁的话。最多进摘要。
+const AMBIENT_KINDS = [SLACK_EVENT_KINDS.broadcast, SLACK_EVENT_KINDS.ownerThread];
 
 const SEEDS: readonly SystemStandingOrderSeed[] = [
   {
@@ -448,9 +466,12 @@ const SEEDS: readonly SystemStandingOrderSeed[] = [
     // 2：紧急程度改由通道内核问快模型判断（2026-10-19），标题和说明跟着改；条件不变。
     // 3：线程里的后续消息、改消息、删消息和提及一样投递（slack-takeover 工单 02）；订阅频道的消息不匹配，只记录。
     // 4：机器人和应用发的消息（payload.sender.bot，来自 Slack 的 bot_id）只记录（用户 2026-10-21：日历提醒开了卡）。
-    seedRevision: 4,
+    // 5：全频道广播和你起头的 thread 里不是回你的话进摘要（2026-11-20）。用户或 Lead 改过这条指令时不覆盖：
+    //    这两种消息在改过的指令里不匹配，按 record 只记录、沉淀进记忆，和以前一样。
+    seedRevision: 5,
     title: "Slack 消息的投递：打断阈值很高（只有你信任的人发来私信、并且系统判断你需要马上看到时才推送）；"
-      + "私信和同事的提及、你的线程里同事的后续消息进会话卡，其余的进摘要，订阅频道的消息和机器人发的消息只记录",
+      + "私信和同事的提及、你的线程里同事回你的话进会话卡；全频道广播、你起头的 thread 里回别人的话和其余的进摘要；"
+      + "订阅频道的普通消息和机器人发的消息只记录",
     priority: 100,
     condition: {},
     action: {
@@ -469,7 +490,7 @@ const SEEDS: readonly SystemStandingOrderSeed[] = [
             { kinds: CONVERSATION_KINDS, fields: { "payload.sender.trust": { in: ["trusted", "colleague"] } } },
           ],
         },
-        digestWhen: { kinds: CONVERSATION_KINDS, fields: { "payload.sender.bot": { not: true } } },
+        digestWhen: { kinds: [...CONVERSATION_KINDS, ...AMBIENT_KINDS], fields: { "payload.sender.bot": { not: true } } },
       },
     },
     limits: null,
@@ -478,7 +499,11 @@ const SEEDS: readonly SystemStandingOrderSeed[] = [
       + "并且系统判断你需要马上看到（payload.urgent：通道内核问快模型，阈值很高，不看关键词；问不成时按不紧急）；"
       + "私信、同事在频道里提到你、你的线程里同事的后续消息，进会话卡；外部的人的，进摘要；改和删只更新没结束的卡；其余只记录。"
       + "用户 2026-10-21：机器人和应用发的消息（例如日历提醒）只记录，不开卡、不进摘要。"
-      + "开卡以前系统还会先判断这条消息要不要你回（请求 A 的 needs_reply），不用回的不开卡，只在 Lead 动态里记一笔。",
+      + "开卡以前系统还会先判断这条消息要不要你回（请求 A 的 needs_reply），不用回的不开卡，只在 Lead 动态里记一笔。"
+      + "用户 2026-11-20：你所在频道里的全频道广播（@channel、@here、@everyone）不用你处理也进摘要、沉淀进记忆；"
+      + "你本人起头的 thread 里，同事没有 @ 你、但看结构是在回你的话（接在你的话后面，或者引用、链接到你的话）按 thread 进会话卡，"
+      + "走请求 A 和授权表；回别人的、说不清回谁的、看不到 thread 时，进摘要、沉淀进记忆，不开卡，不代回。"
+      + "这两种消息不开卡，最多进摘要（hub 按 ambient 封顶）；排除名单里的频道不收，没有订阅的频道只收内部频道（不和外部组织共享）的广播。",
   },
   {
     id: "channel.slack.delegate",
@@ -810,6 +835,101 @@ export function slackDisplayText(
     return whole;
   });
   return shown.replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
+}
+
+/** 全频道广播的范围：@channel、@here、@everyone。 */
+export type SlackBroadcastRange = "channel" | "here" | "everyone";
+const SLACK_BROADCAST_RANGES: readonly SlackBroadcastRange[] = ["channel", "everyone", "here"];
+const isBroadcastRange = (value: unknown): value is SlackBroadcastRange => SLACK_BROADCAST_RANGES.includes(value as SlackBroadcastRange);
+
+// rich_text 里的 broadcast 元素（{ type: "broadcast", range: "channel" }），嵌套的 section、list、quote 往里找。
+function richBroadcast(value: unknown, depth = 0): SlackBroadcastRange | null {
+  if (!isRecord(value) || depth > 8) return null;
+  if (value.type === "broadcast" && isBroadcastRange(value.range)) return value.range;
+  if (!Array.isArray(value.elements)) return null;
+  for (const element of value.elements) {
+    const found = richBroadcast(element, depth + 1);
+    if (found) return found;
+  }
+  return null;
+}
+
+/**
+ * 这条消息是不是全频道广播（2026-11-20）：正文里的 <!channel>、<!here>、<!everyone>（带不带 |标签都算，
+ * https://docs.slack.dev/messaging/formatting-message-text），或者 rich_text block 里的 broadcast 元素。
+ * 只按 Slack 的标记认，不看文字：正文里写「@channel」三个字、提到一个用户组（<!subteam^…>）都不算。返回范围，不是广播时是 null。
+ */
+export function slackBroadcastOf(message: Pick<SlackMessage, "text" | "blocks">): SlackBroadcastRange | null {
+  const text = typeof message.text === "string" ? message.text : "";
+  for (const match of text.matchAll(SLACK_MARKUP)) {
+    const target = match[1]!.split("|", 1)[0]!;
+    if (target.startsWith("!") && isBroadcastRange(target.slice(1))) return target.slice(1) as SlackBroadcastRange;
+  }
+  for (const block of Array.isArray(message.blocks) ? message.blocks : []) {
+    const found = richBroadcast(block);
+    if (found) return found;
+  }
+  return null;
+}
+
+/** 用户本人起头的 thread 里别人的消息在回谁（slackThreadAddressee）。 */
+export type SlackAddressee = "owner" | "other" | "unclear";
+export type SlackAddresseeBasis =
+  | "mentions_other" | "points_to_owner" | "points_to_other" | "follows_owner" | "follows_other" | "unavailable";
+
+const SLACK_PERMALINK_TS = /\/archives\/[A-Z0-9]+\/p(\d{10})(\d{6})/g;
+// 引用的话至少这么长（去掉空白）才拿来比：太短的话（「好的」）到处都有。
+const QUOTE_MIN = 4;
+
+/**
+ * 用户本人起头的 thread 里，一条没有提到用户的消息在回谁（2026-11-20）：
+ *   owner 回用户；other 回别人；unclear 说不清（看不到 thread 也是 unclear）。basis 是依据。
+ * 只看 Slack 的结构，不理解文字（用户 2026-10-19：理解自然语言不用正则）：
+ *   1. 正文提到了别的人（<@U…>，不算用户本人和发信人自己）或者一个用户组（<!subteam^…>）：other。
+ *   2. 正文链接到这个 thread 里的一条消息（permalink 的 p<ts>），或者引用（> 开头的行）的话只在这个 thread 里的一条消息里有：
+ *      那条是用户的（包括系统替用户发的）就是 owner，是别人的就是 other。
+ *   3. 往前找最近一条不是发信人自己、也不是机器人发的消息：是用户的就是 owner（接着用户的话说），是别人的就是 unclear
+ *      （可能在回那个人，也可能还在回用户）。
+ *   4. 前面什么也没有（没读到 thread）：unclear。
+ * earlier 是 thread 里这条以前的消息（根消息在内），顺序不限。
+ */
+export function slackThreadAddressee(input: {
+  self: string; sender: string; text: string; earlier: readonly SlackMessage[];
+}): { addressee: SlackAddressee; basis: SlackAddresseeBasis } {
+  const { self, sender } = input;
+  for (const match of input.text.matchAll(SLACK_MARKUP)) {
+    const target = match[1]!.split("|", 1)[0]!;
+    if (target.startsWith("@") && target.slice(1) !== self && target.slice(1) !== sender) return { addressee: "other", basis: "mentions_other" };
+    if (target.startsWith("!subteam^")) return { addressee: "other", basis: "mentions_other" };
+  }
+  const earlier = input.earlier.filter((message) => isString(message.ts)).sort((a, b) => compareSlackTs(b.ts!, a.ts!));
+  if (!earlier.length) return { addressee: "unclear", basis: "unavailable" };
+  const authorOf = (message: SlackMessage): SlackAddressee | null => {
+    if (message.user === self) return "owner";
+    if (message.user === sender || !isString(message.user)) return null;
+    return "other";
+  };
+  const pointed = (to: SlackAddressee | null) => (to === "owner"
+    ? { addressee: "owner" as const, basis: "points_to_owner" as const }
+    : to === "other" ? { addressee: "other" as const, basis: "points_to_other" as const } : null);
+  for (const match of input.text.matchAll(SLACK_PERMALINK_TS)) {
+    const ts = `${match[1]}.${match[2]}`;
+    const target = earlier.find((message) => message.ts === ts);
+    const found = target ? pointed(authorOf(target)) : null;
+    if (found) return found;
+  }
+  const quote = comparable(input.text.split("\n").filter((line) => /^\s*(&gt;|>)/.test(line))
+    .map((line) => line.replace(/^\s*(&gt;|>)\s?/, "")).join("\n"));
+  if (quote.length >= QUOTE_MIN) {
+    const authors = new Set(earlier.filter((message) => comparable(message.text ?? "").includes(quote)).map(authorOf));
+    if (authors.size === 1) {
+      const found = pointed([...authors][0]!);
+      if (found) return found;
+    }
+  }
+  const previous = earlier.find((message) => message.user !== sender && !isString(message.bot_id) && isString(message.user));
+  if (!previous) return { addressee: "unclear", basis: "unavailable" };
+  return previous.user === self ? { addressee: "owner", basis: "follows_owner" } : { addressee: "unclear", basis: "follows_other" };
 }
 
 function errorText(error: unknown): string {
@@ -1188,6 +1308,8 @@ export function createSlackChannelAdapter(options: SlackChannelOptions): Channel
     envelope: SlackEnvelope; message: SlackMessage; channel: string; channelType: string; ts: string;
     kind: string; role: ChannelInbound["role"]; deliveryId: string; text: string; echo: boolean; amends?: ChannelInbound["amends"];
     occurredAt: Date; follows?: boolean; starts?: boolean;
+    // 不是对用户说的（ChannelInbound.ambient），和写进事件的事实（广播的范围、回谁）。
+    ambient?: boolean; facts?: Record<string, string>;
   }, context: ChannelAdapterContext): Promise<ChannelInbound> {
     const place = placeOf(input.channel, input.channelType, input.ts, input.message.thread_ts);
     const senderId = isString(input.message.user) ? input.message.user : "unknown";
@@ -1222,8 +1344,10 @@ export function createSlackChannelAdapter(options: SlackChannelOptions): Channel
         channelId: input.channel, channelType: input.channelType, ts: input.ts, threadTs: place.thread, echo: input.echo,
         externalShared: info.externalShared, channelName: info.name,
         ...(slackAttachmentsOnly(input.message) ? { attachmentsOnly: true } : {}),
+        ...input.facts,
       },
       ...(input.amends ? { amends: input.amends } : {}),
+      ...(input.ambient ? { ambient: true } : {}),
       ...(input.follows ? { follows: true } : {}),
       ...(input.follows && input.starts ? { starts: true } : {}),
     };
@@ -1246,6 +1370,38 @@ export function createSlackChannelAdapter(options: SlackChannelOptions): Channel
     if (excluded.empty) return true;
     if (excluded.hasId(channel)) return false;
     return !excluded.has(channel, (await conversation(channel, context)).name);
+  }
+
+  // 收不收这个频道里的全频道广播（2026-11-20）：排除名单里的不收；订阅的频道照收；没有订阅的频道只收内部频道的
+  // （conversations.info 说没有和外部组织共享；问不到时按外部共享对待，不收）。以前订阅频道里的广播只记录，没订阅的频道里的整个丢掉。
+  async function broadcastAllowed(channel: string, context: ChannelAdapterContext): Promise<boolean> {
+    if (!await followable(channel, context)) return false;
+    if (await subscribed(channel, context)) return true;
+    return (await conversation(channel, context)).externalShared === false;
+  }
+
+  // 用户本人起头的 thread 里这条消息以前的消息（根消息在内），从旧到新按页读，最多 THREAD_READ_PAGES 页。
+  // 读不到（调用失败、太长读不完）时是 null：回谁说不清，进摘要，不开卡。
+  async function threadBefore(channel: string, thread: string, ts: string, context: ChannelAdapterContext): Promise<SlackMessage[] | null> {
+    const messages: SlackMessage[] = [];
+    let cursor = "";
+    try {
+      for (let page = 0; page < THREAD_READ_PAGES; page++) {
+        const result = await api("conversations.replies", {
+          channel, ts: thread, latest: ts, inclusive: false, limit: REPLIES_PAGE, ...(cursor ? { cursor } : {}),
+        }, context);
+        const found = Array.isArray(result.messages) ? (result.messages as unknown[]).filter(isRecord) as SlackMessage[] : [];
+        messages.push(...found.filter((message) => isString(message.ts) && compareSlackTs(message.ts, ts) < 0));
+        const next = (result.response_metadata as { next_cursor?: unknown } | undefined)?.next_cursor;
+        if (result.has_more !== true || !isString(next)) return messages;
+        cursor = next;
+      }
+    } catch (error) {
+      context.log(`could not read thread ${channel}:${thread} to tell whom a reply is for: ${errorText(error)}`);
+      return null;
+    }
+    context.log(`thread ${channel}:${thread} is too long to tell whom a reply is for`);
+    return null;
   }
 
   // 别人也装了这个应用时（用户 2026-11-02）：Slack 把装了它的人能看到的事件都推过来，包括同事和别人的私信。一个事件只发一次，
@@ -1300,8 +1456,12 @@ export function createSlackChannelAdapter(options: SlackChannelOptions): Channel
     if (edited && (message.text ?? "") === (event.previous_message?.text ?? "")) return [];
     const place = placeOf(channel, channelType, ts, message.thread_ts);
     // 没有道的线程：订阅频道里的才收（只记录，给记忆沉淀用：删掉的消息不能留在笔记里）。私信里的不收。
+    // 收过的全频道广播（不论频道订没订阅）改了、删了也要知道：记忆里不能留删掉的话。
+    const wasBroadcast = !place.direct && (slackBroadcastOf(message) !== null
+      || (event.previous_message !== undefined && slackBroadcastOf(event.previous_message) !== null));
     const known = context.interest?.laneExists(place.objectKey)
-      || (!place.direct && context.interest?.followed(place.objectKey) && await followable(channel, context));
+      || (!place.direct && context.interest?.followed(place.objectKey) && await followable(channel, context))
+      || (wasBroadcast && await broadcastAllowed(channel, context));
     if (!known && (place.direct || !await subscribed(channel, context))) return [];
     const changeTs = event.event_ts ?? event.ts ?? "";
     return [await inbound({
@@ -1731,7 +1891,7 @@ export function createSlackChannelAdapter(options: SlackChannelOptions): Channel
   const memorySpec: ChannelMemorySpec = {
     kinds: {
       [SLACK_EVENT_KINDS.mention]: "message", [SLACK_EVENT_KINDS.thread]: "message", [SLACK_EVENT_KINDS.channel]: "message",
-      [SLACK_EVENT_KINDS.followed]: "message",
+      [SLACK_EVENT_KINDS.followed]: "message", [SLACK_EVENT_KINDS.broadcast]: "message", [SLACK_EVENT_KINDS.ownerThread]: "message",
       [SLACK_EVENT_KINDS.selfReply]: "message", [SLACK_EVENT_KINDS.edited]: "edited", [SLACK_EVENT_KINDS.deleted]: "deleted",
     },
     messageRef: (payload) => (isString(payload.ts) ? payload.ts : null),
@@ -1784,6 +1944,8 @@ export function createSlackChannelAdapter(options: SlackChannelOptions): Channel
       kind(SLACK_EVENT_KINDS.deleted, "别人删了 Slack 道里（或者订阅频道的线程里）的一条消息（不带原文，ts 是那条消息的）。只更新没结束的卡。"),
       kind(SLACK_EVENT_KINDS.channel, "用户订阅的 Slack 频道（14 天内有过用户的对话）里，别人没有提到用户的普通消息。只记录。"),
       kind(SLACK_EVENT_KINDS.followed, "用户关注的 Slack thread（用户在里面发起或者回复过，或者系统替用户回复过）里，别人没有提到用户的消息。只记录，沉淀进记忆。", { reply: true }),
+      kind(SLACK_EVENT_KINDS.broadcast, "用户所在的 Slack 频道里别人发的全频道广播（@channel、@here、@everyone，broadcast 是范围），没有提到用户本人。进摘要（机器人发的只记录），沉淀进记忆；不开卡，不代回。"),
+      kind(SLACK_EVENT_KINDS.ownerThread, "用户本人起头的 Slack thread 里别人没有提到用户的消息，看结构是在回别人或者说不清回谁（addressee、addresseeBasis）。进摘要，沉淀进记忆；不开卡，不代回。", { reply: true }),
     ],
     standingOrders: SEEDS,
     memory: memorySpec,
@@ -1834,6 +1996,10 @@ export function createSlackChannelAdapter(options: SlackChannelOptions): Channel
         || (fromSelf && (await postedByUs(channel, event.ts) || await sharedByUs(channel, event.files)));
       let kind: string;
       let role: ChannelInbound["role"];
+      let ambient = false;
+      const facts: Record<string, string> = {};
+      const broadcast = slackBroadcastOf(event);
+      if (broadcast) facts.broadcast = broadcast;
       if (fromSelf && !echo && channelType === "im" && (await conversation(channel, context)).user === self) {
         // 用户发给自己的私信（用户 2026-10-30：「直接交给 Lead」）：是写给 Lead 的话，不是对别人的回复。hub 交给 daemon，
         // daemon 按用户本人的一轮交给 Lead。daemon 不收时（例如用户撤销了这个入口）hub 照用户本人的话处理。
@@ -1848,6 +2014,23 @@ export function createSlackChannelAdapter(options: SlackChannelOptions): Channel
       } else if (self && text.includes(`<@${self}>`)) {
         kind = SLACK_EVENT_KINDS.mention;
         role = "message";
+      } else if (self && place.thread && context.interest?.ownerStarted(place.objectKey, place.thread) && await followable(channel, context)) {
+        // 用户本人在 Slack 里起头的 thread（2026-11-20，用户授权）：别人没有 @ 用户，也可能在回用户。按结构判断回谁
+        // （slackThreadAddressee）：回用户的按 thread 走会话卡、请求 A 和授权表；回别人的、说不清的进摘要、沉淀进记忆，不开卡。
+        // 这个 thread 已经有道时也这样分：回别人的话只进道的上下文，不并进卡。用户只回复过的 thread 仍按下面的关注只记录。
+        const earlier = await threadBefore(channel, place.thread, event.ts, context);
+        const judged = slackThreadAddressee({
+          self, sender: isString(event.user) ? event.user : "", text: typeof event.text === "string" ? event.text : "", earlier: earlier ?? [],
+        });
+        facts.addressee = judged.addressee;
+        facts.addresseeBasis = judged.basis;
+        role = "message";
+        if (judged.addressee === "owner") {
+          kind = SLACK_EVENT_KINDS.thread;
+        } else {
+          kind = SLACK_EVENT_KINDS.ownerThread;
+          ambient = true;
+        }
       } else if (place.thread && context.interest?.laneExists(place.objectKey)) {
         kind = SLACK_EVENT_KINDS.thread;
         role = "message";
@@ -1857,6 +2040,12 @@ export function createSlackChannelAdapter(options: SlackChannelOptions): Channel
         // 关注只记录（用户 2026-10-21；2026-11-09 再确认）。
         kind = SLACK_EVENT_KINDS.thread;
         role = "message";
+      } else if (broadcast && !place.direct && await broadcastAllowed(channel, context)) {
+        // 全频道广播（2026-11-20）：用户在这个频道里，广播也是发给用户的，不用用户处理也进摘要、沉淀进记忆。不开卡、不代回。
+        // 没有订阅的频道也收（以前整个丢掉），见 broadcastAllowed。
+        kind = SLACK_EVENT_KINDS.broadcast;
+        role = "message";
+        ambient = true;
       } else if (place.thread && context.interest?.followed(place.objectKey) && await followable(channel, context)) {
         // 用户关注的 thread（发起或者回复过）：只记录、沉淀进记忆。后来有人在这里提到用户时，上面的 mention 先认出来，
         // 开卡、开道；之后这个 thread 有道，按 thread 收，不会记两次（用户 2026-10-21）。
@@ -1878,7 +2067,7 @@ export function createSlackChannelAdapter(options: SlackChannelOptions): Channel
       return [await inbound({
         envelope, message: event, channel, channelType, ts: event.ts, kind, role,
         deliveryId: `${channel}:${event.ts}`, text: await displayText(text, context), echo, occurredAt: occurred(envelope, event.ts), follows,
-        starts,
+        starts, ambient, facts,
       }, context)];
     },
 

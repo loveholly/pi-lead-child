@@ -695,6 +695,8 @@ export class ChannelHub {
   private urgencyFor(adapter: ChannelAdapter, item: ChannelInbound): { urgency: Promise<ChannelUrgency | null>; release: () => void } {
     const none = { urgency: Promise.resolve(null), release: () => {} };
     if (item.role !== "message") return none;
+    // 不是对用户说的消息最多进摘要，紧急也不推送：不用问。
+    if (item.ambient) return { urgency: Promise.resolve(channelUrgencyNotAsked("ambient")), release: () => {} };
     if (this.recordOnly(adapter, item)) return { urgency: Promise.resolve(channelUrgencyNotAsked("record_only")), release: () => {} };
     const key = item.deliveryId === null ? null : `${adapter.id}\u0000${item.deliveryId}`;
     if (key !== null) {
@@ -757,6 +759,8 @@ export class ChannelHub {
     // 例外：用户本人说了让他关注这个对象的话（follows，例如在 Slack 的 thread 里发起或者回复）：没有道也只记录这一条，
     // 以后 interest.followed 认它，这个对象里别人的话只记录、沉淀进记忆（用户 2026-10-21：照 Slack 的自动关注规则）。
     const existingLane = getChannelLane(db, item.objectKey);
+    // 不是对用户说的消息（ChannelInbound.ambient）：投递最多到摘要，不开道、不开卡、不问请求 A。
+    const ambient = item.role === "message" && item.ambient === true;
     // 推回来的回复带 follows 时同样只记录（例如私信 thread 里的回复，2026-11-02）：以后这个 thread 有道时，上下文包里有这条。
     const followOnly = (item.role === "self_reply" || item.role === "echo") && item.follows === true && !existingLane;
     if (item.role !== "message" && !existingLane && !followOnly) return { item: { ...base, ignored: "no_lane" }, card: null, push: false };
@@ -778,6 +782,7 @@ export class ChannelHub {
       ...(item.audience ? { audience: item.audience } : {}),
       ...(item.replyTo ? { replyTo: item.replyTo } : {}),
       ...(item.starts && item.role === "echo" ? { starts: true } : {}),
+      ...(ambient ? { ambient: true } : {}),
       summary: `${item.sender.name}（${SENDER_TRUST_LABELS[item.sender.trust]}）在${item.laneLabel}：${oneLine(item.text, 300)}`,
       urgent: urgency?.urgent ?? false,
       ...(urgency ? { urgency: urgency.basis } : {}),
@@ -796,6 +801,8 @@ export class ChannelHub {
     if (decision && item.amends && reopen === null && decision.mode !== "record" && !getOpenChannelCard(db, item.objectKey)) {
       decision = { ...decision, mode: "record" };
     }
+    // 不是对用户说的消息：投递指令要开卡、推送时也只进摘要（用户改过投递指令也一样）。
+    if (decision && ambient && decision.mode !== "record") decision = { ...decision, mode: "digest" };
     // 合并编辑（统一消息事件 spec D6，inbound.ts）：交给 Lead 时，Lead 拿走以前对方改的消息并进那条消息，不再问一次请求 A，
     // 也不产生新的 Lead 输入：这条编辑只记录，记下以后再并（mergeEditNow）。拿走以后照旧：有卡时更新卡、按新消息再判断。
     const merge = decision && item.amends === "edited" && this.options.lead ? this.editMergeFor(adapter.id, item) : null;
@@ -825,6 +832,10 @@ export class ChannelHub {
     if (followOnly) return { item: { ...base, seq: event.seq, inserted: true, delivery: "record" }, card: null, push: false };
     if (decision?.mode === "record" && !existingLane) {
       return { item: { ...base, seq: event.seq, inserted: true, delivery: "record" }, card: null, push: false };
+    }
+    // 不是对用户说的消息没有道时不开道：它进摘要（事件的级别），沉淀进记忆，但不是用户在场的对话。
+    if (ambient && decision && !existingLane) {
+      return { item: { ...base, seq: event.seq, inserted: true, delivery: decision.mode }, card: null, push: false };
     }
     const lane = recordChannelLaneMessage(db, {
       source: adapter.id, objectKey: item.objectKey, label: item.laneLabel, at,
@@ -860,9 +871,10 @@ export class ChannelHub {
       this.refreshLaneSummary(lane);
       return { item: { ...recorded, cardId: merged?.id ?? null, delivery: "record" }, card: merged, push: false };
     }
-    if (decision.mode === "record") {
+    if (decision.mode === "record" || ambient) {
+      // 不是对用户说的消息有道时只进道的上下文（Lead 和请求 A 看得到），不并进卡，也不开卡。
       this.refreshLaneSummary(lane);
-      return { item: { ...recorded, delivery: "record" }, card: null, push: false };
+      return { item: { ...recorded, delivery: decision.mode }, card: null, push: false };
     }
     if (deferCard) {
       this.refreshLaneSummary(lane);
@@ -3681,6 +3693,12 @@ export class ChannelHub {
            AND json_valid(payload) AND json_extract(payload, '$.role') = 'echo'
            AND json_extract(payload, '$.starts') = 1 LIMIT 1`,
       ).get(objectKey, adapter.id) !== undefined,
+      // 用户本人在这个对象里说过编号是 messageId 的那句话（例如 thread 的根消息）。走 events_entity 索引。
+      ownerStarted: (objectKey, messageId) => own(objectKey) && this.db.prepare(
+        `SELECT 1 FROM events WHERE entity_key = ? AND source = ?
+           AND json_valid(payload) AND json_extract(payload, '$.role') = 'self_reply'
+           AND json_extract(payload, '$.messageId') = ? LIMIT 1`,
+      ).get(objectKey, adapter.id, messageId) !== undefined,
     };
   }
 
