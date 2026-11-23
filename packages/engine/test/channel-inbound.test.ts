@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { tempDir } from "@pi-lead-child/core/testing";
 import { DEFAULT_INTENT_GRANT_BOUNDS, MESSAGE_EVENT_KIND } from "@pi-lead-child/protocol";
-import { getChannelCard, listEvents, openDb, type Db } from "@pi-lead-child/store";
+import { getChannelCard, listChannelCardsForObject, listEvents, openDb, type Db } from "@pi-lead-child/store";
 import {
   ChannelHub, ChannelRegistry, createSlackChannelAdapter, editMergeOf, inboundConclusions, messageCeiling, type ChannelHubOptions,
   type SmartModel,
@@ -102,9 +102,18 @@ describe("a message from an external channel becomes one message event (spec D1)
 
   it("gives no message event to a message the inbound layer does not pass (only recorded)", async () => {
     const channels = hub(scriptedSmartModel({ answers: { needs_reply: 0.05 } }));
-    await channels.receive("slack", slack.dm("U0LILEI", "哈哈"));
+    await channels.receive("slack", slack.groupDm("U0LILEI", "哈哈"));
     await channels.idle();
     expect(listEvents(db, { kind: "channel.reply.not_needed" })).toHaveLength(1);
+    expect(messageEvents()).toEqual([]);
+  });
+
+  // 同事的一对一私信不用回时开一张不推送的卡（用户 2026-11-23），可是照样不交给 Lead：没有消息事件。
+  it("gives no message event to a colleague's DM that needs no reply, though it gets a quiet card", async () => {
+    const channels = hub(scriptedSmartModel({ answers: { needs_reply: 0.05 } }));
+    const item = (await channels.receive("slack", slack.dm("U0LILEI", "哈哈"))).items[0]!;
+    await channels.idle();
+    expect(listChannelCardsForObject(db, item.objectKey)).toMatchObject([{ state: "open", delivery: "card" }]);
     expect(messageEvents()).toEqual([]);
   });
 });

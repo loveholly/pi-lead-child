@@ -3971,8 +3971,7 @@ export class ChannelHub {
     } else if (decided) {
       // 这条消息并进了已经开着的卡：卡还在等你，通道不替你回表情、拒绝或者收尾；要干活的、告诉你的照旧。
       // 只记录的照旧只记录：并进卡，不交给 Lead（2026-11-02：同一条消息改了四次，Lead 跑了四轮）。
-      action = decided.action.kind === "work" || decided.action.kind === "tell" || decided.action.kind === "skip" ? decided.action
-        : { kind: "ask", reason: `这个对话已经有一张卡在等你（${decided.action.reason}）` };
+      action = this.joinedCardAction(event, decided);
       const recorded = card;
       db.transaction(() => this.recordAuthority(adapter, event, recorded.id, decided, action!, at))();
     }
@@ -4144,6 +4143,8 @@ export class ChannelHub {
    *   - 提醒你：开卡并推送。代你说一句（收尾）：交给 Lead 时开卡，不推送；没有接 Lead 时回表情（回不了时不打扰你），
    *     不起草（工单 06 删了起草器）。要干活、问你、告诉你：开卡，按投递方式推送。
    *   - 请求 A 没有回答（decided 是 null）：开卡。
+   *   - 同事的一对一私信（quietDirectCard）：不打扰、后台回表情也开一张不推送的卡（用户 2026-11-23）。不交给 Lead，不代你回，
+   *     表情照旧回；这个对话已经有开着的卡时并进去。
    * 每个决定都记 channel.authority.decided（和开卡、不开卡在同一个事务里，settleStalePendingCards 靠它认出定过的）。
    * 已经有卡包着这条消息（例如别的消息先开了卡）时什么也不做。返回这条消息所在的、没结束的卡（不开卡时是 null）和实际的结论。
    */
@@ -4170,16 +4171,21 @@ export class ChannelHub {
     const outcome = db.transaction((): { card: ChannelCard | null; push: boolean; action: AuthorityAction | null } => {
       if (this.coveredByCard(objectKey, seq)) {
         // 后到的消息先判断完、先开了卡：这一条并进去（卡从它算起，消息数加一）。它要推送而卡还没推过时补推。
+        // 结论和并进开着的卡一样（joinedCardAction）：不用回的不交给 Lead（以前是 null，按「问你」交给了 Lead）。
         const open = getOpenChannelCard(db, objectKey);
-        if (!open || open.firstSeq <= seq) return { card: open ?? null, push: false, action: null };
+        const joined = decided ? this.joinedCardAction(event, decided) : null;
+        if (decided && joined && open) this.recordAuthority(adapter, event, open.id, decided, joined, at);
+        if (!open || open.firstSeq <= seq) return { card: open ?? null, push: false, action: joined };
         const push = pending.delivery === "push_card" && open.delivery !== "push_card";
         const merged = updateChannelCard(db, open.id, {
           firstSeq: seq, messageCount: open.messageCount + 1, delivery: strongerDelivery(open.delivery, pending.delivery),
         }, { at }) ?? open;
-        return { card: merged, push, action: null };
+        return { card: merged, push, action: joined };
       }
       const action = decided?.action ?? null;
-      if (decided && action && (action.kind === "skip" || (action.kind === "react" && !viaLead))) {
+      // 同事的一对一私信不因为不用回就不开卡（用户 2026-11-23）：照样开一张不推送的卡，不交给 Lead、不代你回；回表情照旧在后台回。
+      const quiet = this.quietDirectCard(event);
+      if (decided && action && !quiet && (action.kind === "skip" || (action.kind === "react" && !viaLead))) {
         this.recordAuthority(adapter, event, null, decided, action, at);
         if (action.kind === "react") {
           setEventDisposition(db, seq, "auto_handled", { by: "assistant", standingOrder: decided.order, action: "react", emoji: action.emoji }, at);
@@ -4205,13 +4211,15 @@ export class ChannelHub {
       }
       // 提醒你的推送；代你说一句、代你拒绝的不推送（代你做了，摘要里有）。
       // 交给 Lead 的回表情也开一张不推送的卡：Lead 在卡上决定，卡上留下谁回了哪个表情。
+      // 同事私信里不用回的（skip）也开不推送的卡：不用回不是推送的理由。
       const delivery: ChannelDeliveryMode = action?.kind === "remind" ? "push_card"
-        : action?.kind === "closing_reply" || action?.kind === "refuse" || action?.kind === "react" ? "card" : pending.delivery;
+        : action?.kind === "closing_reply" || action?.kind === "refuse" || action?.kind === "react" || action?.kind === "skip"
+          ? "card" : pending.delivery;
       const opened = this.openPendingCardNow(adapter, event, { ...pending, delivery }, at);
       // 代你拒绝只用在新开的卡上：这个对话已经有开着的卡时，自动回复会把那张卡也结束掉，改成问你。
       const effective: AuthorityAction | null = action?.kind === "refuse" && !opened.created
         ? { kind: "ask", reason: `这个对话已经有一张卡在等你（${action.reason}）` }
-        : action;
+        : action?.kind === "skip" ? quietSkip(action) : action;
       if (decided && effective) this.recordAuthority(adapter, event, opened.card?.id ?? null, decided, effective, at);
       return { card: opened.card, push: opened.push, action: effective };
     })();
@@ -4234,6 +4242,28 @@ export class ChannelHub {
       if (own) this.later(() => this.judgeOwnReply(adapter, cardId, own.seq), `own reply #${own.seq}`);
     }
     return { card: outcome.card, action };
+  }
+
+  /**
+   * 并进一张开着的卡的消息的结论：卡还在等你，通道不替你回表情、拒绝或者收尾，改成问你；要干活的、告诉你的照旧。
+   * 只记录的照旧只记录：并进卡，不交给 Lead（2026-11-02：同一条消息改了四次，Lead 跑了四轮）。同事私信里的写成 quietSkip。
+   */
+  private joinedCardAction(event: EventRecord, decided: AuthorityDecision): AuthorityAction {
+    const action = decided.action;
+    if (action.kind === "work" || action.kind === "tell") return action;
+    if (action.kind === "skip") return this.quietDirectCard(event) ? quietSkip(action) : action;
+    return { kind: "ask", reason: `这个对话已经有一张卡在等你（${action.reason}）` };
+  }
+
+  /**
+   * 同事的一对一私信（用户 2026-11-23）：判断不用回、或者没有接 Lead 时在后台回了表情，也照样开一张不推送的卡，
+   * 不只记成 no_action。只看结构化字段：私信、同一个组织或你信任的人、不是机器人、对话没有和外部组织共享。
+   * 群聊、频道、机器人、外部的人照旧。只记录的投递设置在更早的一步（record 不记 cardPending）就拦下了。
+   */
+  private quietDirectCard(event: EventRecord): boolean {
+    const sender = event.payload.sender as { trust?: unknown; bot?: unknown } | undefined;
+    return event.payload.audience === "direct" && sender?.bot !== true
+      && (sender?.trust === "colleague" || sender?.trust === "trusted") && event.payload.externalShared !== true;
   }
 
   // 请求 A 选的表情（没有、不认识时是 null）。
@@ -4613,6 +4643,12 @@ export class ChannelHub {
 const intakeRef = channelIntakeRef;
 // 「不用回」的事件的 source_ref：一条消息只记一次（settleStalePendingCards 按它认出已经定了）。
 const notNeededRef = (seq: number) => `channel-reply-not-needed:${seq}`;
+
+// 同事私信里不用回的结论（quietDirectCard）：还是 skip（不交给 Lead、不代你回），理由改成卡上看得懂的话，不再说「只记录」。
+// 换掉的是 handbook-decision.ts 自己写的结尾，不是对方的原话。
+const quietSkip = (action: AuthorityAction): AuthorityAction => ({
+  kind: "skip", reason: `${action.reason.replace(/[：，]只记录$/, "")}：同事的私信照样放进会话卡，不推送，不代你回`,
+});
 // 授权表的决定（channel.authority.decided）：一条消息一个。
 const authorityRef = (seq: number) => `channel-authority:${seq}`;
 /** 请求 A 的 needs_reply 低于它时，新消息不开卡。 */

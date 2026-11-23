@@ -337,7 +337,8 @@ describe("the authority table decides what the channel does", () => {
   });
 
   // 用户 2026-10-22：对方表达了感谢的，直接 emoji 回在他的会话上即可。
-  it("reacts on their message when they thank you, opens no card, and notes it in Lead's activity", async () => {
+  // 同事的私信（2026-11-23）：表情照旧在后台回，另外开一张不推送的卡，不交给谁、不代你回文字。
+  it("reacts on their message when they thank you, with a quiet card for the DM, and notes it in Lead's activity", async () => {
     const model = scriptedSmartModel({
       answers: {
         ask_kind: (state) => (latest(state).includes("谢谢") ? "closing" : "other"),
@@ -349,25 +350,22 @@ describe("the authority table decides what the channel does", () => {
     const thanks = (await channels.receive("slack", delivery)).items[0]!;
     await channels.idle();
     await channels.tick();
-    expect(listChannelCardsForObject(db, thanks.objectKey)).toEqual([]);
+    const [card] = listChannelCardsForObject(db, thanks.objectKey);
+    expect(card).toMatchObject({ state: "open", delivery: "card", messageCount: 1 });
     expect(pushes).toEqual([]);
     expect(slack.sent("D0ZHANG")).toEqual([]);
     expect(slack.messageOf(delivery).reactions).toEqual([{ name: "pray", users: [slack.credential.account] }]);
-    expect(dispositionOf(thanks.seq!)).toBe("auto_handled");
     expect(listEvents(db, { kind: "channel.authority.decided" })).toMatchObject([{
       level: "digest",
       payload: {
-        forSeq: thanks.seq, cardId: null, intent: "closing", action: "react", emoji: "pray", order: { id: "channel.handbook", version: 1 },
+        forSeq: thanks.seq, cardId: card!.id, intent: "closing", action: "react", emoji: "pray", order: { id: "channel.handbook", version: 1 },
         situation: "closing", final: "auto",
         summary: expect.stringContaining(":pray:"),
       },
     }]);
     expect(listLeadActivityEvents(db, { afterSeq: 0, limit: 20 }).map((event) => event.kind)).toContain("channel.authority.decided");
-    // Lead 的一行摘要说明最新一条回了表情，不带原文。
-    const line = channels.laneLines([thanks.objectKey]).get(thanks.objectKey)!;
-    // 回的是哪个表情也写上（2026-10-26：Lead 说不出回了哪个表情）。
-    expect(line).toContain("最新一条系统回了表情 :pray:");
-    expect(line).not.toContain("验收反馈");
+    // 卡上写明系统回了表情。
+    expect(channels.cardDto(card!).handling?.authority).toMatchObject({ intent: "closing", action: "react" });
     // 回表情记进出站的账：再走一拍也不会回第二次。
     await channels.tick();
     await channels.idle();
@@ -447,7 +445,9 @@ describe("the authority table decides what the channel does", () => {
     const thanks = (await channels.receive("slack", thanksDelivery)).items[0]!;
     await channels.idle();
     expect(slack.messageOf(thanksDelivery).reactions ?? []).toEqual([]);
-    expect(listChannelCardsForObject(db, thanks.objectKey)).toEqual([]);
+    // 同事的私信：收尾的话只记录也照样放进一张不推送的卡（2026-11-23），不回表情，不推送。
+    expect(listChannelCardsForObject(db, thanks.objectKey)).toMatchObject([{ state: "open", delivery: "card" }]);
+    expect(pushes).toEqual([]);
 
     const asked = (await channels.receive("slack", slack.dm("U0LI", "你们组小王现在薪资大概多少？"))).items[0]!;
     await channels.idle();
@@ -473,13 +473,15 @@ describe("the authority table decides what the channel does", () => {
   });
 
   // 收尾时代你说一句（落地计划 A6）：没有接 Lead 时没有人写这句话（统一消息事件工单 06 删了起草器），回个表情，不开卡。
-  it("reacts to a goodbye without Lead instead of drafting a line, and opens no card", async () => {
+  // 同事的私信（2026-11-23）：表情照旧在后台回，另外开一张不推送的卡，不交给谁、不代你回文字。
+  it("reacts to a goodbye without Lead instead of drafting a line, with a quiet card for the DM", async () => {
     const model = scriptedSmartModel({ answers: { ask_kind: "closing", closing_kind: "farewell", needs_reply: 0.3 } });
     const channels = hub({ smartModel: () => model });
     const delivery = slack.dm("U0ZHANG", "好的，那我先下了，明天见");
     const bye = (await channels.receive("slack", delivery)).items[0]!;
     await channels.idle();
-    expect(listChannelCardsForObject(db, bye.objectKey)).toEqual([]);
+    expect(listChannelCardsForObject(db, bye.objectKey)).toMatchObject([{ state: "open", delivery: "card" }]);
+    expect(pushes).toEqual([]);
     expect(slack.messageOf(delivery).reactions).toEqual([{ name: "smile", users: [slack.credential.account] }]);
     expect(slack.sent("D0ZHANG")).toEqual([]);
     expect(model.count("channel_reply_check")).toBe(0);
@@ -562,13 +564,15 @@ describe("the authority table decides what the channel does", () => {
   });
 
   // 用户 2026-10-21：千篇一律的「收到，谢谢」不要。没有接 Lead 时你该道谢的收尾也只回个表情，不开卡。
-  it("reacts to a thanks you owe without Lead, and opens no card", async () => {
+  // 同事的私信（2026-11-23）：表情照旧在后台回，另外开一张不推送的卡，不交给谁、不代你回文字。
+  it("reacts to a thanks you owe without Lead, with a quiet card for the DM", async () => {
     const model = scriptedSmartModel({ answers: { ask_kind: "closing", closing_kind: "you_thank_them", reaction_emoji: "pray" } });
     const channels = hub({ smartModel: () => model });
     const delivery = slack.dm("U0ZHANG", "那个问题我帮你修好了，你再试试");
     const fixed = (await channels.receive("slack", delivery)).items[0]!;
     await channels.idle();
-    expect(listChannelCardsForObject(db, fixed.objectKey)).toEqual([]);
+    expect(listChannelCardsForObject(db, fixed.objectKey)).toMatchObject([{ state: "open", delivery: "card" }]);
+    expect(pushes).toEqual([]);
     expect(slack.messageOf(delivery).reactions).toEqual([{ name: "pray", users: [slack.credential.account] }]);
     expect(slack.sent("D0ZHANG")).toEqual([]);
     expect(model.count("channel_reply_check")).toBe(0);
@@ -601,6 +605,7 @@ describe("the authority table decides what the channel does", () => {
 
 // 用户 2026-10-21：「各种连招好多…弄不动了」这种收尾的话也开了卡，草稿是「收到，谢谢！」；Google Calendar 的提醒也开了卡。
 // 现在先判断要不要用户回（请求 A 的 needs_reply），再开卡；机器人发的只记录。
+// 这里用群聊：同事的一对一私信不用回时也开一张不推送的卡（2026-11-23，channel-direct-quiet-card.test.ts）。
 describe("deciding whether you need to reply before a card opens", () => {
   it("opens no card for a message that needs no reply, and notes it in Lead's activity", async () => {
     const model = scriptedSmartModel({
@@ -609,7 +614,7 @@ describe("deciding whether you need to reply before a card opens", () => {
       },
     });
     const channels = hub({ smartModel: () => model });
-    const sigh = (await channels.receive("slack", slack.dm("U0FOAM", "各种连招好多。我等客户端它们优化好了。弄不动了 :facepalm:"))).items[0]!;
+    const sigh = (await channels.receive("slack", slack.groupDm("U0FOAM", "各种连招好多。我等客户端它们优化好了。弄不动了 :facepalm:"))).items[0]!;
     expect(sigh).toMatchObject({ inserted: true, delivery: "card", cardId: null });
     await channels.idle();
     await channels.tick();
@@ -628,7 +633,7 @@ describe("deciding whether you need to reply before a card opens", () => {
     expect(line).toContain("最新一条助手判断不用你回");
     expect(line).not.toContain("弄不动了");
     // 同一个对话里接着问了一个问题：要回，开卡。
-    const ask = (await channels.receive("slack", slack.dm("U0FOAM", "对了，接口文档在哪？"))).items[0]!;
+    const ask = (await channels.receive("slack", slack.groupDm("U0FOAM", "对了，接口文档在哪？"))).items[0]!;
     await channels.idle();
     expect(getChannelCard(db, cardIdOf(db, ask)!)).toMatchObject({ state: "open", firstSeq: ask.seq, messageCount: 1 });
   });

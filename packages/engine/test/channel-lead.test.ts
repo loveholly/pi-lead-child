@@ -512,14 +512,19 @@ describe("reply first, then work", () => {
     needs_reply: (state) => (messageOf(state).includes("内部服务") ? 0.24 : messageOf(state).includes("修复情况") ? 0.16 : 0.9),
   });
 
-  it("only records a progress note that needs no reply: no card, nothing for Lead, no work", async () => {
+  // 2026-11-23：同事私信里不用回的进度也放进一张不推送的卡，照样不交给 Lead、不派活。
+  it("puts a progress note that needs no reply on a quiet card: nothing for Lead, no work, no push", async () => {
     const channels = hub(model());
     const item = await receive(channels, slack.dm("U0LILEI", "那我更新一下修复情况"));
-    expect(item.cardId).toBeNull();
+    expect(getChannelCard(db, item.cardId)).toMatchObject({ state: "open", delivery: "card", messageCount: 1 });
     expect(messages()).toEqual([]);
     expect(dispatcher.requests).toEqual([]);
+    expect(pushes).toEqual([]);
     expect(listEvents(db, { kind: "channel.authority.decided" }).at(-1)).toMatchObject({
-      payload: { forSeq: item.seq, intent: "progress", action: "skip", reason: expect.stringContaining("多半不用回"), situation: "ask_progress" },
+      payload: {
+        forSeq: item.seq, cardId: item.cardId, intent: "progress", action: "skip", situation: "ask_progress",
+        reason: expect.stringMatching(/多半不用回.*同事的私信照样放进会话卡，不推送，不代你回$/),
+      },
     });
   });
 

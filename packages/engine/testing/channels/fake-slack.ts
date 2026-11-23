@@ -1063,6 +1063,15 @@ export class FakeSlack {
     }, options.files);
   }
 
+  /** 别人在群聊（多人私信，channel_type mpim）里发的消息。channel 缺省是 G0<发信人>，这个频道以后都按群聊算。 */
+  groupDm(from: string, text: string, options: { channel?: string; thread?: string } = {}): ChannelDelivery {
+    const channel = options.channel ?? `G0${from.slice(2)}`;
+    this.groupChannels.add(channel);
+    return this.post({
+      channel, channel_type: "mpim", user: from, text, ...(options.thread ? { thread_ts: options.thread } : {}),
+    });
+  }
+
   /** 别人在频道里提到用户。attachments：消息带的卡片，例如转发的消息。 */
   mention(from: string, text: string, options: { channel?: string; thread?: string; attachments?: unknown[] } = {}): ChannelDelivery {
     return this.post({
@@ -1151,8 +1160,11 @@ export class FakeSlack {
     return this.sign(delivery.body, { timestamp: Math.floor((this.now().getTime() - ageMs) / 1000) });
   }
 
+  // groupDm 发过消息的频道：改消息、删消息的 channel_type 也是 mpim。
+  private readonly groupChannels = new Set<string>();
+
   private channelType(channel: string): string {
-    return channel.startsWith("D") ? "im" : "channel";
+    return channel.startsWith("D") ? "im" : this.groupChannels.has(channel) ? "mpim" : "channel";
   }
 
   private post(event: Record<string, unknown>, files?: FakeSlackFile[]): ChannelDelivery {
