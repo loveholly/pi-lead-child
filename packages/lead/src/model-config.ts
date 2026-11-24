@@ -219,6 +219,10 @@ export interface LeadCatalogModel {
   source: string | null;
   // 目录给的显示名。没有时为 null。
   name: string | null;
+  // 通道（magpie 的路由，字段名用 route：protocol 的 model-groups.ts 已经把 owned_by 叫 channel。同一个模型名可以走 auto/、claude/、codex/ 几条通道，显示名相同）。来自普通目录的 magpie_label
+  // 里「 · 」后面的部分（routing group、Claude Code、Codex），没有这个字段时按 id 里第一个斜杠前的部分兜底（magpieRoute）。
+  // 只有 magpie 有；别的服务商没有这个字段或者为 null。
+  route?: string | null;
   input: Array<"text" | "image">;
   // 可以写在 id 后面的推理强度（例如 claude-sonnet-5(high)）。目录没说时是空数组：不能选强度。
   // CLIProxyAPI（有详细目录）：后缀原样发给代理，代理认它。别的服务商（magpie）：Lead 发请求时去掉后缀，
@@ -573,6 +577,24 @@ function plainCatalogFields(item: Record<string, unknown>): PlainCatalogFields {
   };
 }
 
+// magpie 的通道名（选择器里同名模型靠它分开）：magpie_label 是「显示名 · 通道」，取最后一个「 · 」后面的部分。
+// 没有 magpie_label 时按 id 里第一个斜杠前的部分：auto/ 是 Auto，claude/ 是 Claude Code，codex/ 是 Codex，别的照写前缀。
+// id 没有斜杠时没有通道。
+const MAGPIE_ROUTE_PREFIXES: Record<string, string> = { auto: "Auto", claude: "Claude Code", codex: "Codex" };
+const MAGPIE_LABEL_SEPARATOR = " · ";
+
+export function magpieRoute(id: string, label: unknown): string | null {
+  if (typeof label === "string") {
+    const at = label.lastIndexOf(MAGPIE_LABEL_SEPARATOR);
+    const route = at >= 0 ? label.slice(at + MAGPIE_LABEL_SEPARATOR.length).trim() : "";
+    if (route) return route;
+  }
+  const slash = id.indexOf("/");
+  if (slash <= 0) return null;
+  const prefix = id.slice(0, slash);
+  return MAGPIE_ROUTE_PREFIXES[prefix] ?? prefix;
+}
+
 // 普通目录的强度里能作为请求字段发出去的那些（PARAMETER_EFFORTS），顺序照目录。缺省强度不在里面时当作没有。
 function parameterEfforts(flat: PlainCatalogFields | undefined): { efforts: string[]; defaultEffort: string | null } {
   const efforts: string[] = (flat?.efforts ?? []).filter(isParameterEffort);
@@ -605,6 +627,8 @@ async function providerCatalog(
   }
   let note: string | null = null;
   let detailed = false;
+  // magpie：设置页按 magpie 接入的（preset），或者目录条目带 magpie_label 的。只有它显示通道（route，magpieRoute）。
+  let magpie = provider.preset === "magpie";
   if (provider.discover !== false && (provider.discover === true || configured.length === 0)) {
     const apiKey = resolveLeadApiKey(provider, env, name);
     const base = provider.baseUrl.endsWith("/") ? provider.baseUrl : `${provider.baseUrl}/`;
@@ -629,6 +653,8 @@ async function providerCatalog(
       const created = new Map<string, string>();
       // 普通目录里的能力字段，和详细目录分开放：capabilities 决定读哪一份。
       const plain = new Map<string, PlainCatalogFields>();
+      // magpie 普通目录条目的 magpie_label（通道名）。
+      const labels = new Map<string, unknown>();
       for (const item of payload.data) {
         if (!isRecord(item) || typeof item.id !== "string" || !item.id.trim()) continue;
         const id = item.id.trim();
@@ -636,7 +662,9 @@ async function providerCatalog(
         const at = catalogCreatedAt(item);
         if (at) created.set(id, at);
         plain.set(id, plainCatalogFields(item));
+        if (item.magpie_label !== undefined) labels.set(id, item.magpie_label);
       }
+      if (labels.size) magpie = true;
       let rich: unknown[] = [];
       // 只有 OpenAI 兼容的代理有详细目录。
       if (!anthropic) try {
@@ -673,6 +701,7 @@ async function providerCatalog(
         const previous = byId.get(id);
         byId.set(id, entry(id, {
           source: owners.get(id) ?? null,
+          ...(magpie && !detailed ? { route: magpieRoute(id, labels.get(id)) } : {}),
           name: previous?.name ?? (typeof detail?.display_name === "string" ? detail.display_name : flat?.name ?? null),
           // config 写了 input 时以它为准（手动覆盖）；没写时按 capabilities 读目录。
           input: configuredInput.get(id) ?? fromCatalog ?? ["text"],
@@ -704,6 +733,8 @@ async function providerCatalog(
   }));
   const models = [...byId.values()].map((model) => ({
     ...model,
+    // config.json 里写的模型（目录没列，或者没有拉目录）也按 id 前缀给通道。
+    ...(magpie && !detailed && model.route === undefined ? { route: magpieRoute(model.id, null) } : {}),
     group: info.accountPrefix ? modelGroup(model.id) : null,
     contextWindow: configuredWindow.get(model.id) ?? configuredWindow.get(splitLeadModelEffort(model.id).base)
       ?? model.contextWindow ?? knownContextWindow(model.id),

@@ -8,7 +8,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { tempDir } from "@pi-lead-child/core/testing";
 
 import {
-  assertConfiguredLeadModel, knownContextWindow, LEAD_CONTEXT_WINDOW_LIMIT, leadModelCatalog, normalizeLeadModelConfig,
+  assertConfiguredLeadModel, knownContextWindow, LEAD_CONTEXT_WINDOW_LIMIT, leadModelCatalog, magpieRoute, normalizeLeadModelConfig,
   registerLeadProviders, saveLeadProviderInConfig, setLeadModelInConfig, splitLeadModelEffort,
 } from "../src/model-config.js";
 import { DEFAULT_LEAD_CONTEXT_WINDOW } from "@pi-lead-child/protocol";
@@ -242,6 +242,61 @@ describe("the Lead model catalog", () => {
 
 // Lead 模型分组（用户 2026-11-05，原型 docs/prototypes/model-grouping）：账号（group）只在 accountPrefix 生效时才取；
 // 能不能看图按 config → capabilities 声明 → 自动识别的顺序判断。
+// magpie lists the same model under several routes (auto/, claude/, codex/) with the same display name. The picker tells
+// them apart by the route: the part of magpie_label after " · ", else the id prefix. No other provider gets one.
+describe("magpie routes", () => {
+  const routed = {
+    data: [
+      { id: "auto/claude-fable-5-2", owned_by: "claude", display_name: "Claude Fable 5.2", magpie_label: "Claude Fable 5.2 · routing group" },
+      { id: "claude/claude-fable-5-2", owned_by: "claude", display_name: "Claude Fable 5.2", magpie_label: "Claude Fable 5.2 · Claude Code" },
+      { id: "codex/gpt-6-sol", owned_by: "codex", display_name: "GPT-6 Sol" },
+      { id: "deepseek/deepseek-flash", owned_by: "deepseek" },
+      { id: "plain-model", owned_by: "x" },
+    ],
+  };
+  const unlabeled = { data: routed.data.map(({ magpie_label: _label, ...item }) => item) };
+  const serve = (body: unknown) => (async () => new Response(JSON.stringify(body))) as typeof fetch;
+  const provider = (extra: Record<string, unknown> = {}) => normalizeLeadModelConfig({
+    providers: { gw: { baseUrl: "https://gateway.example.com/v1", apiKey: { value: "k" }, discover: true, ...extra } },
+    models: [],
+  });
+  const routes = (models: Array<{ id: string; route?: string | null }>) => models.map((model) => [model.id, model.route]);
+
+  it("reads the route from magpie_label, falls back to the id prefix, keeps both same-name models and their ids", async () => {
+    const { models } = await leadModelCatalog(provider(), {}, serve(routed));
+    expect(routes(models)).toEqual([
+      ["auto/claude-fable-5-2", "routing group"],
+      ["claude/claude-fable-5-2", "Claude Code"],
+      ["codex/gpt-6-sol", "Codex"],
+      ["deepseek/deepseek-flash", "deepseek"],
+      ["plain-model", null],
+    ]);
+    expect(models.filter((model) => model.name === "Claude Fable 5.2")).toHaveLength(2);
+  });
+
+  it("falls back to the id prefix for a provider added as magpie whose catalog has no magpie_label", async () => {
+    const { models } = await leadModelCatalog(provider({ preset: "magpie" }), {}, serve(unlabeled));
+    expect(routes(models).slice(0, 3)).toEqual([
+      ["auto/claude-fable-5-2", "Auto"],
+      ["claude/claude-fable-5-2", "Claude Code"],
+      ["codex/gpt-6-sol", "Codex"],
+    ]);
+  });
+
+  it("gives no route to another provider: no magpie_label and not added as magpie, or a CLIProxyAPI detailed catalog", async () => {
+    const other = await leadModelCatalog(provider(), {}, serve(unlabeled));
+    expect(other.models.every((model) => model.route === undefined)).toBe(true);
+    const { models } = await leadModelCatalog(config(), {}, vibeproxy as typeof fetch);
+    expect(models.every((model) => model.route === undefined)).toBe(true);
+  });
+
+  it("takes the part after the last separator, and the prefix when the label has none", () => {
+    expect(magpieRoute("auto/x", "Claude Fable 5.2 · routing group")).toBe("routing group");
+    expect(magpieRoute("codex/x", "GPT-6 Sol")).toBe("Codex");
+    expect(magpieRoute("x", null)).toBeNull();
+  });
+});
+
 describe("account groups and image input", () => {
   // magpie 风格的服务：没有详细目录，?client_version=pi 也只回普通目录；能力写在 data[] 的每一项里。
   const magpieList = {

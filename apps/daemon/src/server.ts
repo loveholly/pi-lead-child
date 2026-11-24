@@ -3557,6 +3557,8 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
             model: spec, provider: model.provider, id: model.id, prefix: model.group, source: model.source, name: model.name,
             image: model.input.includes("image"), efforts: model.efforts, defaultEffort: model.defaultEffort,
             blockedUntil: until === undefined ? null : new Date(until).toISOString(),
+            // 通道只有 magpie 有（lead 的 magpieRoute）；网关只把它给带 live=1 的客户端。
+            ...(model.route ? { route: model.route } : {}),
           };
         }),
       };

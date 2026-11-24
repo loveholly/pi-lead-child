@@ -298,8 +298,14 @@ function PickerHeader({ sheet, catalog, inUse, inSession, connections, search, o
   const connection = connections.find((entry) => entry.key === key) ?? null;
   const index = key ? accountInSession(key, inSession) : null;
   const account = connection && index !== null ? connection.accounts.find((entry) => entry.index === index) ?? null : null;
+  // magpie 的通道（route）：同名的模型走不同通道，写在接入后面才分得清正在用的是哪一个。
+  const route = inUse ? catalog?.models.find((option) => sameSlot(option.model, inUse.model))?.route ?? null : null;
   const subtitle = key
-    ? m.inUseLine([connectionName(key), ...(account && connection && connection.accounts.length > 1 ? [accountName(account, locale)] : [])].join(' · '))
+    ? m.inUseLine([
+      connectionName(key),
+      ...(account && connection && connection.accounts.length > 1 ? [accountName(account, locale)] : []),
+      ...(route ? [route] : []),
+    ].join(' · '))
     : null;
   const title = (
     <Column minW={0} shrink={1} gap="text-stack">
@@ -641,6 +647,8 @@ function ModelRow({ model, connection, rows }: { model: LeadModelOption; connect
   const selected = Boolean(rows.draft && sameSlot(rows.draft.model, model.model));
   const role = chainRole(model.model, rows.chain);
   const name = model.name ?? leadModelLabel(model.model, model.prefix).id;
+  // magpie 的通道（route）：同一个显示名走 auto/、claude/、codex/ 几条通道，名字后面的灰色小字把它们分开。
+  const label = model.route ? `${name} · ${model.route}` : name;
   const window = rows.windows.get(model.model);
   // 账号前缀（vibeproxy 的 as4）写在说明的最前面：名字里去掉了它，不写的话两个账号的同一个模型分不清。
   const facts = [model.prefix, model.image ? m.images : null, window ? formatContextWindow(window) : null, model.efforts.length ? m.reasoning : null]
@@ -649,7 +657,7 @@ function ModelRow({ model, connection, rows }: { model: LeadModelOption; connect
   return (
     <Pressable
       testID={`lead-model-option-${model.model}`}
-      aria-label={selected ? m.selectedLabel(name) : name}
+      aria-label={selected ? m.selectedLabel(label) : label}
       aria-pressed={selected}
       feedback="highlight"
       onPress={() => rows.onPick(model, connection)}
@@ -660,6 +668,7 @@ function ModelRow({ model, connection, rows }: { model: LeadModelOption; connect
     >
       <Row items="center" gap="inline-item">
         <Text size="body" weight="semibold" tone={selected ? 'accent' : 'default'} numberOfLines={1} shrink={1} minW={0}>{name}</Text>
+        {model.route ? <Text testID={`lead-model-route-${model.model}`} size="meta" tone="muted" numberOfLines={1} shrink={0}>{model.route}</Text> : null}
         {facts ? <Text size="meta" tone="muted" numberOfLines={1} shrink={2} minW={0}>{facts}</Text> : null}
         <Spacer />
         {blockedAt ? (

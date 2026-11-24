@@ -227,6 +227,45 @@ describe('the model picker', () => {
   });
 });
 
+// magpie 把同一个模型放在几条通道下（auto/、claude/、codex/），显示名相同（用户 2026-11-24）：名字后面的灰色小字写通道（route），
+// 头上的「正在用」一行也写它；搜索能搜到通道；两个都留着，选它交回去的还是原来的 id。
+describe('magpie routes', () => {
+  const fable = (id: string, route: string) => option(`magpie/${id}`, { name: 'Claude Fable 5.2', route, efforts: ['low', 'high'] });
+  const routed: LeadModelCatalog = {
+    current: { model: 'magpie/claude/claude-fable-5-2', effort: null },
+    selected: { model: 'magpie/claude/claude-fable-5-2', effort: null },
+    inSession: 'magpie/claude/claude-fable-5-2',
+    models: [fable('auto/claude-fable-5-2', 'routing group'), fable('claude/claude-fable-5-2', 'Claude Code'), option('magpie/codex/gpt-6-sol', { name: 'GPT-6 Sol', route: 'Codex' })],
+  };
+
+  it('writes the route after the name in each row and in the in-use line, keeps both same-name models, and searches it', async () => {
+    const { client, switched } = setup();
+    client.getLeadModels.mockResolvedValue(routed);
+    await act(async () => { fireEvent.click(await screen.findByTestId('lead-model-button')); });
+    await waitFor(() => expect(screen.getByTestId('lead-model-option-magpie/auto/claude-fable-5-2')).toBeTruthy());
+    expect(screen.getByTestId('lead-model-route-magpie/auto/claude-fable-5-2').textContent).toBe('routing group');
+    expect(screen.getByTestId('lead-model-route-magpie/claude/claude-fable-5-2').textContent).toBe('Claude Code');
+    expect(screen.getByTestId('lead-model-option-magpie/claude/claude-fable-5-2').getAttribute('aria-label')).toBe('Claude Fable 5.2 · Claude Code, selected');
+    expect(screen.getByTestId('lead-model-in-use-source').textContent).toBe('magpie · Claude Code · in use');
+
+    await act(async () => { fireEvent.change(screen.getByTestId('lead-model-search'), { target: { value: 'routing' } }); });
+    expect(screen.getByTestId('lead-model-option-magpie/auto/claude-fable-5-2')).toBeTruthy();
+    expect(screen.queryByTestId('lead-model-option-magpie/claude/claude-fable-5-2')).toBeNull();
+    await act(async () => { fireEvent.change(screen.getByTestId('lead-model-search'), { target: { value: '' } }); });
+
+    await act(async () => { fireEvent.click(screen.getByTestId('lead-model-option-magpie/auto/claude-fable-5-2')); });
+    await act(async () => { fireEvent.click(screen.getByTestId('lead-model-make-primary')); });
+    expect(switched).toEqual([{ model: 'magpie/auto/claude-fable-5-2', effort: null }]);
+  });
+
+  it('writes no route for a model without one', async () => {
+    setup();
+    await openFromComposer();
+    expect(screen.queryByTestId('lead-model-route-openai-codex/gpt-5.5')).toBeNull();
+    expect(screen.getByTestId('lead-model-in-use-source').textContent).toBe('Codex · Home · in use');
+  });
+});
+
 // 视觉稿方案 C（用户 2026-11-24 定）：推理强度不在头上，在底部操作条左边，和两种用法同一区。
 describe('the reasoning effort menu', () => {
   it('sits in the action bar, shows the current effort, lists Default and the efforts the model can send, and closes after a pick', async () => {

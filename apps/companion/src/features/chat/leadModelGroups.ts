@@ -27,11 +27,12 @@ function grouped(models: readonly LeadModelOption[], keep?: (model: LeadModelOpt
   return groupModelsByProvider(models.map((model) => ({ ...model, group: model.prefix })), keep ? { keep } : {});
 }
 
-// 搜索和设置页的模型库一样：按完整的 provider/id 和显示名，不分大小写。
+// 搜索和设置页的模型库一样：按完整的 provider/id 和显示名，不分大小写。magpie 的通道（route，例如 Claude Code）也算。
 export function matchesLeadModel(model: LeadModelOption, query: string): boolean {
   const term = query.trim().toLowerCase();
   if (!term) return true;
-  return model.model.toLowerCase().includes(term) || (model.name?.toLowerCase().includes(term) ?? false);
+  return model.model.toLowerCase().includes(term) || (model.name?.toLowerCase().includes(term) ?? false)
+    || (model.route?.toLowerCase().includes(term) ?? false);
 }
 
 /** 左栏：每个 provider 一格，按模型第一次出现的先后。不看搜索，搜索时左栏不变。 */

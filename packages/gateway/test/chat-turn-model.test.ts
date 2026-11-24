@@ -34,12 +34,12 @@ const catalog: LeadModelCatalog = {
   models: [],
 };
 
-async function start(options: { turnModel?: boolean; inSession?: boolean } = {}) {
+async function start(options: { turnModel?: boolean; inSession?: boolean; models?: LeadModelCatalog["models"] } = {}) {
   const chats: Chat[] = [];
   const tickets: Chat[] = [];
   const leadModels = {
     state: () => ({ current: catalog.current, selected: catalog.selected }),
-    catalog: async () => catalog,
+    catalog: async () => ({ ...catalog, models: options.models ?? catalog.models }),
     switch: async () => { throw new Error("not used"); },
     ...(options.inSession === false ? {} : { inSession: () => "openai-codex-2/gpt-5.5" }),
   };
@@ -153,6 +153,28 @@ describe("the one-message model over the paired gateway", () => {
       expect(plain).not.toHaveProperty("inSession");
       const live = await (await fetch(`http://127.0.0.1:${server.port}/v1/lead/models?live=1`, { headers: { authorization: `Bearer ${issued.accessToken}` } })).json();
       expect(live.inSession).toBe("openai-codex-2/gpt-5.5");
+      expect(Value.Check(LeadModelCatalogSchema, live)).toBe(true);
+    } finally {
+      await server.close();
+    }
+  });
+
+  // A magpie model's route (its channel: routing group, Claude Code, Codex) tells apart two models with the same name.
+  // Like inSession, only a client that asks with live=1 gets it: an older Companion's strict schema rejects the field.
+  it("gives the route of a magpie model only to a client that asks with live=1", async () => {
+    const issued = issue();
+    const fable = (id: string, route: string) => ({
+      model: `magpie/${id}`, provider: "magpie", id, prefix: null, source: "claude", name: "Claude Fable 5.2", image: true,
+      efforts: [], defaultEffort: null, blockedUntil: null, route,
+    });
+    const { server } = await start({ models: [fable("auto/claude-fable-5-2", "routing group"), fable("claude/claude-fable-5-2", "Claude Code")] });
+    try {
+      const headers = { authorization: `Bearer ${issued.accessToken}` };
+      const plain = await (await fetch(`http://127.0.0.1:${server.port}/v1/lead/models`, { headers })).json();
+      expect(plain.models.map((model: Record<string, unknown>) => Object.hasOwn(model, "route"))).toEqual([false, false]);
+      expect(plain.models.map((model: { id: string }) => model.id)).toEqual(["auto/claude-fable-5-2", "claude/claude-fable-5-2"]);
+      const live = await (await fetch(`http://127.0.0.1:${server.port}/v1/lead/models?live=1`, { headers })).json();
+      expect(live.models.map((model: { route: string }) => model.route)).toEqual(["routing group", "Claude Code"]);
       expect(Value.Check(LeadModelCatalogSchema, live)).toBe(true);
     } finally {
       await server.close();

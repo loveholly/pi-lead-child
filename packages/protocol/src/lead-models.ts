@@ -42,6 +42,9 @@ export const LeadModelOptionSchema = StrictObject({
   defaultEffort: Nullable(LeadModelEffortSchema),
   // 额度用完、模型自动切换在跳过它，到这个时间（ISO）。没有时为 null。
   blockedUntil: Nullable(Type.String()),
+  // 通道（magpie 的 routing group、Claude Code、Codex；字段名用 route，model-groups.ts 的 channel 是 owned_by）：同一个显示名走不同通道时靠它分开。只有 magpie 有。
+  // 可选，只在客户端带 LEAD_MODELS_LIVE_QUERY 时给：这个 DTO 是严格的契约，旧版 Companion 多一个字段就整份拒收。
+  route: Type.Optional(Nullable(Type.String({ minLength: 1, maxLength: 80 }))),
 });
 export type LeadModelOption = Static<typeof LeadModelOptionSchema>;
 

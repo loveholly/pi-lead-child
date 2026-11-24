@@ -1569,9 +1569,11 @@ export async function startPairedServer(
         } catch (error) {
           throw new HttpError(503, "internal_error", m.leadModelsFailed(error));
         }
-        // inSession 只给带了 live=1 的客户端（会话里换模型的浮层）：旧版 Companion 的严格 schema 不认它。
-        if (url.searchParams.get("live") === "1" && service.inSession) {
-          catalog = { ...catalog, inSession: service.inSession() };
+        // inSession 和模型的 route（通道）只给带了 live=1 的客户端（会话里换模型的浮层）：旧版 Companion 的严格 schema 不认它们。
+        if (url.searchParams.get("live") === "1") {
+          if (service.inSession) catalog = { ...catalog, inSession: service.inSession() };
+        } else if (catalog.models.some((model) => model.route !== undefined)) {
+          catalog = { ...catalog, models: catalog.models.map(({ route: _route, ...model }) => model) };
         }
         json(req, res, 200, catalog);
         return;
