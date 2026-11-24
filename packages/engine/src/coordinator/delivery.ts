@@ -10,6 +10,7 @@
 // 打开交付视图不再跑 git diff。分支现在指向哪、用户仓库在哪个分支、能不能合并，仍然现读 git：这些是操作的前提。
 // 读 git 都用异步的 execFile（delivery-source.ts）。文件路径先校验（相对路径、没有 ..、在交付列表里），再交给 git。
 // 可能含密钥的文件（.env、*.pem、id_rsa……）列出来，但不显示内容。
+import { createHash } from "node:crypto";
 import { realpathSync, statSync } from "node:fs";
 import { extname, relative, resolve, sep } from "node:path";
 import type {
@@ -728,9 +729,11 @@ async function pullRequestBase(repo: string, baseBranch: string | null): Promise
   return head.ok && head.stdout.trim() ? head.stdout.trim().replace(/^origin\//, "") : "main";
 }
 
-function pullRequestBody(db: Db, itemId: number, item: Item): string {
+// PR 的描述只写交付的成果。不写工单号：仓库可能是公开的，工单号是内部的（2026-11-24：以前开头一行是
+// 「来自 pi-lead-child 工单 #N：标题」，维护者在 PR 上删掉以后，返工的自动更新又把它写了回来）。标题已经是 PR 的标题。
+function pullRequestBody(db: Db, itemId: number): string {
   const snapshot = getLatestOutcomeSnapshot(db, itemId);
-  const lines = [`来自 pi-lead-child 工单 #${itemId}：${item.display_title ?? item.title}`, ""];
+  const lines: string[] = [];
   if (snapshot) {
     lines.push("## 做了什么", "", snapshot.summary, "");
     const files = snapshot.changes.filter((change) => change.kind === "file");
@@ -743,6 +746,34 @@ function pullRequestBody(db: Db, itemId: number, item: Item): string {
     }
   }
   return lines.join("\n");
+}
+
+// 这次修复以前，系统写的描述都以这一行开头。账本里没有描述指纹的旧 PR 靠它认出「描述还是系统写的那份」。
+const LEGACY_BODY_HEADER = /^来自 pi-lead-child 工单 #\d+：/;
+
+// 描述的指纹。GitHub 网页保存的描述用 CRLF，gh 读出来时末尾多一个换行：比较之前先统一。
+function bodyFingerprint(body: string): string {
+  return createHash("sha256").update(body.replace(/\r\n/g, "\n").trimEnd()).digest("hex");
+}
+
+// 系统最近一次写进这个 PR 的描述的指纹（开 PR 或更新时记下的）。没有记过时是 null。
+function lastWrittenBodyFingerprint(db: Db, itemId: number, workspaceId: number, url: string): string | null {
+  const row = db.prepare(
+    `SELECT json_extract(payload, '$.bodySha256') AS sha FROM activities
+     WHERE item_id=? AND kind='decision' AND json_valid(payload)
+       AND json_extract(payload, '$.decision') IN ('workspace_pr_opened', 'workspace_pr_updated')
+       AND json_extract(payload, '$.workspaceId')=? AND json_extract(payload, '$.url')=?
+       AND json_extract(payload, '$.bodySha256') IS NOT NULL
+     ORDER BY id DESC LIMIT 1`,
+  ).get(itemId, workspaceId, url) as { sha: string } | undefined;
+  return row?.sha ?? null;
+}
+
+// 返工以后能不能换掉 PR 的描述：只换系统自己写的、没人改过的那份。维护者手改过的描述不动（2026-11-24）。
+// 有指纹时比指纹；没有指纹的旧 PR，描述开头还是系统那一行才算没人改过。
+function bodyIsOurs(current: string, lastWritten: string | null): boolean {
+  if (lastWritten) return bodyFingerprint(current) === lastWritten;
+  return LEGACY_BODY_HEADER.test(current.trimStart());
 }
 
 export interface PullRequestRunner {
@@ -815,10 +846,11 @@ export async function openDeliveryPullRequest(
       });
       return { ...(await ticketDelivery(db, itemId)), pullRequestUrl: existing };
     }
+    // 标题和正文来自 agent 写的成果，发到 GitHub 之前脱敏（2026-10-21 审查 L3）。
+    const body = redactSecretText(pullRequestBody(db, itemId));
     const created = await runner.gh([
       "pr", "create", "--draft", "--head", branch, "--base", base,
-      // 标题和正文来自 agent 写的成果，发到 GitHub 之前脱敏（2026-10-21 审查 L3）。
-      "--title", redactSecretText(item.display_title ?? item.title), "--body", redactSecretText(pullRequestBody(db, itemId, item)),
+      "--title", redactSecretText(item.display_title ?? item.title), "--body", body,
     ], repo);
     if (!created.ok) {
       const detail = created.stderr === "ENOENT" ? "这台电脑没有装 GitHub CLI（gh）。分支已经推上去了，可以在 GitHub 上手动开 PR。"
@@ -832,6 +864,7 @@ export async function openDeliveryPullRequest(
       ...(turn ? { sessionCursor: turn.id } : {}),
       payload: {
         decision: "workspace_pr_opened", workspaceId: workspace.id, branch, base, url, head: pushedHead, reason: input.reason,
+        bodySha256: bodyFingerprint(body),
         ...(turn ? { onBehalfOf: "user", sourceTurnId: turn.id } : {}),
       },
     });
@@ -876,10 +909,11 @@ async function openPullRequestFor(runner: PullRequestRunner, repo: string, branc
 /**
  * 返工以后更新已经开着的 PR（用户 2026-10-26）：把分支上新的提交推到同一条远程分支，刷新 PR 描述。
  * 只做快进推送，不强推：远程分支上有本地没有的提交时报错，交给人处理。只由系统调用（auto-pull-request.ts）。
+ * 描述只在还是系统写的那份时刷新；维护者手改过就不动，bodyUpdated 是 false（2026-11-24）。
  */
 export async function updateDeliveryPullRequest(
   db: Db, itemId: number, input: { reason: string; runner?: PullRequestRunner },
-): Promise<TicketDelivery & { pullRequestUrl: string }> {
+): Promise<TicketDelivery & { pullRequestUrl: string; bodyUpdated: boolean }> {
   return oneAtATime(itemId, async () => {
     const workspace = requireIsolated(db, itemId);
     const delivery = await ticketDelivery(db, itemId);
@@ -890,24 +924,34 @@ export async function updateDeliveryPullRequest(
     }
     const repo = workspace.repo_root!;
     const branch = workspace.branch!;
-    const item = recheckBeforeActing(db, itemId, workspace.id, ["review", "done"], "交付以后才能更新 PR。");
+    recheckBeforeActing(db, itemId, workspace.id, ["review", "done"], "交付以后才能更新 PR。");
     await guardPush(db, itemId, workspace.id, repo, branch, delivery.workspace!.head, "update", "system");
     const push = await gitRun(["push", "origin", `refs/heads/${branch}:refs/heads/${branch}`], repo, {
       timeout: NETWORK_TIMEOUT_MS, env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
     });
     if (!push.ok) throw new DeliveryError("failed", `推送分支失败：${redact(firstLine(push.stderr))}`);
     const runner = input.runner ?? defaultRunner;
-    const edited = await runner.gh(["pr", "edit", url, "--body", redactSecretText(pullRequestBody(db, itemId, item))], repo);
-    if (!edited.ok) {
-      const detail = edited.stderr === "ENOENT" ? "这台电脑没有装 GitHub CLI（gh）" : redact(firstLine(edited.stderr));
-      throw new DeliveryError("failed", `新的提交已经推上去了，PR 描述没有更新：${detail}。`);
+    const viewed = await runner.gh(["pr", "view", url, "--json", "body", "--jq", ".body"], repo);
+    if (!viewed.ok) {
+      const detail = viewed.stderr === "ENOENT" ? "这台电脑没有装 GitHub CLI（gh）" : redact(firstLine(viewed.stderr));
+      throw new DeliveryError("failed", `新的提交已经推上去了，没能读到 PR 现在的描述，所以没有更新它：${detail}。`);
+    }
+    const ours = bodyIsOurs(viewed.stdout, lastWrittenBodyFingerprint(db, itemId, workspace.id, url));
+    const body = ours ? redactSecretText(pullRequestBody(db, itemId)) : null;
+    if (body !== null) {
+      const edited = await runner.gh(["pr", "edit", url, "--body", body], repo);
+      if (!edited.ok) {
+        const detail = edited.stderr === "ENOENT" ? "这台电脑没有装 GitHub CLI（gh）" : redact(firstLine(edited.stderr));
+        throw new DeliveryError("failed", `新的提交已经推上去了，PR 描述没有更新：${detail}。`);
+      }
     }
     addActivity(db, {
       itemId, actor: "system", kind: "decision",
       payload: {
         decision: "workspace_pr_updated", workspaceId: workspace.id, branch, url, head: delivery.workspace!.head, reason: input.reason,
+        ...(body !== null ? { bodySha256: bodyFingerprint(body) } : { bodyKept: true }),
       },
     });
-    return { ...(await ticketDelivery(db, itemId)), pullRequestUrl: url };
+    return { ...(await ticketDelivery(db, itemId)), pullRequestUrl: url, bodyUpdated: body !== null };
   });
 }

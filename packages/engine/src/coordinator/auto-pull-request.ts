@@ -161,10 +161,11 @@ export async function syncAutoPullRequests(
         tellLead(db, itemId, `工单 #${itemId} 交付了，系统开了草稿 PR：${pullRequestUrl}`, { url: pullRequestUrl, step: "open" });
         result.opened.push(itemId);
       } else {
-        await updateDeliveryPullRequest(db, itemId, {
+        const { bodyUpdated } = await updateDeliveryPullRequest(db, itemId, {
           reason: "返工交付以后更新 PR", ...(options.runner ? { runner: options.runner } : {}),
         });
-        tellLead(db, itemId, `工单 #${itemId} 返工后的提交已经推到 PR，PR 描述也更新了：${plan.url}`, { url: plan.url, step: "update" });
+        const description = bodyUpdated ? "PR 描述也更新了" : "PR 描述有人手改过，没有覆盖";
+        tellLead(db, itemId, `工单 #${itemId} 返工后的提交已经推到 PR，${description}：${plan.url}`, { url: plan.url, step: "update", bodyUpdated });
         result.updated.push(itemId);
       }
     } catch (error) {

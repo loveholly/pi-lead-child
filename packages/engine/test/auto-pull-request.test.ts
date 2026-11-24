@@ -77,17 +77,34 @@ function codingTicket(options: { verification?: "lead_static" | "independent_rev
 }
 
 // 假的 gh：pr list 按 existing 回答（没有就是空），pr create 开 #12，pr edit 成功。记下每次调用。
-function fakeGh(existing: string | null = null): PullRequestRunner & { calls: string[][] } {
+// 它像 GitHub 一样记着 PR 的描述：create 和 edit 写进去，view 读出来；测试改 body 就是维护者在网页上手改了描述。
+function fakeGh(existing: string | null = null): PullRequestRunner & { calls: string[][]; body: string } {
   const calls: string[][] = [];
-  return {
+  const fake = {
     calls,
-    async gh(args) {
+    body: "",
+    async gh(args: string[]) {
       calls.push(args);
       if (args[1] === "list") return { ok: true, stdout: existing ? `${existing}\n` : "", stderr: "" };
+      if (args[1] === "view") return { ok: true, stdout: `${fake.body}\n`, stderr: "" };
+      const body = args.indexOf("--body");
+      if (body >= 0) fake.body = args[body + 1]!;
       if (args[1] === "create") return { ok: true, stdout: "https://github.com/acme/repo/pull/12\n", stderr: "" };
       return { ok: true, stdout: "", stderr: "" };
     },
   };
+  return fake;
+}
+
+function bodyOf(args: string[]): string {
+  return args[args.indexOf("--body") + 1]!;
+}
+
+// 返工：同一条分支上多了一个提交，又交付了一次。
+function rework(itemId: number, worktree: string, file: string, deliveredAt: string): void {
+  db.prepare("UPDATE items SET stage='active' WHERE id=?").run(itemId);
+  commitIn(worktree, file, `${file}\n`);
+  deliver(itemId, deliveredAt);
 }
 
 function decisions(itemId: number, name: string): Array<Record<string, unknown> & { actor: string }> {
@@ -176,6 +193,95 @@ describe("the draft PR follows the ticket from delivery through rework", () => {
     expect(edit[edit.indexOf("--body") + 1]).toContain("交付");
     expect(gh.calls.some((args) => args[1] === "create")).toBe(false);
     expect(decisions(itemId, "workspace_pr_updated")[0]).toMatchObject({ actor: "system", head: git(worktree, "rev-parse", "HEAD") });
+  });
+
+  // 回归（2026-11-24）：PR 描述开头是「来自 pi-lead-child 工单 #N：标题」，公开仓库里不能有内部工单号。
+  // 维护者在 PR #62 上手动删掉这一行，下一次返工自动更新又把整段描述换掉，这一行又回来了。
+  it("writes no internal ticket number into the description, on open or on update", async () => {
+    const { itemId, worktree } = codingTicket();
+    const gh = fakeGh();
+
+    expect(await syncAutoPullRequests(db, { runner: gh })).toMatchObject({ opened: [itemId] });
+    const opened = bodyOf(gh.calls.find((args) => args[1] === "create")!);
+    expect(opened).not.toContain(`#${itemId}`);
+    expect(opened).not.toContain("工单");
+    expect(opened).not.toContain("pi-lead-child");
+    expect(opened).toContain("## 做了什么");
+
+    rework(itemId, worktree, "fix.md", "2026-10-26T09:00:00.000Z");
+    expect(await syncAutoPullRequests(db, { runner: gh })).toMatchObject({ updated: [itemId] });
+    const updated = bodyOf(gh.calls.find((args) => args[1] === "edit")!);
+    expect(updated).not.toContain(`#${itemId}`);
+    expect(updated).not.toContain("工单");
+    expect(updated).toContain("## 做了什么");
+  });
+
+  it("keeps a description the maintainer edited by hand, and still pushes the rework", async () => {
+    const { itemId, worktree, branch } = codingTicket();
+    const gh = fakeGh();
+    expect(await syncAutoPullRequests(db, { runner: gh })).toMatchObject({ opened: [itemId] });
+
+    // 维护者在网页上改了描述（GitHub 网页存的是 CRLF）。
+    const edited = "Adds the review plan.\r\n\r\nTested by hand with Nina's sample repo.";
+    gh.body = edited;
+    rework(itemId, worktree, "fix.md", "2026-10-26T09:00:00.000Z");
+    gh.calls.length = 0;
+    expect(await syncAutoPullRequests(db, { runner: gh })).toMatchObject({ updated: [itemId], failed: [] });
+    expect(git(remote, "rev-parse", branch)).toBe(git(worktree, "rev-parse", "HEAD"));
+    expect(gh.calls.some((args) => args[1] === "edit")).toBe(false);
+    expect(gh.body).toBe(edited);
+    expect(decisions(itemId, "workspace_pr_updated")[0]).toMatchObject({ bodyKept: true, head: git(worktree, "rev-parse", "HEAD") });
+    const told = listInbox(db).filter((row) => row.item_id === itemId).at(-1)!;
+    expect(told.summary).toContain("没有覆盖");
+
+    // 再返工一次：描述还是维护者改的那份。
+    rework(itemId, worktree, "fix2.md", "2026-10-26T10:00:00.000Z");
+    expect(await syncAutoPullRequests(db, { runner: gh })).toMatchObject({ updated: [itemId] });
+    expect(gh.calls.some((args) => args[1] === "edit")).toBe(false);
+    expect(gh.body).toBe(edited);
+  });
+
+  it("refreshes a description nobody touched, even when GitHub hands it back with CRLF line ends", async () => {
+    const { itemId, worktree } = codingTicket();
+    const gh = fakeGh();
+    expect(await syncAutoPullRequests(db, { runner: gh })).toMatchObject({ opened: [itemId] });
+    gh.body = gh.body.replace(/\n/g, "\r\n");
+
+    rework(itemId, worktree, "fix.md", "2026-10-26T09:00:00.000Z");
+    gh.calls.length = 0;
+    expect(await syncAutoPullRequests(db, { runner: gh })).toMatchObject({ updated: [itemId] });
+    expect(gh.calls.some((args) => args[1] === "edit")).toBe(true);
+    expect(decisions(itemId, "workspace_pr_updated")[0]).not.toHaveProperty("bodyKept");
+  });
+
+  // 这次修复以前开的 PR，账本里没有记下系统写的描述。描述开头还是系统那一行：没人改过，换成不带工单号的新描述；
+  // 开头那一行被删了：维护者改过，不动。
+  it("for a PR opened before this fix, replaces only a description that still starts with the old ticket line", async () => {
+    const { itemId, worktree } = codingTicket();
+    const gh = fakeGh();
+    expect(await syncAutoPullRequests(db, { runner: gh })).toMatchObject({ opened: [itemId] });
+    // 去掉账本里的描述指纹，像这次修复以前记下的那样。
+    db.prepare(
+      "UPDATE activities SET payload=json_remove(payload, '$.bodySha256') WHERE item_id=? AND json_extract(payload, '$.decision')='workspace_pr_opened'",
+    ).run(itemId);
+
+    gh.body = `来自 pi-lead-child 工单 #${itemId}：优化 code review skill\n\n## 做了什么\n\n旧的描述\n`;
+    rework(itemId, worktree, "fix.md", "2026-10-26T09:00:00.000Z");
+    gh.calls.length = 0;
+    expect(await syncAutoPullRequests(db, { runner: gh })).toMatchObject({ updated: [itemId] });
+    expect(gh.calls.some((args) => args[1] === "edit")).toBe(true);
+    expect(gh.body).not.toContain(`#${itemId}`);
+
+    // 维护者删掉了那一行（PR #62 的情形）以后，这份描述不再被换掉。
+    db.prepare(
+      "UPDATE activities SET payload=json_remove(payload, '$.bodySha256') WHERE item_id=? AND json_extract(payload, '$.decision') IN ('workspace_pr_opened','workspace_pr_updated')",
+    ).run(itemId);
+    gh.body = "## 做了什么\n\n旧的描述\n";
+    rework(itemId, worktree, "fix2.md", "2026-10-26T10:00:00.000Z");
+    gh.calls.length = 0;
+    expect(await syncAutoPullRequests(db, { runner: gh })).toMatchObject({ updated: [itemId] });
+    expect(gh.calls.some((args) => args[1] === "edit")).toBe(false);
+    expect(gh.body).toBe("## 做了什么\n\n旧的描述\n");
   });
 
   it("adopts a PR that already exists for the branch instead of opening a second one", async () => {
