@@ -285,6 +285,7 @@ describe('the reasoning effort menu', () => {
       .map((element) => element.textContent);
     expect(options).toEqual(['Default', 'Low', 'High']);
     expect(screen.getByTestId('lead-model-effort-default').getAttribute('aria-label')).toBe('Default, selected');
+    expect(screen.getByTestId('lead-model-effort-default').getAttribute('aria-pressed')).toBe('true');
 
     await act(async () => { fireEvent.click(screen.getByTestId('lead-model-effort-high')); });
     expect(screen.queryByTestId('lead-model-effort-options')).toBeNull();
@@ -323,6 +324,19 @@ describe('the reasoning effort menu', () => {
     await act(async () => { fireEvent.click(trigger); });
     const layer = screen.getByTestId('lead-model-effort-options');
     expect(getComputedStyle(layer).position).toBe('absolute');
+    // 只有触发块用按钮的尺寸；选项是列表行（用户 2026-11-24）：文字靠左、常规字重，选中的一行高亮、行尾 check。
+    for (const option of ['default', 'low', 'high']) {
+      const text = screen.getByTestId(`effort-option-text-${option}`);
+      expect(['', 'start', 'left']).toContain(getComputedStyle(text).textAlign);
+      expect(['400', 'normal']).toContain(getComputedStyle(text).fontWeight);
+      expect(screen.getByTestId(`lead-model-effort-${option}`).tagName).not.toBe('BUTTON');
+    }
+    const chosen = screen.getByTestId('lead-model-effort-default');
+    expect(chosen.getAttribute('aria-pressed')).toBe('true');
+    expect(getComputedStyle(chosen).backgroundColor).not.toBe(getComputedStyle(screen.getByTestId('lead-model-effort-low')).backgroundColor);
+    // check 在文字后面、行尾：文字占满剩下的宽度（flex 1），check 是这一行的最后一个元素。
+    const row = screen.getByTestId('effort-option-text-default').parentElement!;
+    expect(row.lastElementChild).not.toBe(screen.getByTestId('effort-option-text-default'));
     // 浮层挂在触发块的容器里，操作条的直接子元素不变：打开不会多出一行。
     expect(Array.from(footer.children).length).toBe(children);
     expect(footer.getBoundingClientRect().height).toBe(footerHeight);
@@ -333,10 +347,15 @@ describe('the reasoning effort menu', () => {
     await openFromComposer();
     await act(async () => { fireEvent.click(screen.getByTestId('lead-model-connection-vibeproxy')); });
     await act(async () => { fireEvent.click(screen.getByTestId('lead-model-option-vibeproxy/claude-opus-5-5')); });
-    // 触发块和选项都是 <button>：Tab 走得到，Enter 和空格由浏览器按下。
+    // 触发块是 <button>（Tab、Enter、空格由浏览器处理）；选项是列表行，自己进 Tab 顺序，Enter 和空格等于点一下。
     expect(screen.getByTestId('lead-model-effort-menu').tagName).toBe('BUTTON');
     await act(async () => { fireEvent.click(screen.getByTestId('lead-model-effort-menu')); });
-    expect(screen.getByTestId('lead-model-effort-high').tagName).toBe('BUTTON');
+    expect(screen.getByTestId('lead-model-effort-high').getAttribute('tabindex')).toBe('0');
+    await act(async () => { fireEvent.keyDown(screen.getByTestId('lead-model-effort-high'), { key: ' ' }); });
+    expect(screen.queryByTestId('lead-model-effort-options')).toBeNull();
+    expect(screen.getByTestId('lead-model-effort-menu').textContent).toBe('Reasoning · High');
+    await act(async () => { fireEvent.click(screen.getByTestId('lead-model-effort-menu')); });
+    expect(screen.getByTestId('lead-model-effort-high').getAttribute('aria-pressed')).toBe('true');
 
     // Esc：只收起菜单，选择器还开着。
     await act(async () => {

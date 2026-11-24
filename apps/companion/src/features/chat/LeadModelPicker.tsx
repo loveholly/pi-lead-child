@@ -378,11 +378,26 @@ function PickerFooter({ sheet, effortMenu, notice, noticeTone, onlyThis, onlyThi
   );
 }
 
+// 键盘也能用（P13.6）：组件库的 Pressable 在 web 上是 div role="button"，Tab 走不到它，Enter 和空格也不触发。
+// 推理强度的选项是列表行（Pressable），自己补上：进 Tab 顺序，Enter 或空格等于点一下，键盘聚焦时一圈强调色的描边。
+function keyboardPress(action: () => void) {
+  return {
+    tabIndex: 0,
+    onKeyDown: (event: { key: string; preventDefault: () => void }) => {
+      if (event.key !== 'Enter' && event.key !== ' ') return;
+      event.preventDefault();
+      action();
+    },
+    focusVisibleStyle: { outlineWidth: 2, outlineStyle: 'solid', outlineColor: 'accent' },
+  } as const;
+}
+
 // 推理强度的菜单（视觉稿方案 C，用户 2026-11-24 定）：底部操作条的左边，和「只这一条」「换成主用」同一区，两种用法都带着它。
 // 触发块和右边两颗按钮是同一个 Button（outline、neutral，桌面 sm、手机 lg）：一样高、一样的内边距、字号、字重和圆角
 // （用户 2026-11-24：不要另写一套小号样式）。文字「推理 · 现在的强度」，后面一个箭头。web 上它是 <button>，Tab、Enter、空格都能用。
 // 点开以后，选项是一块向上弹出的浮层：绝对定位在触发块上面，盖住模型列表，不占操作条的高度（用户 2026-11-24：展开时不能把
-// 操作条撑高）。列出这个模型能发出去的强度，第一项「缺省」（不带强度，用服务商的缺省），选中的一行行尾 check 并且 aria-pressed。
+// 操作条撑高）。列出这个模型能发出去的强度，第一项「缺省」（不带强度，用服务商的缺省）。只有触发块用按钮的尺寸；选项是列表行：
+// 文字靠左、常规字重，选中的一行 accent-wash 底、accent 字、行尾 check、aria-pressed（用户 2026-11-24）。
 // 选了收起，焦点回到触发块。点浮层外面、按 Esc 只收起菜单，不关整个选择器（web）。同一个选择器里展开，不另开浮层（P2.8）。
 // 组件规格：浮层最窄 180（选项文字「Extra high」加 check 的宽度）。
 const EFFORT_OPTIONS_MIN_WIDTH = 180;
@@ -469,19 +484,31 @@ function EffortMenu({ sheet, efforts, value, open, onToggle, onClose, onPick }: 
         >
           {options.map((option) => {
             const chosen = option === value;
+            const name = option ? m.effortName(option) : m.defaultEffort;
+            // 列表的一行（不是按钮）：文字靠左、常规字重；选中的一行 accent-wash 底、accent 字、行尾 check（用户 2026-11-24）。
             return (
-              <Button
+              <Pressable
                 key={option ?? 'default'}
                 testID={`lead-model-effort-${option ?? 'default'}`}
-                label={option ? m.effortName(option) : m.defaultEffort}
-                accessibilityLabel={chosen ? m.selectedLabel(option ? m.effortName(option) : m.defaultEffort) : undefined}
-                variant={chosen ? 'soft' : 'ghost'}
-                tone={chosen ? 'accent' : 'neutral'}
-                size={sheet ? 'lg' : 'sm'}
-                fullWidth
-                {...(chosen ? { icon: 'check' as const, iconPosition: 'end' as const } : {})}
+                aria-label={chosen ? m.selectedLabel(name) : name}
+                aria-pressed={chosen}
+                feedback="highlight"
+                rounded="sm"
+                px="inset-y"
+                py={sheet ? 'row-y' : 'pill-y'}
+                // 手机上每一行点得到的高度至少 44（P13.5，和 ChoiceGroup 的选项一样）。
+                {...(sheet ? { minH: 44, justify: 'center' as const } : {})}
+                bg={chosen ? 'accent-wash' : 'transparent'}
                 onPress={() => pick(option)}
-              />
+                {...keyboardPress(() => pick(option))}
+              >
+                <Row items="center" gap="inline-item">
+                  <Text testID={`effort-option-text-${option ?? 'default'}`} flex={1} minW={0} size="label" weight="regular" tone={chosen ? 'accent' : 'default'} numberOfLines={1}>
+                    {name}
+                  </Text>
+                  {chosen ? <Icon name="check" size={14} color="accent" accessibilityLabel={m.selected} /> : null}
+                </Row>
+              </Pressable>
             );
           })}
         </Column>
