@@ -95,6 +95,8 @@ export interface UiActionServices {
   ticketActions?: { host: TicketActionHost; pullRequestRunner?: PullRequestRunner };
   // Lead 自己装 MCP 和 skill（2026-11-02，.scratch/lead-self-install/spec.md）。daemon 交进来；没有的部分，用到它的操作报还没有启动。
   installs?: InstallServices;
+  // PLC 的数据目录：核查证据的补挂（review-evidence.ts）把图片存进它的 attachments/。没有时报「还没有启动」。
+  dataDir?: string;
   // 来源的连接方式（daemon 的通道设置，2026-11-02）：登录、换方式、「代你往来源里写」开关。通道接好以后才有。
   channelConnections?: ChannelConnectionService;
   // 信号源（daemon 的 signal-source-runner，用户 2026-11-12）：试跑一次、马上跑一次。连接中心和 Lead 的沙箱接好以后才有；

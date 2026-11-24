@@ -39,6 +39,7 @@ import { LEAD_CONTEXT_ACTIONS, LEAD_CONTEXT_TARGET } from "./lead-context.js";
 import {
   AGENDA_ENTRY_ACTIONS, AGENDA_ENTRY_TARGET, AGENDA_FEED_ACTIONS, AGENDA_FEED_TARGET, AGENDA_FEEDS_ACTIONS, AGENDA_FEEDS_TARGET,
 } from "./agenda-feeds.js";
+import { REVIEW_ATTEMPT_ACTIONS, REVIEW_ATTEMPT_TARGET } from "./review-evidence.js";
 import { SIGNAL_SOURCE_ACTIONS, SIGNAL_SOURCE_TARGET, SIGNAL_SOURCES_ACTIONS, SIGNAL_SOURCES_TARGET } from "./signal-sources.js";
 import { CHANNEL_CONNECTION_ACTIONS, CHANNEL_CONNECTION_TARGET } from "./channel-connections.js";
 import { joinProblems } from "./problems.messages.js";
@@ -1270,6 +1271,7 @@ export const UI_ACTION_TARGETS: { readonly [T in UiActionTargetType]: UiActionTa
   agenda_feeds: AGENDA_FEEDS_TARGET,
   agenda_feed: AGENDA_FEED_TARGET,
   agenda_entry: AGENDA_ENTRY_TARGET,
+  review_attempt: REVIEW_ATTEMPT_TARGET,
 };
 
 export const UI_ACTIONS: { readonly [T in UiActionTargetType]: Readonly<Record<string, UiActionDefinition>> } = {
@@ -1334,4 +1336,5 @@ export const UI_ACTIONS: { readonly [T in UiActionTargetType]: Readonly<Record<s
   agenda_feeds: AGENDA_FEEDS_ACTIONS,
   agenda_feed: AGENDA_FEED_ACTIONS,
   agenda_entry: AGENDA_ENTRY_ACTIONS,
+  review_attempt: REVIEW_ATTEMPT_ACTIONS,
 };

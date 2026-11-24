@@ -69,8 +69,8 @@ import type { Db } from "@pi-lead-child/store";
 import { activeRun, getRun, latestSessionRun, listRuns, runTokenUsage } from "@pi-lead-child/store";
 import { listActivitiesAfter } from "@pi-lead-child/store";
 import { listChatFileRefs, listChatImageRefs, listChatQuoteRefs, ticketReplyActionsByTurn } from "@pi-lead-child/store";
-import { listTicketAttachments, readTicketAttachment, TicketAttachmentError } from "@pi-lead-child/store";
-import type { TicketAttachment, TicketAttachmentContent } from "@pi-lead-child/protocol";
+import { listReviewEvidence, listTicketAttachments, readReviewEvidence, readTicketAttachment, TicketAttachmentError } from "@pi-lead-child/store";
+import type { ReviewEvidence, TicketAttachment, TicketAttachmentContent } from "@pi-lead-child/protocol";
 import {
   listArtifacts,
   openArtifactContentAsync,
@@ -1146,6 +1146,19 @@ export function createControlPlaneService(db: Db, options: ControlPlaneOptions) 
       if (!options.dataDir) throw new TicketAttachmentError("not_found", "attachment storage is unavailable");
       const { attachment, data } = await readTicketAttachment(db, options.dataDir, itemId, attachmentId);
       return { id: attachment.id, mimeType: attachment.mimeType, data: data.toString("base64") };
+    },
+
+    // 核查证据（工单 #503，protocol 的 review-evidence.ts）：列表不带内容。工单不存在时 undefined。
+    listReviewEvidence(itemId: number): ReviewEvidence[] | undefined {
+      if (!getItem(db, itemId)) return undefined;
+      return listReviewEvidence(db, itemId);
+    },
+
+    // 一张核查证据的内容（base64），形状和附件的一样。找不到时抛 TicketAttachmentError。
+    async readReviewEvidenceContent(itemId: number, evidenceId: string): Promise<TicketAttachmentContent> {
+      if (!options.dataDir) throw new TicketAttachmentError("not_found", "attachment storage is unavailable");
+      const { evidence, data } = await readReviewEvidence(db, options.dataDir, itemId, evidenceId);
+      return { id: evidence.id, mimeType: evidence.mimeType, data: data.toString("base64") };
     },
 
     // 下载前要把整个文件重新算一遍哈希：异步算，不占住 daemon 的主线程（store 的 openArtifactContentAsync）。

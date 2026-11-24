@@ -1697,6 +1697,26 @@ CREATE TABLE IF NOT EXISTS ticket_attachments (
   UNIQUE (item_id, source_ref)
 );
 CREATE INDEX IF NOT EXISTS ticket_attachments_item ON ticket_attachments(item_id, created_at);
+-- 核查证据（工单 #503，store 的 review-evidence.ts）：核查员在核查工作区里截的图，标明对应哪几条验收标准。
+-- 文件和工单附件存在同一个地方（attachments/item-<工单号>/）。同一次核查同一个文件内容只挂一次（run_id, sha256）。
+-- 由 SCHEMA 建，老库靠 CREATE IF NOT EXISTS 自然获得，不占迁移号。
+CREATE TABLE IF NOT EXISTS review_evidence (
+  id             TEXT PRIMARY KEY,
+  item_id        INTEGER NOT NULL REFERENCES items(id),
+  run_id         INTEGER NOT NULL REFERENCES runs(id),
+  name           TEXT NOT NULL,
+  mime_type      TEXT NOT NULL,
+  byte_size      INTEGER NOT NULL,
+  sha256         TEXT NOT NULL,
+  storage_path   TEXT NOT NULL,
+  source_path    TEXT NOT NULL,
+  criterion_ids  TEXT NOT NULL DEFAULT '[]',
+  caption        TEXT,
+  added_by       TEXT NOT NULL CHECK (added_by IN ('reviewer', 'lead', 'user')),
+  created_at     TEXT NOT NULL,
+  UNIQUE (run_id, sha256)
+);
+CREATE INDEX IF NOT EXISTS review_evidence_item ON review_evidence(item_id, created_at);
 CREATE TABLE IF NOT EXISTS gateway_events (
   seq                 INTEGER PRIMARY KEY AUTOINCREMENT,
   event_id            TEXT NOT NULL UNIQUE,

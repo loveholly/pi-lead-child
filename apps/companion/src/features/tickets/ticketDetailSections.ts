@@ -46,7 +46,7 @@ export function detailStage(status: TicketStatus): DetailStage {
 // ── 块的顺序、默认展开、出处 ────────────────────────────────────────────────────────────
 
 // 头部以下的每一块（第 3 节的顺序）。没有「这张工单」这一层标题：任务说明、验收标准、工单信息直接排。
-export const DETAIL_SECTIONS = ['relations', 'task', 'criteria', 'info', 'execution', 'delivery', 'history'] as const;
+export const DETAIL_SECTIONS = ['relations', 'task', 'criteria', 'evidence', 'info', 'execution', 'delivery', 'history'] as const;
 export type DetailSectionKind = typeof DETAIL_SECTIONS[number];
 
 export function detailSectionTitles(locale: Locale = 'en'): Record<DetailSectionKind, string> {
@@ -60,7 +60,7 @@ export function detailSectionTitles(locale: Locale = 'en'): Record<DetailSection
 const EXPANDED_BY_STAGE: Record<DetailStage, readonly DetailSectionKind[]> = {
   draft: ['relations', 'task', 'criteria', 'execution'],
   running: ['relations', 'task'],
-  review: ['relations', 'criteria'],
+  review: ['relations', 'criteria', 'evidence'],
   done: ['history'],
   cancelled: ['history'],
 };

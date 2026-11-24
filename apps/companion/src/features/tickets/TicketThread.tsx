@@ -6,7 +6,7 @@ import {
 import type {
   KernelArtifact, KernelOutcomeSnapshotResource, KernelTicketPow, TicketAcceptanceCriteria, TicketAction,
   TicketActionId as TicketOperationId, TicketActionRunRequest, TicketChatResume, TicketDelivery, TicketExecutionPlan,
-  TicketAttachment, TicketReplyActionId,
+  ReviewEvidence, TicketAttachment, TicketReplyActionId,
 } from '@pi-lead-child/protocol';
 import { useState, type ReactNode } from 'react';
 
@@ -32,6 +32,8 @@ import { InterventionPanel } from './InterventionPanel';
 import type { LegacyTicketAction, LegacyTicketActionId } from './legacyTicketActions';
 import type { TicketLogRunPresentation } from './LogTimeline';
 import { TicketAttachmentStrip, TicketAttachmentViewer, type TicketAttachmentLoader } from './TicketAttachments';
+import { evidenceSummary, ReviewEvidenceList } from './ReviewEvidence';
+import { reviewEvidenceMessages } from './reviewEvidence.messages';
 import { TicketChatDock, type TicketChatAction } from './TicketChatDock';
 import {
   DetailAttributes, DetailSection, DetailTitle, DetailTopBar, FoldRow, MoreTrigger, PlaceholderLines, RelationRows, TaskBrief, TaskBriefSheetContent, TokenAttribute, TokenBreakdown, type TokenPart,
@@ -138,6 +140,9 @@ export type TicketThreadProps = {
   taskDescription?: { brief: string; body: string };
   /** 工单附件（工单 #231，GET /v1/tickets/:id/attachments）：任务说明下面的缩略图。 */
   attachments?: readonly TicketAttachment[];
+  /** 核查证据（工单 #503，GET /v1/tickets/:id/review-evidence）：验收标准和经过与记录之间的折叠行。 */
+  reviewEvidence?: readonly ReviewEvidence[];
+  onLoadReviewEvidence?: TicketAttachmentLoader;
   /** 取一个附件的内容（点开看大图、画缩略图）。 */
   onLoadAttachment?: TicketAttachmentLoader;
   logs?: TicketLogPresentation[];
@@ -262,6 +267,8 @@ export function TicketThread({
   taskDescription,
   attachments = [],
   onLoadAttachment,
+  reviewEvidence = [],
+  onLoadReviewEvidence,
   logs = [],
   logRuns = [],
   messageIds = [],
@@ -536,6 +543,22 @@ export function TicketThread({
       )}
     </FoldRow>
   );
+
+  // ── 核查证据（工单 #503）──
+  // 核查员截的图，标明对应哪几条标准。排在验收标准和经过与记录（里面有交付）之间；没有证据时不画。
+  const evidenceMessages = reviewEvidenceMessages(locale);
+  const evidenceSection = reviewEvidence.length ? (
+    <FoldRow
+      testID="ticket-section-evidence"
+      title={titles.evidence}
+      summary={evidenceSummary(reviewEvidence, new Map((acceptanceCriteria?.criteria ?? []).map((criterion) => [criterion.id, { number: criterion.number, text: criterion.text }])), evidenceMessages)}
+      source={sources.reviewer}
+      open={!collapsed('evidence')}
+      onToggle={(open) => remember('evidence', !open)}
+    >
+      <ReviewEvidenceList evidence={reviewEvidence} criteria={acceptanceCriteria} load={onLoadReviewEvidence} />
+    </FoldRow>
+  ) : null;
 
   // ── 工单信息 ──
   const delegated = ticket.acceptancePolicy === 'delegated_to_lead';
@@ -1056,6 +1079,7 @@ export function TicketThread({
               {planBlock}
               <Column>
                 {criteriaSection}
+                {evidenceSection}
                 {historySection}
               </Column>
             </Column>

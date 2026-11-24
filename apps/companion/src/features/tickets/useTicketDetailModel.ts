@@ -1,6 +1,6 @@
 import type {
   DeliverySummary, KernelIntervention, KernelInterventionRef, TicketActionId as TicketOperationId, TicketActionRunRequest,
-  TicketAttachment, TicketReviewerInfo, TicketUsage,
+  ReviewEvidence, TicketAttachment, TicketReviewerInfo, TicketUsage,
 } from '@pi-lead-child/protocol';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 
@@ -63,6 +63,7 @@ import { localizeTicketActions } from './ticketActionLabels.messages';
 export type TicketDetailModel = Omit<TicketThreadProps, 'onClose' | 'standalone' | 'showComposer'>;
 
 const EMPTY_ATTACHMENTS: TicketAttachment[] = [];
+const EMPTY_EVIDENCE: ReviewEvidence[] = [];
 
 export function useTicketDetailModel(
   ticket: Ticket,
@@ -290,6 +291,22 @@ export function useTicketDetailModel(
     (attachmentId: string) => runtime.loadTicketAttachment(ticketId, attachmentId),
     [runtime, ticketId],
   );
+  // 核查证据（工单 #503，GET /v1/tickets/:id/review-evidence）：和附件一样单独读，工单变了再读一次
+  // （挂上证据时会改工单的更新时间）。读不到时（旧 daemon）按没有证据画。
+  const [evidenceList, setEvidenceList] = useState<{ ticketId: number; evidence: ReviewEvidence[] } | null>(null);
+  useEffect(() => {
+    if (!connected) return undefined;
+    const controller = new AbortController();
+    runtime.getTicketReviewEvidence(ticketId, controller.signal)
+      .then((evidence) => setEvidenceList({ ticketId, evidence }))
+      .catch(() => {});
+    return () => controller.abort();
+  }, [connected, deliveriesKey, runtime, ticketId]);
+  const reviewEvidence = evidenceList?.ticketId === ticketId ? evidenceList.evidence : EMPTY_EVIDENCE;
+  const loadEvidence = useCallback(
+    (evidenceId: string) => runtime.loadTicketReviewEvidence(ticketId, evidenceId),
+    [runtime, ticketId],
+  );
   const attemptItems = useMemo(() => buildAttemptPresentation(attempts, runFacts, locale), [attempts, locale, runFacts]);
   // 概览上的「经过」：每件事一行，连续的失败合成一行（复核 P1-2）。
   const story = useMemo(() => buildTicketStory({
@@ -473,6 +490,8 @@ export function useTicketDetailModel(
     taskDescription: detail ? { brief: detail.brief, body: detail.body } : undefined,
     attachments,
     onLoadAttachment: loadAttachment,
+    reviewEvidence,
+    onLoadReviewEvidence: loadEvidence,
     artifacts,
     artifactCapability,
     artifactDownloadStates,

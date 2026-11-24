@@ -408,5 +408,7 @@ export function renderReviewPacket(packet: ReviewPacket): string {
       : "- diff 只取一次：确认改了什么以后不要反复取。",
     "- 只重跑和验收标准有关的验证：执行 agent 报的验证里，和某一条标准有关的才重跑。",
     "- 不在全仓库里搜索：只看交付里的文件，和它们直接引用的代码。",
+    "- 截图做证据时：存在你的工作区里（例如 .scratch/review/），再用 attach_review_evidence 挂到工单上，写明它证明的是哪几条标准。"
+      + "用户在工单详情的「核查证据」里看得到；只写路径用户看不到。",
   ].join("\n");
 }

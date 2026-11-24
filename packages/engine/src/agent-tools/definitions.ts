@@ -60,6 +60,7 @@ import {
   type TicketRelationInputType,
 } from "@pi-lead-child/store";
 import { listAgentTicketAttachments, readAgentTicketAttachment } from "./ticket-attachments.js";
+import { attachReviewEvidence, reviewEvidenceToolResult } from "./review-evidence.js";
 export { AGENT_TOOL_CONTENT, agentToolContent, agentToolContentOf, type AgentToolContentBlock } from "./tool-content.js";
 import type {
   CheckpointKind,
@@ -459,6 +460,26 @@ export const AGENT_TOOL_DEFINITIONS: AgentToolDefinition[] = [
       attachment_id: { type: "string", description: "The attachment id (att_...), from list_ticket_attachments or the prompt." },
       ticket_id: { type: "integer", description: "The ticket that has the attachment. Omit for the current ticket." },
     }, ["attachment_id"]),
+  },
+  // 核查证据（工单 #503）：核查员把工作区里的截图挂到工单详情的「核查证据」里，标明对应哪几条验收标准。只给核查员用。
+  {
+    name: "attach_review_evidence",
+    description: "Reviewer only. Attach screenshots you took during this review to the ticket, so the user sees them in the "
+      + "ticket detail next to the acceptance criteria they prove. Save each screenshot inside your workspace first "
+      + "(for example .scratch/review/), then give its path (relative to the workspace, or absolute inside it). "
+      + "Only PNG, JPEG, GIF and WebP, at most 10 MB each, at most 10 per call. Paths outside the workspace, symlinks that "
+      + "point outside it and secret-looking files are refused. criteria lists the acceptance criterion ids from the review "
+      + "packet that the image proves. The same image is attached only once per review. Attaching does not change the verdict.",
+    inputSchema: objectSchema({
+      files: {
+        type: "array", minItems: 1, maxItems: 10,
+        items: objectSchema({
+          path: { type: "string", description: "Path of the image inside your workspace." },
+          criteria: { type: "array", maxItems: 20, items: { type: "integer", minimum: 1 }, description: "Acceptance criterion ids this image proves." },
+          caption: { type: "string", description: "One sentence: what the image shows." },
+        }, ["path", "criteria"]),
+      },
+    }, ["files"]),
   },
 ];
 
@@ -1721,6 +1742,18 @@ export function createAgentToolHandlers(context: {
             dataDir: context.dataDir ?? process.env.PLC_DATA_DIR ?? process.cwd(),
           });
           return learning.evaluateCapability(Number(args.capability_id));
+        }
+        case "attach_review_evidence": {
+          assertKeys(args, ["files"]);
+          const dataDir = context.dataDir ?? process.env.PLC_DATA_DIR;
+          if (!dataDir) throw new Error("attachment storage is unavailable in this run");
+          const run = getRun(db, runId);
+          if (!run || run.item_id !== itemId || run.role !== "reviewer") {
+            throw new Error("only the reviewer attaches review evidence; an executor puts screenshots in its outcome deliverables");
+          }
+          if (!["starting", "running"].includes(run.state)) throw new Error(`review #${runId} has ended; it cannot attach evidence any more`);
+          const result = await attachReviewEvidence(db, dataDir, { runId, files: args.files, addedBy: "reviewer", now: now() });
+          return reviewEvidenceToolResult(result);
         }
         case "list_ticket_attachments": {
           assertKeys(args, []);
