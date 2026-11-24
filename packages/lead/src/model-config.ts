@@ -11,7 +11,9 @@ import {
   type EnvSpec,
   type PlcConfigFile,
 } from "@pi-lead-child/core";
-import { DEFAULT_LEAD_CONTEXT_WINDOW, MODEL_MAX_CHAIN, subscriptionAccountOf, subscriptionSlotSpec } from "@pi-lead-child/protocol";
+import {
+  DEFAULT_LEAD_CONTEXT_WINDOW, MAGPIE_ROUTE_NAMES, MODEL_MAX_CHAIN, subscriptionAccountOf, subscriptionSlotSpec,
+} from "@pi-lead-child/protocol";
 import { getBuiltinModels, getBuiltinProviders } from "@earendil-works/pi-ai/providers/all";
 
 export const DEFAULT_LEAD_MODEL = "openai/gpt-5.5";
@@ -578,12 +580,18 @@ function plainCatalogFields(item: Record<string, unknown>): PlainCatalogFields {
 }
 
 // magpie 的通道名（选择器里同名模型靠它分开）：magpie_label 是「显示名 · 通道」，取最后一个「 · 」后面的部分。
-// 没有 magpie_label 时按 id 里第一个斜杠前的部分：auto/ 是 Auto，claude/ 是 Claude Code，codex/ 是 Codex，别的照写前缀。
-// id 没有斜杠时没有通道。
-const MAGPIE_ROUTE_PREFIXES: Record<string, string> = { auto: "Auto", claude: "Claude Code", codex: "Codex" };
+// 没有 magpie_label 时按 id 里第一个斜杠前的部分：auto/ 是 Auto，claude/ 是 Claude Code，codex/ 是 Codex，别的照写前缀
+// （对照表是 protocol 的 MAGPIE_ROUTE_NAMES）。id 没有斜杠时没有通道。
+// 最长 MAGPIE_ROUTE_MAX_LENGTH 个字符，和 protocol 的 LeadModelOption.route 一样：更长的截断，否则 Companion 整份目录拒收。
 const MAGPIE_LABEL_SEPARATOR = " · ";
+const MAGPIE_ROUTE_MAX_LENGTH = 80;
 
 export function magpieRoute(id: string, label: unknown): string | null {
+  const route = magpieRouteText(id, label);
+  return route === null ? null : Array.from(route).slice(0, MAGPIE_ROUTE_MAX_LENGTH).join("").trim() || null;
+}
+
+function magpieRouteText(id: string, label: unknown): string | null {
   if (typeof label === "string") {
     const at = label.lastIndexOf(MAGPIE_LABEL_SEPARATOR);
     const route = at >= 0 ? label.slice(at + MAGPIE_LABEL_SEPARATOR.length).trim() : "";
@@ -592,7 +600,7 @@ export function magpieRoute(id: string, label: unknown): string | null {
   const slash = id.indexOf("/");
   if (slash <= 0) return null;
   const prefix = id.slice(0, slash);
-  return MAGPIE_ROUTE_PREFIXES[prefix] ?? prefix;
+  return MAGPIE_ROUTE_NAMES[prefix] ?? prefix;
 }
 
 // 普通目录的强度里能作为请求字段发出去的那些（PARAMETER_EFFORTS），顺序照目录。缺省强度不在里面时当作没有。

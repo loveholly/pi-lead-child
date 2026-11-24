@@ -294,6 +294,8 @@ describe("magpie routes", () => {
     expect(magpieRoute("auto/x", "Claude Fable 5.2 · routing group")).toBe("routing group");
     expect(magpieRoute("codex/x", "GPT-6 Sol")).toBe("Codex");
     expect(magpieRoute("x", null)).toBeNull();
+    // The protocol takes at most 80 characters; a longer route would make the Companion reject the whole catalog.
+    expect(magpieRoute("auto/x", `Name · ${"r".repeat(200)}`)).toBe("r".repeat(80));
   });
 });
 

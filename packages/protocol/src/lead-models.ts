@@ -48,6 +48,11 @@ export const LeadModelOptionSchema = StrictObject({
 });
 export type LeadModelOption = Static<typeof LeadModelOptionSchema>;
 
+// magpie 的路由前缀（id 里第一个斜杠前的部分）和它们的显示名：目录条目没有 magpie_label 时，通道（route）按它兜底
+// （lead 的 magpieRoute）。这是 magpie 目录的约定，不是 PLC 的 runtime。放在 protocol 里：内核模块的代码不写 runtime 的
+// 名字（apps/daemon/test/runtime-architecture.test.ts），而这几个前缀恰好和 runtime 同名。
+export const MAGPIE_ROUTE_NAMES: Readonly<Record<string, string>> = { auto: "Auto", claude: "Claude Code", codex: "Codex" };
+
 export const LeadModelCatalogSchema = StrictObject({
   // 正在用的。模型自动切换（限流、额度）可能暂时换成了别的。
   current: LeadModelChoiceSchema,
