@@ -199,6 +199,50 @@ describe("counting the branch's commits", () => {
   });
 });
 
+// 分支在 GitHub 上 squash 合并以后，交付视图以前只数 HEAD..<head>，一直显示「没合并」，还让用户合并或放弃。
+// 现在和自动清理用同一个判断（contentMergedInto）。
+describe("a delivery whose branch was squash-merged on origin", () => {
+  function squashOnOrigin(branch: string): void {
+    const origin = join(dir, "origin.git");
+    execFileSync("git", ["init", "-q", "--bare", "-b", "main", origin]);
+    git(repo, "remote", "add", "origin", origin);
+    git(repo, "push", "-q", "origin", "main", `${branch}:refs/heads/${branch}`);
+    const hub = join(dir, "hub");
+    execFileSync("git", ["clone", "-q", origin, hub]);
+    git(hub, "fetch", "-q", "origin", branch);
+    git(hub, "merge", "--squash", "-q", "FETCH_HEAD");
+    git(hub, "-c", "user.email=hub@example.test", "-c", "user.name=Hub", "commit", "-qm", "squashed");
+    git(hub, "push", "-q", "origin", "main");
+    git(repo, "fetch", "-q", "origin");
+    git(repo, "remote", "set-head", "origin", "main");
+  }
+
+  it("shows the branch as merged into origin's default branch, with nothing left to merge or abandon", async () => {
+    const { itemId } = deliveredTicket();
+    const workspace = getWorkspace(db, (db.prepare("SELECT id FROM workspaces WHERE owner_item_id=? AND kind='isolated_child'").get(itemId) as { id: number }).id)!;
+    squashOnOrigin(workspace.branch!);
+    db.prepare("UPDATE items SET stage='done' WHERE id=?").run(itemId);
+
+    const delivery = await ticketDelivery(db, itemId);
+    expect(delivery.workspace).toMatchObject({ commits: 0, integration: "merged", mergedInto: "origin/main" });
+    expect(delivery.actions.abandon).toEqual({ available: false, reason: "改动已经合并。" });
+    expect(delivery.actions.openPullRequest.available).toBe(false);
+    expect(Value.Check(TicketDeliverySchema, delivery)).toBe(true);
+  });
+
+  it("shows the branch as unmerged again when it got a new commit after the squash merge", async () => {
+    const { itemId, worktree } = deliveredTicket();
+    const workspace = getWorkspace(db, (db.prepare("SELECT id FROM workspaces WHERE owner_item_id=? AND kind='isolated_child'").get(itemId) as { id: number }).id)!;
+    squashOnOrigin(workspace.branch!);
+    writeFileSync(join(worktree, "later.md"), "later\n");
+    git(worktree, "add", "-A");
+    git(worktree, "-c", "user.email=a@b.test", "-c", "user.name=agent", "commit", "-qm", "later");
+
+    const delivery = await ticketDelivery(db, itemId);
+    expect(delivery.workspace).toMatchObject({ commits: 2, integration: "unmerged", mergedInto: null });
+  });
+});
+
 describe("which paths the file preview accepts", () => {
   it("rejects paths that leave the repository or are not plain relative paths", () => {
     for (const bad of ["../plc.db", "/etc/passwd", "docs/../../x", "docs//plan.md", "C:\\x", "a\\b", "", "docs/./plan.md", 7]) {

@@ -24,7 +24,7 @@ import {
 import type { Item, ItemStage, Workspace } from "@pi-lead-child/core";
 import { readHead } from "@pi-lead-child/core";
 import { redactSecretText } from "@pi-lead-child/protocol";
-import { abandonIsolatedWorkspace, integrateIsolatedWorkspace, withWorkspaceLock } from "./workspace.js";
+import { abandonIsolatedWorkspace, contentMergedInto, integrateIsolatedWorkspace, withWorkspaceLock } from "./workspace.js";
 import { worktreeBaseBranch } from "./workspace-remote.js";
 import { checkPushAgainstOrigin } from "./push-guard.js";
 import {
@@ -205,20 +205,22 @@ async function deliveryView(db: Db, itemId: number): Promise<DeliveryViewResult>
   const repositoryProblem = present ? await worktreeRepositoryMismatch(db, workspace, repo) : null;
   const counted = head && workspace.merge_status !== "merged"
     ? await branchCommitCount(workspace, repo, head, repositoryProblem !== null)
-    : { count: 0, problem: null };
+    : { count: 0, problem: null, mergedInto: null };
   // 算不出提交数时视图照旧写 0（协议里是非负整数），但不判成 no_changes：原因写进合并和开 PR 的不可用说明。
   const commits = counted.count ?? 0;
   const integrated = workspace.merge_status === "merged"
     ? latestDecision(db, itemId, "workspace_integrated", workspace.id) : null;
   const pr = latestDecision(db, itemId, "workspace_pr_opened", workspace.id);
-  const integration: DeliveryIntegration = workspace.merge_status === "merged" ? "merged"
+  // 分支的内容已经在默认分支里（例如 PR 在 GitHub 上 squash 合并了）：和自动清理用同一个判断，显示已合并。
+  const contentMerged = counted.mergedInto !== null && uncommittedFiles === 0 && head !== workspace.base_ref;
+  const integration: DeliveryIntegration = workspace.merge_status === "merged" || contentMerged ? "merged"
     : abandonFinished(workspace) ? "abandoned"
       : workspace.merge_status === "conflict" ? "conflict"
         : commits > 0 || uncommittedFiles > 0 || counted.problem ? "unmerged" : "no_changes";
 
   const deliveryWorkspaceView: DeliveryWorkspace = {
     workspaceId: workspace.id, branch: workspace.branch, head, target, commits, uncommittedFiles, integration,
-    mergedInto: integrated?.target ?? null, pullRequestUrl: pr?.url ?? null,
+    mergedInto: integrated?.target ?? (contentMerged ? (counted.mergedInto === "HEAD" ? target : counted.mergedInto) : null), pullRequestUrl: pr?.url ?? null,
   };
 
   const actions = await deliveryActions(db, item, workspace, {
@@ -259,9 +261,11 @@ async function gitCommonDir(dir: string): Promise<string | null> {
 }
 
 // 分支上还没合进去的提交数。平常在 repo_root 里数 HEAD..<head>（用户的分支没有的提交）。
+// 分支的内容已经在 origin 的默认分支或 HEAD 里时（contentMergedInto，和自动清理同一个判断），记 0，
+// mergedInto 写包含它的分支：squash 合并、本地 master 落后 origin 时，只数祖先关系会把它算成没合并。
 // worktree 挂在另一个仓库上时，repo_root 里没有这些提交：改在 worktree 里数 base_ref..<head>。
 // git 失败时不当成 0（以前 Number('' || 0) 把有提交的分支判成没有改动）：返回写明哪条命令失败的原因。
-type CommitCount = { count: number; problem: null } | { count: null; problem: string };
+type CommitCount = { count: number; problem: null; mergedInto: string | null } | { count: null; problem: string; mergedInto: null };
 
 async function branchCommitCount(workspace: Workspace, repo: string, head: string, otherRepository: boolean): Promise<CommitCount> {
   const [args, cwd] = otherRepository && workspace.base_ref
@@ -269,9 +273,13 @@ async function branchCommitCount(workspace: Workspace, repo: string, head: strin
     : [["rev-list", "--count", `HEAD..${head}`], repo];
   const result = await gitRun(args, cwd);
   const count = result.ok ? Number.parseInt(result.stdout.trim(), 10) : Number.NaN;
-  if (Number.isFinite(count) && count >= 0) return { count, problem: null };
+  if (Number.isFinite(count) && count >= 0) {
+    // 祖先关系已经说明合并了时不再试合并：交付视图打开得很频繁。
+    const mergedInto = otherRepository ? null : count === 0 ? "HEAD" : await contentMergedInto(repo, head);
+    return { count: mergedInto !== null ? 0 : count, problem: null, mergedInto };
+  }
   const detail = redact(firstLine(result.stderr)) || "没有输出";
-  return { count: null, problem: `算不出分支上的提交数：在 ${cwd} 里运行 git ${args.join(" ")} 失败（git：${detail}）。` };
+  return { count: null, mergedInto: null, problem: `算不出分支上的提交数：在 ${cwd} 里运行 git ${args.join(" ")} 失败（git：${detail}）。` };
 }
 
 // abandoned 只在工作区已经释放以后才算放弃完了。以前放弃时快照存不成，merge_status 已经写成 abandoned，
