@@ -1,5 +1,5 @@
 import {
-  Badge, Box, Button, Column, FloatingSheet, Icon, PopoverAnchorView, PopoverPanel, Pressable, ProgressBar, Row, ScrollArea,
+  Badge, Box, Button, Column, elevation, FloatingSheet, Icon, PopoverAnchorView, PopoverPanel, Pressable, ProgressBar, Row, ScrollArea,
   Spacer, Text, TextField, useBreakpoint, type PopoverAnchor, type PopoverAnchorHandle,
 } from '@pi-lead-child/components';
 import {
@@ -7,6 +7,7 @@ import {
   type LeadModelCatalog, type LeadModelChoice, type LeadModelOption,
 } from '@pi-lead-child/protocol';
 import { useEffect, useMemo, useRef, useState, type ComponentRef, type ReactNode } from 'react';
+import { Platform } from 'react-native';
 
 import { useLocale, useMessages, type Locale } from '@/i18n';
 import { useCompanionRuntime, useControlPlaneStore } from '@/state/CompanionStateProvider';
@@ -192,6 +193,7 @@ function LeadModelPickerBody({ open, anchor, onClose, onTurnModel, onSwitched, t
           value={draft.effort}
           open={effortOpen}
           onToggle={() => setEffortOpen((value) => !value)}
+          onClose={() => setEffortOpen(false)}
           onPick={(effort) => { setDraft({ ...draft, effort }); setEffortOpen(false); setNotice(null); }}
         />
       ) : null}
@@ -356,7 +358,7 @@ function PickerFooter({ sheet, effortMenu, notice, noticeTone, onlyThis, onlyThi
     // 手机：两颗按钮各占一半（P13.2b：最多一个主按钮和一个次按钮）。
     return (
       // FloatingSheet 的操作条是横排的一行：这一块占满它。
-      <Column flex={1} minW={0} gap="card-row">
+      <Column testID="lead-model-footer" flex={1} minW={0} gap="card-row">
         {notice ? <Text testID="lead-model-notice" size="note" tone={noticeTone}>{notice}</Text> : null}
         {effortMenu}
         <Row gap="actions">
@@ -367,8 +369,8 @@ function PickerFooter({ sheet, effortMenu, notice, noticeTone, onlyThis, onlyThi
     );
   }
   return (
-    // 菜单打开时向上长（选项在触发块上面），所以这一行按底边对齐：触发块、说明和按钮留在原来的高度。
-    <Row items="flex-end" gap="side-item" px="card" py="inset-y">
+    // 推理强度的选项是浮层（EffortMenu），不占这一行的高度：打开、收起时操作条一样高。
+    <Row testID="lead-model-footer" items="center" gap="side-item" px="card" py="inset-y">
       {effortMenu}
       <Text testID="lead-model-notice" flex={1} minW={0} size="meta" tone={noticeTone} numberOfLines={2}>{notice ?? ''}</Text>
       <Row gap="actions" shrink={0}>{only}{primary}</Row>
@@ -376,93 +378,110 @@ function PickerFooter({ sheet, effortMenu, notice, noticeTone, onlyThis, onlyThi
   );
 }
 
-// 键盘也能用（P13.6）：组件库的 Pressable 在 web 上是 div role="button"，Tab 走不到它，Enter 和空格也不触发。
-// 推理强度菜单的触发块和选项自己补上：进 Tab 顺序，Enter 或空格等于点一下，键盘聚焦时一圈强调色的描边。
-function keyboardPress(action: () => void) {
-  return {
-    tabIndex: 0,
-    onKeyDown: (event: { key: string; preventDefault: () => void }) => {
-      if (event.key !== 'Enter' && event.key !== ' ') return;
-      event.preventDefault();
-      action();
-    },
-    focusVisibleStyle: { outlineWidth: 2, outlineStyle: 'solid', outlineColor: 'accent' },
-  } as const;
-}
-
 // 推理强度的菜单（视觉稿方案 C，用户 2026-11-24 定）：底部操作条的左边，和「只这一条」「换成主用」同一区，两种用法都带着它。
-// 平时是一个描边的小触发块「推理 · 现在的强度」；点开在它上面列出这个模型能发出去的强度（目录给的，daemon 已经去掉发不出去的），
-// 第一项「缺省」（不带强度，用服务商的缺省），选中的一行行尾 check 并且 aria-pressed。选了收起。
-// 在同一个浮层里展开（和订阅的账号一样，P2.8 同一时间只开一个浮层）；选项在 DOM 里排在触发块后面，Tab 从触发块走进选项（P13.6）。
-// 选了以后焦点回到触发块。
-function EffortMenu({ sheet, efforts, value, open, onToggle, onPick }: {
+// 触发块和右边两颗按钮是同一个 Button（outline、neutral，桌面 sm、手机 lg）：一样高、一样的内边距、字号、字重和圆角
+// （用户 2026-11-24：不要另写一套小号样式）。文字「推理 · 现在的强度」，后面一个箭头。web 上它是 <button>，Tab、Enter、空格都能用。
+// 点开以后，选项是一块向上弹出的浮层：绝对定位在触发块上面，盖住模型列表，不占操作条的高度（用户 2026-11-24：展开时不能把
+// 操作条撑高）。列出这个模型能发出去的强度，第一项「缺省」（不带强度，用服务商的缺省），选中的一行行尾 check 并且 aria-pressed。
+// 选了收起，焦点回到触发块。点浮层外面、按 Esc 只收起菜单，不关整个选择器（web）。同一个选择器里展开，不另开浮层（P2.8）。
+// 组件规格：浮层最窄 180（选项文字「Extra high」加 check 的宽度）。
+const EFFORT_OPTIONS_MIN_WIDTH = 180;
+
+function EffortMenu({ sheet, efforts, value, open, onToggle, onClose, onPick }: {
   sheet: boolean;
   efforts: readonly string[];
   value: string | null;
   open: boolean;
   onToggle: () => void;
+  onClose: () => void;
   onPick: (effort: string | null) => void;
 }) {
   const m = useMessages(leadModelMessages);
-  const trigger = useRef<ComponentRef<typeof Pressable>>(null);
+  const container = useRef<ComponentRef<typeof Box>>(null);
   const current = value ? m.effortName(value) : m.defaultEffort;
   const options: Array<string | null> = [null, ...efforts];
+  const focusTrigger = () => {
+    if (Platform.OS !== 'web' || typeof document === 'undefined') return;
+    // Button 不给 ref：按 testID 找到 web 上的那颗 <button>。
+    setTimeout(() => (document.querySelector('[data-testid="lead-model-effort-menu"]') as HTMLElement | null)?.focus(), 0);
+  };
   const pick = (effort: string | null) => {
     onPick(effort);
-    // 选项收起以后焦点会掉到页面上：放回触发块，键盘接着能用。
-    setTimeout(() => (trigger.current as { focus?: () => void } | null)?.focus?.(), 0);
+    focusTrigger();
   };
+
+  // web：菜单开着时，点它外面收起它（这一下照样作用在被点的东西上，P2.5）；Esc 只收起菜单。
+  // 在捕获阶段先拿到 Esc 并停住：选择器的 Modal 在 document 上听 keyup，不然 Esc 会把整个选择器关掉。
+  useEffect(() => {
+    if (!open || Platform.OS !== 'web' || typeof window === 'undefined') return undefined;
+    const inside = (target: EventTarget | null) => {
+      const node = container.current as unknown as Node | null;
+      return Boolean(node && target instanceof Node && node.contains(target));
+    };
+    const onPointerDown = (event: Event) => { if (!inside(event.target)) onClose(); };
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return;
+      event.stopPropagation();
+      if (event.type === 'keyup') {
+        onClose();
+        focusTrigger();
+      }
+    };
+    window.addEventListener('pointerdown', onPointerDown, true);
+    window.addEventListener('keydown', onKey, true);
+    window.addEventListener('keyup', onKey, true);
+    return () => {
+      window.removeEventListener('pointerdown', onPointerDown, true);
+      window.removeEventListener('keydown', onKey, true);
+      window.removeEventListener('keyup', onKey, true);
+    };
+  }, [open, onClose]);
+
   return (
-    <Box testID="lead-model-effort" flexDirection="column-reverse" gap="nav-item" shrink={0} {...(sheet ? { self: 'stretch' as const } : {})}>
-      <Pressable
-        ref={trigger}
+    <Box ref={container} testID="lead-model-effort" position="relative" shrink={0} {...(sheet ? { self: 'flex-start' as const } : {})}>
+      <Button
         testID="lead-model-effort-menu"
-        aria-label={m.effortMenuLabel(current)}
-        aria-expanded={open}
-        feedback="highlight"
+        label={m.effortMenu(current)}
+        accessibilityLabel={m.effortMenuLabel(current)}
+        variant="outline"
+        tone="neutral"
+        size={sheet ? 'lg' : 'sm'}
+        icon={open ? 'chevron-up' : 'chevron-down'}
+        iconPosition="end"
         onPress={onToggle}
-        {...keyboardPress(onToggle)}
-        rounded="md"
-        px="inset-y"
-        py={sheet ? 'row-y' : 'pill-y'}
-        // 手机上点得到的高度至少 44（P13.5，和 ChoiceGroup 的选项一样）。
-        {...(sheet ? { minH: 44, justify: 'center' as const } : {})}
-        borderWidth={1}
-        borderColor="border-input"
-        bg="surface"
-        self="flex-start"
-      >
-        <Row items="center" gap="icon-label">
-          <Text size="label" weight="semibold" numberOfLines={1}>{m.effortMenu(current)}</Text>
-          <Icon name={open ? 'chevron-up' : 'chevron-down'} size={12} color="text-secondary" />
-        </Row>
-      </Pressable>
+      />
       {open ? (
-        <Column testID="lead-model-effort-options" aria-label={m.effortOptions} p="pill-y" gap="nav-item" rounded="md" borderWidth={1} borderColor="border-soft" bg="surface">
+        <Column
+          testID="lead-model-effort-options"
+          aria-label={m.effortOptions}
+          position="absolute"
+          b="100%"
+          l={0}
+          mb="nav-item"
+          minW={EFFORT_OPTIONS_MIN_WIDTH}
+          p="pill-y"
+          gap="nav-item"
+          rounded="md"
+          borderWidth={1}
+          borderColor="border-soft"
+          bg="surface"
+          boxShadow={elevation.raised}
+        >
           {options.map((option) => {
             const chosen = option === value;
             return (
-              <Pressable
+              <Button
                 key={option ?? 'default'}
                 testID={`lead-model-effort-${option ?? 'default'}`}
-                aria-pressed={chosen}
-                feedback="highlight"
-                rounded="sm"
-                px="inset-y"
-                py={sheet ? 'row-y' : 'pill-y'}
-                // 手机上每一行点得到的高度至少 44（P13.5）。
-                {...(sheet ? { minH: 44, justify: 'center' as const } : {})}
-                bg={chosen ? 'accent-wash' : 'transparent'}
+                label={option ? m.effortName(option) : m.defaultEffort}
+                accessibilityLabel={chosen ? m.selectedLabel(option ? m.effortName(option) : m.defaultEffort) : undefined}
+                variant={chosen ? 'soft' : 'ghost'}
+                tone={chosen ? 'accent' : 'neutral'}
+                size={sheet ? 'lg' : 'sm'}
+                fullWidth
+                {...(chosen ? { icon: 'check' as const, iconPosition: 'end' as const } : {})}
                 onPress={() => pick(option)}
-                {...keyboardPress(() => pick(option))}
-              >
-                <Row items="center" gap="inline-item">
-                  <Text flex={1} minW={0} size="label" weight={chosen ? 'semibold' : 'regular'} tone={chosen ? 'accent' : 'default'} numberOfLines={1}>
-                    {option ? m.effortName(option) : m.defaultEffort}
-                  </Text>
-                  {chosen ? <Icon name="check" size={14} color="accent" accessibilityLabel={m.selected} /> : null}
-                </Row>
-              </Pressable>
+              />
             );
           })}
         </Column>

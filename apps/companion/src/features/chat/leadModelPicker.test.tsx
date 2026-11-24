@@ -277,18 +277,14 @@ describe('the reasoning effort menu', () => {
     await act(async () => { fireEvent.click(screen.getByTestId('lead-model-option-vibeproxy/claude-opus-5-5')); });
     const menu = screen.getByTestId('lead-model-effort-menu');
     expect(menu.textContent).toBe('Reasoning · Default');
-    expect(menu.getAttribute('aria-expanded')).toBe('false');
-    expect(screen.getByTestId('lead-model-picker-panel').querySelector('[data-testid="lead-model-effort"]')).toBeTruthy();
+    expect(screen.getByTestId('lead-model-footer').contains(menu)).toBe(true);
     expect(screen.queryByTestId('lead-model-effort-options')).toBeNull();
 
     await act(async () => { fireEvent.click(menu); });
-    expect(menu.getAttribute('aria-expanded')).toBe('true');
     const options = Array.from(screen.getByTestId('lead-model-effort-options').querySelectorAll('[data-testid^="lead-model-effort-"]'))
       .map((element) => element.textContent);
     expect(options).toEqual(['Default', 'Low', 'High']);
-    expect(screen.getByTestId('lead-model-effort-default').getAttribute('aria-pressed')).toBe('true');
-    // 选项在 DOM 里排在触发块后面：Tab 从触发块走进选项。
-    expect(menu.compareDocumentPosition(screen.getByTestId('lead-model-effort-low')) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(screen.getByTestId('lead-model-effort-default').getAttribute('aria-label')).toBe('Default, selected');
 
     await act(async () => { fireEvent.click(screen.getByTestId('lead-model-effort-high')); });
     expect(screen.queryByTestId('lead-model-effort-options')).toBeNull();
@@ -299,20 +295,63 @@ describe('the reasoning effort menu', () => {
     expect(screen.queryByTestId('lead-model-effort')).toBeNull();
   });
 
-  it('works from the keyboard: the trigger and options are in the Tab order, Enter and Space press them', async () => {
+  // 用户 2026-11-24 验收：菜单展开时把操作条撑高了，两颗按钮被挤到底下；触发块也比两颗按钮矮、字小。
+  // 现在选项是绝对定位的浮层（不占操作条的高度），触发块和两颗按钮是同一个 Button、同一个尺寸。
+  // happy-dom 不排版（高度都是 0），真实像素高度在 Dev Mode 的浏览器里量（EVIDENCE.md）；这里断言做到这一点的结构和样式。
+  it('opens the options as a floating layer that leaves the action bar alone, with a trigger styled like the two buttons', async () => {
     setup();
     await openFromComposer();
     await act(async () => { fireEvent.click(screen.getByTestId('lead-model-connection-vibeproxy')); });
     await act(async () => { fireEvent.click(screen.getByTestId('lead-model-option-vibeproxy/claude-opus-5-5')); });
-    const menu = screen.getByTestId('lead-model-effort-menu');
-    expect(menu.getAttribute('tabindex')).toBe('0');
-    await act(async () => { fireEvent.keyDown(menu, { key: 'Enter' }); });
-    expect(screen.getByTestId('lead-model-effort-options')).toBeTruthy();
-    const high = screen.getByTestId('lead-model-effort-high');
-    expect(high.getAttribute('tabindex')).toBe('0');
-    await act(async () => { fireEvent.keyDown(high, { key: ' ' }); });
+    const footer = screen.getByTestId('lead-model-footer');
+    const children = Array.from(footer.children).length;
+    const footerHeight = footer.getBoundingClientRect().height;
+    const trigger = screen.getByTestId('lead-model-effort-menu');
+    const only = screen.getByTestId('lead-model-only-this');
+    const primary = screen.getByTestId('lead-model-make-primary');
+    // 同一个 Button：同一种元素、同一份尺寸样式（高度、内边距、字号、字重、圆角）。桌面是 sm，高 32。
+    expect(getComputedStyle(only).height).toBe('32px');
+    for (const property of ['height', 'padding-left', 'padding-right', 'border-top-left-radius'] as const) {
+      expect(getComputedStyle(trigger).getPropertyValue(property)).toBe(getComputedStyle(only).getPropertyValue(property));
+      expect(getComputedStyle(trigger).getPropertyValue(property)).toBe(getComputedStyle(primary).getPropertyValue(property));
+    }
+    expect(trigger.tagName).toBe(only.tagName);
+    const label = (button: HTMLElement) => button.querySelector('[dir], span, div[class*="font_"]') ?? button;
+    expect(getComputedStyle(label(trigger)).fontSize).toBe(getComputedStyle(label(only)).fontSize);
+    expect(getComputedStyle(label(trigger)).fontWeight).toBe(getComputedStyle(label(only)).fontWeight);
+
+    await act(async () => { fireEvent.click(trigger); });
+    const layer = screen.getByTestId('lead-model-effort-options');
+    expect(getComputedStyle(layer).position).toBe('absolute');
+    // 浮层挂在触发块的容器里，操作条的直接子元素不变：打开不会多出一行。
+    expect(Array.from(footer.children).length).toBe(children);
+    expect(footer.getBoundingClientRect().height).toBe(footerHeight);
+  });
+
+  it('works from the keyboard and closes on Escape or a click outside, leaving the picker open', async () => {
+    setup();
+    await openFromComposer();
+    await act(async () => { fireEvent.click(screen.getByTestId('lead-model-connection-vibeproxy')); });
+    await act(async () => { fireEvent.click(screen.getByTestId('lead-model-option-vibeproxy/claude-opus-5-5')); });
+    // 触发块和选项都是 <button>：Tab 走得到，Enter 和空格由浏览器按下。
+    expect(screen.getByTestId('lead-model-effort-menu').tagName).toBe('BUTTON');
+    await act(async () => { fireEvent.click(screen.getByTestId('lead-model-effort-menu')); });
+    expect(screen.getByTestId('lead-model-effort-high').tagName).toBe('BUTTON');
+
+    // Esc：只收起菜单，选择器还开着。
+    await act(async () => {
+      fireEvent.keyDown(screen.getByTestId('lead-model-effort-high'), { key: 'Escape' });
+      fireEvent.keyUp(screen.getByTestId('lead-model-effort-high'), { key: 'Escape' });
+    });
     expect(screen.queryByTestId('lead-model-effort-options')).toBeNull();
-    expect(screen.getByTestId('lead-model-effort-menu').textContent).toBe('Reasoning · High');
+    expect(screen.getByTestId('lead-model-picker-panel')).toBeTruthy();
+
+    // 点菜单外面：收起菜单，选择器还开着。
+    await act(async () => { fireEvent.click(screen.getByTestId('lead-model-effort-menu')); });
+    expect(screen.getByTestId('lead-model-effort-options')).toBeTruthy();
+    await act(async () => { fireEvent.pointerDown(screen.getByTestId('lead-model-search')); });
+    expect(screen.queryByTestId('lead-model-effort-options')).toBeNull();
+    expect(screen.getByTestId('lead-model-picker-panel')).toBeTruthy();
   });
 
   it('goes back to Default, which sends no effort', async () => {
