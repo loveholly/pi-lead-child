@@ -12,6 +12,7 @@ import { CodexRuntime } from "@pi-lead-child/runtime";
 import type { AgentRuntime, RuntimeCapabilities, RuntimeHandle, RuntimeStartRequest } from "@pi-lead-child/runtime";
 import { liveChildren, runItem } from "../src/children/manager.js";
 import { createWatchdog } from "../src/pipeline/watchdog.js";
+import { reworkItem, stopItemRun } from "../src/ticket-actions/lifecycle.js";
 
 let db: Db;
 
@@ -474,5 +475,94 @@ describe("a run that hangs at start", () => {
     expect(getItem(store, itemId)!.stage).toBe("blocked");
     vi.unstubAllEnvs();
     store.close();
+  });
+});
+
+// 2026-11-24：Lead 停掉正在跑的核查，接着退回返工。核查停下的同一拍，编排器又派了一次 reviewer-retry 核查，
+// 返工的执行只能排在它后面。工单离开 review 以后不再重派核查；返工时排着的、在跑的核查一起作废。
+describe("reviewer retry after the ticket went back to rework", () => {
+  const started = (claim: { runId: number }) => { updateRun(db, claim.runId, { state: "running" }); };
+  const lead = { actor: "lead" } as const;
+  const requestsOf = (itemId: number) => db.prepare(
+    "SELECT role, trigger, state FROM dispatch_requests WHERE item_id=? ORDER BY id",
+  ).all(itemId) as Array<{ role: string; trigger: string; state: string }>;
+
+  async function reviewing(options: { busy?: () => boolean } = {}) {
+    const itemId = createItem(db, { title: "task", brief: "b", createdBy: "system" });
+    transition(db, { itemId, to: "active", actor: "system", reason: "" });
+    const delivery = createRun(db, { itemId, role: "executor" });
+    updateRun(db, delivery, { state: "finished", endedAt: true });
+    transition(db, { itemId, to: "review", actor: "child", reason: "" });
+    const orchestrator = createOrchestrator(db, {
+      onDispatch: started, ...(options.busy ? { itemBusy: options.busy } : {}),
+    });
+    orchestrator.dispatcher.request({
+      itemId, role: "reviewer", purpose: "review", runtime: "codex", trigger: "automatic-review", idempotencyKey: `review:${itemId}`,
+    });
+    await orchestrator.tick();
+    const reviewer = db.prepare("SELECT id FROM runs WHERE item_id=? AND role='reviewer' AND state='running'").get(itemId) as { id: number };
+    expect(reviewer).toBeDefined();
+    return { itemId, orchestrator, reviewerRunId: reviewer.id };
+  }
+
+  it("does not dispatch reviewer-retry when the ticket was sent back to rework after the reviewer was stopped", async () => {
+    const { itemId, orchestrator, reviewerRunId } = await reviewing();
+    await stopItemRun(db, reviewerRunId, "先停掉核查", lead);
+    reworkItem(db, itemId, "选项样式不对，返工", lead);
+    await orchestrator.tick();
+
+    expect(requestsOf(itemId).filter((row) => row.trigger === "reviewer-retry")).toEqual([]);
+    expect(requestsOf(itemId).find((row) => row.trigger === "user-rework")).toEqual(
+      { role: "executor", trigger: "user-rework", state: "started" },
+    );
+    expect(db.prepare("SELECT COUNT(*) AS n FROM inbox WHERE summary LIKE '%reviewer 重试已耗尽%'").get()).toEqual({ n: 0 });
+    expect(db.prepare(
+      "SELECT COUNT(*) AS n FROM activities WHERE item_id=? AND json_extract(payload, '$.decision')='reviewer_retry_skipped'",
+    ).get(itemId)).toEqual({ n: 1 });
+  });
+
+  it("drops a reviewer-retry that was queued before the rework and lets the rework run first", async () => {
+    let busy = false;
+    const { itemId, orchestrator, reviewerRunId } = await reviewing({ busy: () => busy });
+    await stopItemRun(db, reviewerRunId, "先停掉核查", lead);
+    busy = true; // 停下的核查还在收尾：重派的核查排上了，还没被认领。
+    await orchestrator.tick();
+    expect(requestsOf(itemId).find((row) => row.trigger === "reviewer-retry")?.state).toBe("pending");
+
+    reworkItem(db, itemId, "选项样式不对，返工", lead);
+    expect(requestsOf(itemId).find((row) => row.trigger === "reviewer-retry")?.state).toBe("cancelled");
+    busy = false;
+    await orchestrator.tick();
+    expect(requestsOf(itemId).find((row) => row.trigger === "user-rework")?.state).toBe("started");
+    expect(db.prepare("SELECT COUNT(*) AS n FROM runs WHERE item_id=? AND role='reviewer'").get(itemId)).toEqual({ n: 1 });
+  });
+
+  it("stops a reviewer-retry that already started when the ticket is sent back to rework, without another retry", async () => {
+    const { itemId, orchestrator, reviewerRunId } = await reviewing();
+    await stopItemRun(db, reviewerRunId, "先停掉核查", lead);
+    await orchestrator.tick();
+    const retry = db.prepare(
+      "SELECT id FROM runs WHERE item_id=? AND role='reviewer' AND state='running'",
+    ).get(itemId) as { id: number };
+    expect(retry).toBeDefined();
+
+    reworkItem(db, itemId, "选项样式不对，返工", lead);
+    expect(db.prepare("SELECT state FROM runs WHERE id=?").get(retry.id)).toEqual({ state: "stopped" });
+    await orchestrator.tick();
+
+    expect(requestsOf(itemId).filter((row) => row.trigger === "reviewer-retry")).toHaveLength(1);
+    expect(requestsOf(itemId).find((row) => row.trigger === "user-rework")?.state).toBe("started");
+    expect(db.prepare("SELECT COUNT(*) AS n FROM inbox WHERE summary LIKE '%reviewer 重试已耗尽%'").get()).toEqual({ n: 0 });
+  });
+
+  it("still retries the review when the reviewer is only stopped and the ticket stays in review", async () => {
+    const { itemId, orchestrator, reviewerRunId } = await reviewing();
+    await stopItemRun(db, reviewerRunId, "停一下", lead);
+    await orchestrator.tick();
+
+    expect(getItem(db, itemId)!.stage).toBe("review");
+    expect(requestsOf(itemId).filter((row) => row.trigger === "reviewer-retry")).toEqual([
+      { role: "reviewer", trigger: "reviewer-retry", state: "started" },
+    ]);
   });
 });

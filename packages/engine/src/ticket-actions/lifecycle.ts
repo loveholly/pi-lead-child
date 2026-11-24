@@ -18,7 +18,7 @@ import {
 } from "@pi-lead-child/store";
 import { liveChildren } from "../children/manager.js";
 import { changeReviewer, suspendedReviewRuntime } from "../coordinator/change-reviewer.js";
-import { createDispatcher } from "../coordinator/dispatch.js";
+import { createDispatcher, expireReviewRequestsForRework } from "../coordinator/dispatch.js";
 import { warmRunWorkspaceFacts } from "../coordinator/workspace-policy.js";
 import type { FileOpener } from "../coordinator/file-opener.js";
 import { reviewerProgress, unreviewedDelivery, verificationState } from "../coordinator/review-authority.js";
@@ -225,9 +225,14 @@ export function reworkItem(
   const previousExecutorRunId = latestDeliveryRunId(db, itemId);
   const leadComments = recentLeadComments(db, itemId);
   const idempotencyKey = `user-rework:${itemId}:${item.stage}:${item.stage_changed_at}`;
+  // 还在跑的核查也一起停下：工单离开 review 以后它的结论会被拒，留着它只会把返工的执行挡在后面（2026-11-24）。
+  const liveReviewerRuns = listRuns(db, itemId).filter((run) => run.role === "reviewer" && !isTerminalRunState(run.state));
+  const stopReason = `工单已退回返工：${reason}`;
   db.transaction(() => {
     appendBody(db, itemId, reworkContextSection({ reason, reviewer, leadComments, previousExecutorRunId }));
     transition(db, { itemId, to: "active", ...transitionBy(by), reason });
+    expireReviewRequestsForRework(db, itemId);
+    for (const run of liveReviewerRuns) markItemRunStopped(db, run.id, stopReason, by);
     const requestId = createDispatcher(db).request({
       itemId,
       role: "executor",
@@ -260,6 +265,9 @@ export function reworkItem(
     });
     touchItemActivity(db, itemId);
   }).immediate();
+  for (const run of liveReviewerRuns) {
+    void killRunProcess(itemId, run.id, stopReason).catch(() => undefined);
+  }
 }
 
 /**

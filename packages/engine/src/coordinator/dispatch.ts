@@ -153,6 +153,17 @@ export function expireReviewRequestsForNewDelivery(db: Db, input: { itemId: numb
     .length;
 }
 
+/**
+ * 退回返工时，作废排着还没开始的核查请求：工单离开了 review，它们要核查的那份成果马上会被改掉。
+ * claim 时 staleReviewRequestReason 也会作废它们，但那要等到下一次认领；这里在返工的同一笔事务里就作废。
+ */
+export function expireReviewRequestsForRework(db: Db, itemId: number): number {
+  const rows = db.prepare(
+    "SELECT id, item_id, trigger FROM dispatch_requests WHERE item_id=? AND role='reviewer' AND state='pending'",
+  ).all(itemId) as Array<{ id: number; item_id: number; trigger: string }>;
+  return rows.filter((row) => expireReviewRequest(db, row, "工单已退回返工，之前的成果不再需要核查")).length;
+}
+
 export function createDispatcher(
   db: Db,
   options?: {

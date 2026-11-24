@@ -1,6 +1,6 @@
 import type { Db } from "@pi-lead-child/store";
 import { runUpdatedEvent } from "@pi-lead-child/store";
-import { addInbox } from "@pi-lead-child/store";
+import { addActivity, addInbox } from "@pi-lead-child/store";
 import { getRun, updateRun } from "@pi-lead-child/store";
 import { getItem, transition, updateOrchestrationState } from "@pi-lead-child/store";
 import { createDispatcher, type DispatchClaim, type Dispatcher } from "../coordinator/dispatch.js";
@@ -85,6 +85,16 @@ export function createOrchestrator(
         // 失败路径已经为账本上的故障排了一个挂起的重试请求，恢复后再走。瞬时失败排的是退避重试。
         // 所以这里不立即重试，也不把它计入 reviewer 的次数上限。
         if (kernelHandled(run)) continue;
+        // 核查已经不需要了就不重派：工单离开了 review（退回返工、取消），或者已经排上了新的执行。
+        // 停核查和返工几乎同时发生时，重派的核查会抢在返工的执行前面（2026-11-24）。也不报「重试耗尽」。
+        const skipReason = reviewerRetryObsoleteReason(db, item.id, item.stage);
+        if (skipReason) {
+          addActivity(db, {
+            itemId: item.id, runId: run.id, actor: "system", kind: "decision",
+            payload: { decision: "reviewer_retry_skipped", reason: skipReason },
+          });
+          continue;
+        }
         // 额度只算这份交付之后的失败：上一份交付的核查失败不该让新交付的第一次核查失败就耗尽（发布评审）。
         const delivery = latestDeliveryRunId(db, item.id);
         const failures = (db.prepare(
@@ -254,4 +264,18 @@ export function createOrchestrator(
       return { dispatched };
     },
   };
+}
+
+// 核查 Run 没跑完以后，还要不要重派核查。返回不重派的原因；要重派时返回 null。
+// 只看会产出新交付的执行（execution、integration）：工单里的问答（conversation）不让核查作废。
+export function reviewerRetryObsoleteReason(db: Db, itemId: number, stage: string): string | null {
+  if (stage !== "review") return `工单已离开 review（现在是 ${stage}）`;
+  const executor = db.prepare(
+    `SELECT id FROM dispatch_requests
+     WHERE item_id=? AND role='executor' AND purpose IN ('execution','integration')
+       AND state IN ('pending','claimed','started')
+     ORDER BY id DESC LIMIT 1`,
+  ).get(itemId) as { id: number } | undefined;
+  if (executor) return `已经排上了新的执行（派发请求 #${executor.id}）`;
+  return null;
 }
