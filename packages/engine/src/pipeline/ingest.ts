@@ -54,6 +54,25 @@ function notifiedBudgetThreshold(db: Db, itemId: number, budget: number): number
   return Math.max(Number(fromInbox.t ?? 0), Number(fromEvents.t ?? 0));
 }
 
+// Lead 发起的工单对话答完时，说明里带的执行者回复最多多长。全文用 get_ticket 看。
+const CONVERSATION_REPLY_CHARS = 1_500;
+
+// 一条事件里执行者说完的回复文字：归一化的 message.completed，或者 pi 原始的 message_end（content 里的 text 段）。
+function assistantText(event: any): string {
+  if (event?.type === "message.completed") {
+    return event.role === "assistant" && event.stopReason !== "error" && typeof event.text === "string" ? event.text.trim() : "";
+  }
+  const m = event?.message;
+  if (event?.type !== "message_end" || m?.role !== "assistant" || m.stopReason === "error") return "";
+  if (typeof m.content === "string") return m.content.trim();
+  if (!Array.isArray(m.content)) return "";
+  return m.content
+    .filter((part: any) => part?.type === "text" && typeof part.text === "string")
+    .map((part: any) => part.text)
+    .join("")
+    .trim();
+}
+
 export type IngestOutcome = {
   type: "terminal_handoff_required";
   criticalToolFailure: CriticalToolFailure | null;
@@ -88,6 +107,13 @@ export function createIngestor(
   // 这个 Run 的用量账，规则和 runTokenUsage 相同（工单 #102）。items 上只加这本账总量的变化，变化可以是负的。
   const usage = createRunUsageLedger();
   let criticalToolFailure: CriticalToolFailure | null = null;
+  // 执行者最近一条说完的回复。Lead 发起的工单对话正常结束时，交给 Lead 的说明里带上它（见 tellLeadConversationAnswered）。
+  let lastAssistantText = "";
+  let conversationAnswerTold = false;
+  const noteAssistantText = (event: any): void => {
+    const text = assistantText(event);
+    if (text) lastAssistantText = text;
+  };
 
   const recordUsage = (event: Parameters<typeof usage.apply>[0] & { type: "usage.updated" }) => {
     const before = usage.total();
@@ -160,10 +186,37 @@ export function createIngestor(
     });
   };
 
+  // Lead 用 continue_ticket_agent（或排着的追问、重发）发起的工单对话正常答完了：叫醒 Lead，说明里带执行者最后的回复。
+  // 以前对话 Run 结束一律不叫醒 Lead，执行者答「沙箱连不到目标主机，需要 Lead 在沙箱外替它跑」这类结论就沉了，
+  // 直到用户自己去看工单（2026-11-24）。用户本人在工单里发起的对话不叫醒 Lead：用户在工单对话里直接看到回答。
+  // 以 LLM 错误结束的对话由 raiseLlmError 说，这里不再说一次。
+  const tellLeadConversationAnswered = (run: Run): void => {
+    if (run.purpose !== "conversation" || llmError || conversationAnswerTold) return;
+    if (conversationRequestedBy(ctx.runId) !== "lead") return;
+    conversationAnswerTold = true;
+    const reply = lastAssistantText.trim();
+    const excerpt = reply.length > CONVERSATION_REPLY_CHARS
+      ? `${reply.slice(0, CONVERSATION_REPLY_CHARS)}…（已截断，全文用 get_ticket #${ctx.itemId} 看）`
+      : reply;
+    addInbox(db, {
+      itemId: ctx.itemId,
+      severity: "attention",
+      source: "structural",
+      summary: excerpt
+        ? `工单 #${ctx.itemId} 的执行者答完了你发的指令（对话 Run #${ctx.runId}）。它最后的回复：${excerpt}`
+        : `工单 #${ctx.itemId} 的执行者答完了你发的指令（对话 Run #${ctx.runId}），没有留下文字回复。用 get_ticket #${ctx.itemId} 看。`,
+      payload: {
+        kind: "conversation_run_finished", runId: ctx.runId, requestedBy: "lead",
+        reply: excerpt || null, wakeLead: true, needsUser: false,
+      },
+    });
+  };
+
   const settle = (): IngestOutcome | undefined => {
     updateRun(db, ctx.runId, { state: "finished", endedAt: true });
     const run = getRun(db, ctx.runId)!;
     raiseLlmError(run);
+    tellLeadConversationAnswered(run);
     // 代查不改工单的生命周期：工单的终态由代查的启动器按结果写（daemon 的 lookup.ts）。
     if (run.purpose === "conversation" || run.purpose === "outcome_repair" || run.purpose === "lookup") return undefined;
     const item = getItem(db, ctx.itemId)!;
@@ -310,6 +363,7 @@ export function createIngestor(
           break;
         }
         case "message.completed": {
+          noteAssistantText(event);
           if (event.stopReason === "error") {
             hadError = true;
             llmError = { stopReason: event.stopReason, detail: String(event.error ?? event.text ?? "").slice(0, 1_600) };
@@ -317,6 +371,7 @@ export function createIngestor(
           break;
         }
         case "message_end": {
+          noteAssistantText(event);
           const m = event.message;
           if (m?.role === "assistant" && m.usage) {
             const cacheReadTokens = Number(m.usage.cacheRead ?? 0);
@@ -374,7 +429,9 @@ export function createIngestor(
           usage.apply(event);
           break;
         case "message.completed":
-          if (event.stopReason === "error") hadError = true;
+        case "message_end":
+          noteAssistantText(event);
+          if (event.type === "message.completed" && event.stopReason === "error") hadError = true;
           break;
         case "tool.failed": {
           const name = criticalHandoffToolName(event.name);
