@@ -1,12 +1,12 @@
 import {
-  Badge, Box, Button, Column, FloatingSheet, Icon, PopoverAnchorView, PopoverPanel, Pressable, ProgressBar, Row, ScrollArea, SegmentedControl,
+  Badge, Box, Button, Column, FloatingSheet, Icon, PopoverAnchorView, PopoverPanel, Pressable, ProgressBar, Row, ScrollArea,
   Spacer, Text, TextField, useBreakpoint, type PopoverAnchor, type PopoverAnchorHandle,
 } from '@pi-lead-child/components';
 import {
   CHAT_TURN_MODEL_CAPABILITY, parseLeadModelSpec, subscriptionAccountOf, subscriptionSlotSpec,
   type LeadModelCatalog, type LeadModelChoice, type LeadModelOption,
 } from '@pi-lead-child/protocol';
-import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { useEffect, useMemo, useRef, useState, type ComponentRef, type ReactNode } from 'react';
 
 import { useLocale, useMessages, type Locale } from '@/i18n';
 import { useCompanionRuntime, useControlPlaneStore } from '@/state/CompanionStateProvider';
@@ -21,10 +21,12 @@ import {
 // 会话里换模型（模型配置方案 C 的 S4、S5，画板 C-Picker-Desktop / C-Picker-Mobile，用户 2026-11-16 定）。
 // 入口：桌面上输入框工具栏右边的模型名（LeadModelComposerTrigger）；手机上加号面板里的「模型」一行；两边都能在输入框里输入 /model。
 // 桌面上是锚定的浮层（PopoverPanel，P2），手机上是悬浮底部面板（FloatingSheet，P13.2）。打开浮层不改变会话列表（P1）。
-//   · 头：正在用的模型，下面一行「接入 · 账号 · 正在用」（账号按会话此刻挂着的模型，inSession）；推理强度的分段；搜索全部模型。
+//   · 头：正在用的模型，下面一行「接入 · 账号 · 正在用」（账号按会话此刻挂着的模型，inSession）；搜索全部模型。
 //   · 左栏（桌面）：接入，分「订阅」和「API key」两组；订阅带 5 小时额度的小条，API key 写模型数。手机上是能收起的一段一段。
 //   · 右边：订阅的「账号」（缺省自动；选一个账号就固定它：分工写 <base>-<n>/<id>），然后是这个接入的模型，主用、备用有标记。
-//   · 底部：「只这一条」（下一条消息用它答一次，daemon 宣布了 chat.turn-model.v1 才有）和「换成主用」（主按钮，改分工的第一个）。
+//   · 底部：左边是选着的模型的推理强度菜单「推理 · 现在的强度」（EffortMenu，视觉稿方案 C，用户 2026-11-24 定），
+//     右边「只这一条」（下一条消息用它答一次，daemon 宣布了 chat.turn-model.v1 才有）和「换成主用」（主按钮，改分工的第一个）。
+//     两种用法都带着菜单里选的强度。
 // 「换成主用」和 Lead 的 switch_lead_model 是同一个操作：Lead 空闲时马上换，正在回答时这一轮结束后换。
 
 // 组件规格：桌面浮层宽 580，左栏 196，下面两栏高 344（画板 C-Picker-Desktop）。一个接入先列 8 个模型，其余点「再显示」。
@@ -88,6 +90,7 @@ function LeadModelPickerBody({ open, anchor, onClose, onTurnModel, onSwitched, t
   const [search, setSearch] = useState('');
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [switching, setSwitching] = useState(false);
+  const [effortOpen, setEffortOpen] = useState(false);
   const [notice, setNotice] = useState<{ tone: 'secondary' | 'danger'; text: string } | null>(null);
 
   useEffect(() => {
@@ -123,6 +126,7 @@ function LeadModelPickerBody({ open, anchor, onClose, onTurnModel, onSwitched, t
     const account = draft && connectionKeyOf(draft.model) === connection.key ? pinnedAccountOf(draft.model) : null;
     const effort = draft?.effort && model.efforts.includes(draft.effort) ? draft.effort : null;
     setDraft({ model: withAccount(model.model, account), effort });
+    setEffortOpen(false);
     setNotice(null);
   };
   const setAccount = (connection: PickerConnection, account: string | null) => {
@@ -130,6 +134,7 @@ function LeadModelPickerBody({ open, anchor, onClose, onTurnModel, onSwitched, t
     const model = base?.model ?? connection.models[0]?.model;
     if (!model) return;
     setDraft({ model: withAccount(model, account), effort: base?.effort ?? null });
+    setEffortOpen(false);
     setNotice(null);
   };
 
@@ -171,16 +176,25 @@ function LeadModelPickerBody({ open, anchor, onClose, onTurnModel, onSwitched, t
       inUse={inUse}
       inSession={inSession}
       connections={connections}
-      draft={draft}
-      draftOption={draftOption}
-      onEffort={(effort) => { if (draft) setDraft({ ...draft, effort }); }}
       search={search}
       onSearch={setSearch}
     />
   );
+  // 选着的模型能选的推理强度。不能选时没有菜单。
+  const efforts = draftOption?.efforts ?? [];
   const footer = (
     <PickerFooter
       sheet={sheet}
+      effortMenu={draft && efforts.length ? (
+        <EffortMenu
+          sheet={sheet}
+          efforts={efforts}
+          value={draft.effort}
+          open={effortOpen}
+          onToggle={() => setEffortOpen((value) => !value)}
+          onPick={(effort) => { setDraft({ ...draft, effort }); setEffortOpen(false); setNotice(null); }}
+        />
+      ) : null}
       notice={notice?.text ?? (busy ? m.afterTurn : null)}
       noticeTone={notice?.tone ?? 'secondary'}
       onlyThis={onlyThis}
@@ -269,15 +283,12 @@ function accountName(account: Pick<PickerAccount, 'label' | 'index'>, locale: Lo
   return account.label ?? leadModelMessages(locale).accountN(account.index);
 }
 
-function PickerHeader({ sheet, catalog, inUse, inSession, connections, draft, draftOption, onEffort, search, onSearch }: {
+function PickerHeader({ sheet, catalog, inUse, inSession, connections, search, onSearch }: {
   sheet: boolean;
   catalog: LeadModelCatalog | null;
   inUse: LeadModelChoice | null;
   inSession: string | null;
   connections: readonly PickerConnection[];
-  draft: LeadModelChoice | null;
-  draftOption: LeadModelOption | null;
-  onEffort: (effort: string | null) => void;
   search: string;
   onSearch: (value: string) => void;
 }) {
@@ -290,17 +301,6 @@ function PickerHeader({ sheet, catalog, inUse, inSession, connections, draft, dr
   const subtitle = key
     ? m.inUseLine([connectionName(key), ...(account && connection && connection.accounts.length > 1 ? [accountName(account, locale)] : [])].join(' · '))
     : null;
-  const efforts = draftOption?.efforts ?? [];
-  const effort = efforts.length ? (
-    <SegmentedControl
-      testID="lead-model-effort"
-      optionTestID={(value) => `lead-model-effort-${value}`}
-      size="sm"
-      options={[{ value: 'default', label: m.defaultEffort }, ...efforts.map((value) => ({ value, label: m.effortName(value) }))]}
-      value={draft?.effort ?? 'default'}
-      onChange={(value) => onEffort(value === 'default' ? null : value)}
-    />
-  ) : null;
   const title = (
     <Column minW={0} shrink={1} gap="text-stack">
       <Text testID="lead-model-in-use" size={sheet ? 'section-title' : 'card-title'} weight={sheet ? 'bold' : 'semibold'} numberOfLines={1}>
@@ -311,18 +311,7 @@ function PickerHeader({ sheet, catalog, inUse, inSession, connections, draft, dr
   );
   return (
     <Column gap="card-section" {...(sheet ? {} : { px: 'card' as const, pt: 'card' as const, pb: 'inset-y' as const })}>
-      {sheet ? (
-        <>
-          {title}
-          {effort}
-        </>
-      ) : (
-        <Row items="center" gap="side-item">
-          {title}
-          <Spacer />
-          {effort}
-        </Row>
-      )}
+      {title}
       <TextField
         testID="lead-model-search"
         accessibilityLabel={m.searchLabel}
@@ -338,8 +327,9 @@ function PickerHeader({ sheet, catalog, inUse, inSession, connections, draft, dr
   );
 }
 
-function PickerFooter({ sheet, notice, noticeTone, onlyThis, onlyThisDisabled, makePrimaryDisabled, switching, onMakePrimary }: {
+function PickerFooter({ sheet, effortMenu, notice, noticeTone, onlyThis, onlyThisDisabled, makePrimaryDisabled, switching, onMakePrimary }: {
   sheet: boolean;
+  effortMenu: ReactNode;
   notice: string | null;
   noticeTone: 'secondary' | 'danger';
   onlyThis: (() => void) | null;
@@ -362,6 +352,7 @@ function PickerFooter({ sheet, notice, noticeTone, onlyThis, onlyThisDisabled, m
       // FloatingSheet 的操作条是横排的一行：这一块占满它。
       <Column flex={1} minW={0} gap="card-row">
         {notice ? <Text testID="lead-model-notice" size="note" tone={noticeTone}>{notice}</Text> : null}
+        {effortMenu}
         <Row gap="actions">
           {only ? <Box flex={1}>{only}</Box> : null}
           <Box flex={1}>{primary}</Box>
@@ -370,10 +361,107 @@ function PickerFooter({ sheet, notice, noticeTone, onlyThis, onlyThisDisabled, m
     );
   }
   return (
-    <Row items="center" gap="side-item" px="card" py="inset-y">
+    // 菜单打开时向上长（选项在触发块上面），所以这一行按底边对齐：触发块、说明和按钮留在原来的高度。
+    <Row items="flex-end" gap="side-item" px="card" py="inset-y">
+      {effortMenu}
       <Text testID="lead-model-notice" flex={1} minW={0} size="meta" tone={noticeTone} numberOfLines={2}>{notice ?? ''}</Text>
       <Row gap="actions" shrink={0}>{only}{primary}</Row>
     </Row>
+  );
+}
+
+// 键盘也能用（P13.6）：组件库的 Pressable 在 web 上是 div role="button"，Tab 走不到它，Enter 和空格也不触发。
+// 推理强度菜单的触发块和选项自己补上：进 Tab 顺序，Enter 或空格等于点一下，键盘聚焦时一圈强调色的描边。
+function keyboardPress(action: () => void) {
+  return {
+    tabIndex: 0,
+    onKeyDown: (event: { key: string; preventDefault: () => void }) => {
+      if (event.key !== 'Enter' && event.key !== ' ') return;
+      event.preventDefault();
+      action();
+    },
+    focusVisibleStyle: { outlineWidth: 2, outlineStyle: 'solid', outlineColor: 'accent' },
+  } as const;
+}
+
+// 推理强度的菜单（视觉稿方案 C，用户 2026-11-24 定）：底部操作条的左边，和「只这一条」「换成主用」同一区，两种用法都带着它。
+// 平时是一个描边的小触发块「推理 · 现在的强度」；点开在它上面列出这个模型能发出去的强度（目录给的，daemon 已经去掉发不出去的），
+// 第一项「缺省」（不带强度，用服务商的缺省），选中的一行行尾 check 并且 aria-pressed。选了收起。
+// 在同一个浮层里展开（和订阅的账号一样，P2.8 同一时间只开一个浮层）；选项在 DOM 里排在触发块后面，Tab 从触发块走进选项（P13.6）。
+// 选了以后焦点回到触发块。
+function EffortMenu({ sheet, efforts, value, open, onToggle, onPick }: {
+  sheet: boolean;
+  efforts: readonly string[];
+  value: string | null;
+  open: boolean;
+  onToggle: () => void;
+  onPick: (effort: string | null) => void;
+}) {
+  const m = useMessages(leadModelMessages);
+  const trigger = useRef<ComponentRef<typeof Pressable>>(null);
+  const current = value ? m.effortName(value) : m.defaultEffort;
+  const options: Array<string | null> = [null, ...efforts];
+  const pick = (effort: string | null) => {
+    onPick(effort);
+    // 选项收起以后焦点会掉到页面上：放回触发块，键盘接着能用。
+    setTimeout(() => (trigger.current as { focus?: () => void } | null)?.focus?.(), 0);
+  };
+  return (
+    <Box testID="lead-model-effort" flexDirection="column-reverse" gap="nav-item" shrink={0} {...(sheet ? { self: 'stretch' as const } : {})}>
+      <Pressable
+        ref={trigger}
+        testID="lead-model-effort-menu"
+        aria-label={m.effortMenuLabel(current)}
+        aria-expanded={open}
+        feedback="highlight"
+        onPress={onToggle}
+        {...keyboardPress(onToggle)}
+        rounded="md"
+        px="inset-y"
+        py={sheet ? 'row-y' : 'pill-y'}
+        // 手机上点得到的高度至少 44（P13.5，和 ChoiceGroup 的选项一样）。
+        {...(sheet ? { minH: 44, justify: 'center' as const } : {})}
+        borderWidth={1}
+        borderColor="border-input"
+        bg="surface"
+        self="flex-start"
+      >
+        <Row items="center" gap="icon-label">
+          <Text size="label" weight="semibold" numberOfLines={1}>{m.effortMenu(current)}</Text>
+          <Icon name={open ? 'chevron-up' : 'chevron-down'} size={12} color="text-secondary" />
+        </Row>
+      </Pressable>
+      {open ? (
+        <Column testID="lead-model-effort-options" aria-label={m.effortOptions} p="pill-y" gap="nav-item" rounded="md" borderWidth={1} borderColor="border-soft" bg="surface">
+          {options.map((option) => {
+            const chosen = option === value;
+            return (
+              <Pressable
+                key={option ?? 'default'}
+                testID={`lead-model-effort-${option ?? 'default'}`}
+                aria-pressed={chosen}
+                feedback="highlight"
+                rounded="sm"
+                px="inset-y"
+                py={sheet ? 'row-y' : 'pill-y'}
+                // 手机上每一行点得到的高度至少 44（P13.5）。
+                {...(sheet ? { minH: 44, justify: 'center' as const } : {})}
+                bg={chosen ? 'accent-wash' : 'transparent'}
+                onPress={() => pick(option)}
+                {...keyboardPress(() => pick(option))}
+              >
+                <Row items="center" gap="inline-item">
+                  <Text flex={1} minW={0} size="label" weight={chosen ? 'semibold' : 'regular'} tone={chosen ? 'accent' : 'default'} numberOfLines={1}>
+                    {option ? m.effortName(option) : m.defaultEffort}
+                  </Text>
+                  {chosen ? <Icon name="check" size={14} color="accent" accessibilityLabel={m.selected} /> : null}
+                </Row>
+              </Pressable>
+            );
+          })}
+        </Column>
+      ) : null}
+    </Box>
   );
 }
 

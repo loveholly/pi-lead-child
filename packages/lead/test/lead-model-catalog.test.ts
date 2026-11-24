@@ -285,7 +285,7 @@ describe("account groups and image input", () => {
     expect(off.models.every((model) => model.group === null)).toBe(true);
   });
 
-  // #498: the effort levels of a plain catalog are read too. Lead sends them as a request field, not as the id suffix
+  // The effort levels of a plain catalog are read too. Lead sends them as a request field, not as the id suffix
   // (lead-effort-parameter.test.ts).
   it("reads image input, the name, the windows and the effort levels from a plain catalog", async () => {
     const { models } = await leadModelCatalog(magpieConfig(), {}, magpie as typeof fetch);

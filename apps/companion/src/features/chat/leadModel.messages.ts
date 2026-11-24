@@ -12,6 +12,9 @@ export const leadModelMessages = defineMessages({
     inUseLine: (parts: string) => `${parts} · in use`,
     unknownModel: 'No model in use',
     defaultEffort: 'Default',
+    effortMenu: (effort: string) => `Reasoning · ${effort}`,
+    effortMenuLabel: (effort: string) => `Reasoning effort: ${effort}. Open to choose the reasoning effort.`,
+    effortOptions: 'Reasoning effort',
     effortName: (effort: string) => ({
       none: 'None', minimal: 'Minimal', low: 'Low', medium: 'Medium', high: 'High', xhigh: 'Extra high', max: 'Max',
     } as Record<string, string>)[effort] ?? effort,
@@ -65,6 +68,9 @@ export const leadModelMessages = defineMessages({
     inUseLine: (parts) => `${parts} · 正在用`,
     unknownModel: '还没有在用的模型',
     defaultEffort: '缺省',
+    effortMenu: (effort) => `推理 · ${effort}`,
+    effortMenuLabel: (effort) => `推理强度：${effort}，点开选推理强度`,
+    effortOptions: '推理强度',
     effortName: (effort) => ({
       none: '不推理', minimal: '最低', low: '低', medium: '中', high: '高', xhigh: '极高', max: '最高',
     } as Record<string, string>)[effort] ?? effort,

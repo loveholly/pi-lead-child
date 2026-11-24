@@ -392,7 +392,7 @@ export function withLeadModelEffort(spec: string, effort: string | null): string
   return effort ? `${spec}(${effort})` : spec;
 }
 
-// 推理强度作为请求字段发送（magpie 这类不认 (level) 后缀的服务商，工单 #498）。Lead 照旧用带后缀的 id 选模型、写分工、
+// 推理强度作为请求字段发送（magpie 这类不认 (level) 后缀的服务商）。Lead 照旧用带后缀的 id 选模型、写分工、
 // 做「只这一条」，只有发请求的那一步不同：发出的 model 去掉后缀，强度交给 pi 写进这家接口的字段：
 //   anthropic-messages：output_config.effort（pi 的 adaptive thinking，compat.forceAdaptiveThinking）；
 //   openai-completions：reasoning_effort；openai-responses：reasoning.effort。

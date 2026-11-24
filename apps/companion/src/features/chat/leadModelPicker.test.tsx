@@ -132,6 +132,12 @@ async function openFromComposer() {
   await waitFor(() => expect(screen.getByTestId('lead-model-option-openai-codex/gpt-5.5')).toBeTruthy());
 }
 
+// 推理强度在底部操作条左边的菜单里（视觉稿方案 C）：先点开菜单，再点一档。选了菜单收起。
+async function chooseEffort(effort: string) {
+  await act(async () => { fireEvent.click(screen.getByTestId('lead-model-effort-menu')); });
+  await act(async () => { fireEvent.click(screen.getByTestId(`lead-model-effort-${effort}`)); });
+}
+
 const connectionKeys = () => Array.from(screen.getByTestId('lead-model-connection-list').querySelectorAll('[data-testid^="lead-model-connection-"]'))
   .map((element) => element.getAttribute('data-testid')!.slice('lead-model-connection-'.length))
   .filter((key) => key !== 'list');
@@ -194,7 +200,7 @@ describe('the model picker', () => {
     await openFromComposer();
     await act(async () => { fireEvent.click(screen.getByTestId('lead-model-connection-vibeproxy')); });
     await act(async () => { fireEvent.click(screen.getByTestId('lead-model-option-vibeproxy/claude-opus-5-5')); });
-    await act(async () => { fireEvent.click(screen.getByTestId('lead-model-effort-high')); });
+    await chooseEffort('high');
     await act(async () => { fireEvent.click(screen.getByTestId('lead-model-make-primary')); });
     expect(switched).toEqual([{ model: 'vibeproxy/claude-opus-5-5', effort: 'high' }]);
     await waitFor(() => expect(screen.queryByTestId('lead-model-in-use')).toBeNull());
@@ -221,13 +227,85 @@ describe('the model picker', () => {
   });
 });
 
+// 视觉稿方案 C（用户 2026-11-24 定）：推理强度不在头上，在底部操作条左边，和两种用法同一区。
+describe('the reasoning effort menu', () => {
+  it('sits in the action bar, shows the current effort, lists Default and the efforts the model can send, and closes after a pick', async () => {
+    setup();
+    await openFromComposer();
+    // 主用 GPT-5.5 不能选强度：没有菜单，头上也没有强度。
+    expect(screen.queryByTestId('lead-model-effort')).toBeNull();
+    await act(async () => { fireEvent.click(screen.getByTestId('lead-model-connection-vibeproxy')); });
+    await act(async () => { fireEvent.click(screen.getByTestId('lead-model-option-vibeproxy/claude-opus-5-5')); });
+    const menu = screen.getByTestId('lead-model-effort-menu');
+    expect(menu.textContent).toBe('Reasoning · Default');
+    expect(menu.getAttribute('aria-expanded')).toBe('false');
+    expect(screen.getByTestId('lead-model-picker-panel').querySelector('[data-testid="lead-model-effort"]')).toBeTruthy();
+    expect(screen.queryByTestId('lead-model-effort-options')).toBeNull();
+
+    await act(async () => { fireEvent.click(menu); });
+    expect(menu.getAttribute('aria-expanded')).toBe('true');
+    const options = Array.from(screen.getByTestId('lead-model-effort-options').querySelectorAll('[data-testid^="lead-model-effort-"]'))
+      .map((element) => element.textContent);
+    expect(options).toEqual(['Default', 'Low', 'High']);
+    expect(screen.getByTestId('lead-model-effort-default').getAttribute('aria-pressed')).toBe('true');
+    // 选项在 DOM 里排在触发块后面：Tab 从触发块走进选项。
+    expect(menu.compareDocumentPosition(screen.getByTestId('lead-model-effort-low')) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+
+    await act(async () => { fireEvent.click(screen.getByTestId('lead-model-effort-high')); });
+    expect(screen.queryByTestId('lead-model-effort-options')).toBeNull();
+    expect(screen.getByTestId('lead-model-effort-menu').textContent).toBe('Reasoning · High');
+
+    // 换到不能选强度的模型：菜单消失。
+    await act(async () => { fireEvent.click(screen.getByTestId('lead-model-option-vibeproxy/claude-sonnet-5')); });
+    expect(screen.queryByTestId('lead-model-effort')).toBeNull();
+  });
+
+  it('works from the keyboard: the trigger and options are in the Tab order, Enter and Space press them', async () => {
+    setup();
+    await openFromComposer();
+    await act(async () => { fireEvent.click(screen.getByTestId('lead-model-connection-vibeproxy')); });
+    await act(async () => { fireEvent.click(screen.getByTestId('lead-model-option-vibeproxy/claude-opus-5-5')); });
+    const menu = screen.getByTestId('lead-model-effort-menu');
+    expect(menu.getAttribute('tabindex')).toBe('0');
+    await act(async () => { fireEvent.keyDown(menu, { key: 'Enter' }); });
+    expect(screen.getByTestId('lead-model-effort-options')).toBeTruthy();
+    const high = screen.getByTestId('lead-model-effort-high');
+    expect(high.getAttribute('tabindex')).toBe('0');
+    await act(async () => { fireEvent.keyDown(high, { key: ' ' }); });
+    expect(screen.queryByTestId('lead-model-effort-options')).toBeNull();
+    expect(screen.getByTestId('lead-model-effort-menu').textContent).toBe('Reasoning · High');
+  });
+
+  it('goes back to Default, which sends no effort', async () => {
+    const { switched } = setup();
+    await openFromComposer();
+    await act(async () => { fireEvent.click(screen.getByTestId('lead-model-connection-vibeproxy')); });
+    await act(async () => { fireEvent.click(screen.getByTestId('lead-model-option-vibeproxy/claude-opus-5-5')); });
+    await chooseEffort('high');
+    await chooseEffort('default');
+    expect(screen.getByTestId('lead-model-effort-menu').textContent).toBe('Reasoning · Default');
+    await act(async () => { fireEvent.click(screen.getByTestId('lead-model-make-primary')); });
+    expect(switched).toEqual([{ model: 'vibeproxy/claude-opus-5-5', effort: null }]);
+  });
+
+  it('is in the action bar of the phone sheet too', async () => {
+    viewport.wide = false;
+    setup();
+    await openFromComposer();
+    await act(async () => { fireEvent.click(screen.getByTestId('lead-model-section-vibeproxy')); });
+    await act(async () => { fireEvent.click(screen.getByTestId('lead-model-option-vibeproxy/claude-opus-5-5')); });
+    expect(screen.getByTestId('lead-model-effort-menu')).toBeTruthy();
+    expect(screen.getByTestId('lead-model-only-this')).toBeTruthy();
+  });
+});
+
 describe('only this message', () => {
   it('puts a removable chip above the composer and sends the next message once with that model', async () => {
     const { sendChat, switched } = setup();
     await openFromComposer();
     await act(async () => { fireEvent.click(screen.getByTestId('lead-model-connection-vibeproxy')); });
     await act(async () => { fireEvent.click(screen.getByTestId('lead-model-option-vibeproxy/claude-opus-5-5')); });
-    await act(async () => { fireEvent.click(screen.getByTestId('lead-model-effort-high')); });
+    await chooseEffort('high');
     await act(async () => { fireEvent.click(screen.getByTestId('lead-model-only-this')); });
     expect(switched).toEqual([]);
     expect(screen.getByTestId('turn-model-chip').textContent).toContain('Only this message: claude-opus-5-5 · High · vibeproxy');

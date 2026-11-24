@@ -1,4 +1,4 @@
-// Effort as a request field (ticket #498). magpie lists the effort levels of each model in its plain catalog (data[]:
+// Effort as a request field. magpie lists the effort levels of each model in its plain catalog (data[]:
 // reasoning, supported_reasoning_levels) and rejects the (level) model-id suffix that only CLIProxyAPI understands.
 // Lead keeps the suffix in its own model specs (picker, chain, one-turn model) and, for such a provider, sends the model
 // id without it and the effort in the field of the provider's API. A local stub stands in for the gateway: it serves the
