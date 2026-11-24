@@ -12,6 +12,7 @@ export * from "./chat-files.js";
 export * from "./chat-images.js";
 export * from "./chat-quotes.js";
 export * from "./ticket-attachments.js";
+export * from "./review-evidence.js";
 export * from "./checkpoints.js";
 export * from "./companion-inbox.js";
 export * from "./connections.js";

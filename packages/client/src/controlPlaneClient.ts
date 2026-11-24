@@ -209,6 +209,9 @@ import {
   type ChannelImage,
   TicketAttachmentContentSchema,
   TicketAttachmentListSchema,
+  ReviewEvidenceListSchema,
+  type ReviewEvidence,
+  type ReviewEvidenceList,
   type TicketAttachment,
   type TicketAttachmentContent,
   type TicketAttachmentList,
@@ -1407,6 +1410,19 @@ export class ControlPlaneClient {
   // 旧 daemon 没有这个接口（404）时报错，卡上照旧显示文字标记。
   async getChannelImage(fileId: string, signal?: AbortSignal): Promise<ChannelImage> {
     return this.request<ChannelImage>(channelFilePath(fileId), ChannelImageSchema, { signal });
+  }
+
+  // 核查证据（工单 #503，protocol 的 review-evidence.ts）：列表不带内容；旧 daemon 没有这个接口时报错（404）。
+  async getTicketReviewEvidence(ticketId: number, signal?: AbortSignal): Promise<ReviewEvidence[]> {
+    const response = await this.request<ReviewEvidenceList>(`/v1/tickets/${ticketId}/review-evidence`, ReviewEvidenceListSchema, { signal });
+    return response.items;
+  }
+
+  // 一张核查证据的内容（base64），形状和附件的一样。
+  async getTicketReviewEvidenceContent(ticketId: number, evidenceId: string, signal?: AbortSignal): Promise<TicketAttachmentContent> {
+    return this.request<TicketAttachmentContent>(
+      `/v1/tickets/${ticketId}/review-evidence/${encodeURIComponent(evidenceId)}`, TicketAttachmentContentSchema, { signal },
+    );
   }
 
   // 用户发给 Lead 的一张图片（会话快照的 images 里的 id，protocol 的 chat-images.ts）。

@@ -40,6 +40,7 @@ import { SetBusyPlacementRequestSchema } from "./busy-placement.ts";
 import { SetWakePaceRequestSchema } from "./wake-pace.ts";
 import { SetLeadShadowRequestSchema } from "./lead-shadow.ts";
 import { SetBackgroundModelRequestSchema } from "./background-model.ts";
+import { AttachReviewEvidenceRequestSchema } from "./review-evidence.ts";
 import { CompactLeadContextRequestSchema } from "./lead-context.ts";
 import { RuleChangeDecisionSchema } from "./rule-change-confirmations.ts";
 import { SurfaceActionOriginSchema } from "./surface-actions.ts";
@@ -122,6 +123,8 @@ export const ActionPermissionSchema = Type.Union([
 //   agenda_entry  One external entry: mute it or change its lead time. The id is the entry id.
 //   topics  The list of topics (topics.ts, user 2026-11-25): open one. The id is always "lead".
 //   topic  One topic: rename, close (with a conclusion for the main conversation), reopen, set its model. The id is the topic id.
+//   review_attempt  一次已经结束的核查（工单 #503，review-evidence.ts）：把那次核查工作区里的截图补挂成核查证据。
+//     编号是核查员的执行记录编号（attemptId）。
 export const UI_ACTION_TARGET_TYPES = [
   "runtime", "device", "approval", "decision", "channel_card", "channel_conversation", "channel_policy", "channel_handbook", "lead_model", "lead_context",
   "reminder", "workspace", "milestone", "rule_change", "lead_queue", "timer", "timer_request", "follow_up", "reply_style",
@@ -129,6 +132,7 @@ export const UI_ACTION_TARGET_TYPES = [
   "widget_board", "widget", "channel_connection", "channel_subscriptions", "connections", "connection", "skills", "skill", "host_bypass",
   "busy_placement", "wake_pace", "lead_shadow", "background_model", "signal_sources", "signal_source", "agenda_feeds", "agenda_feed", "agenda_entry",
   "topics", "topic",
+  "review_attempt",
 ] as const;
 export type UiActionTargetType = typeof UI_ACTION_TARGET_TYPES[number];
 
@@ -505,6 +509,10 @@ export const UI_ACTION_INPUT_SCHEMAS = {
     // The model of this topic only: { choice: { model, effort } }, or { choice: null } to follow the main conversation.
     set_model: SetTopicModelRequestSchema,
     reopen: ReopenTopicRequestSchema,
+  },
+  review_attempt: {
+    // 把这次核查工作区里的截图补挂成核查证据：不重跑核查，不改交付和核查的结论。
+    attach_evidence: AttachReviewEvidenceRequestSchema,
   },
 } as const satisfies Record<UiActionTargetType, Record<string, TSchema>>;
 

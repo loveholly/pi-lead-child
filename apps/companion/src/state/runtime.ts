@@ -4,6 +4,7 @@ import type {
   ChatImageInput,
   ChatQuoteInput,
   TicketAttachment,
+  ReviewEvidence,
   LeadModelCatalog,
   LeadModelChoice,
   LeadModelSwitchResult,
@@ -243,6 +244,7 @@ export type CompanionTransport = Pick<
   | 'getTicketReviewer' | 'getTicketDeliveries' | 'getTicketUsage'
   | 'listTicketActions' | 'runTicketAction' | 'getTicketAcceptanceCriteria' | 'getTicketExecutionPlan'
   | 'getChatImage' | 'getChatFile' | 'getTicketAttachments' | 'getTicketAttachment' | 'getChannelImage'
+  | 'getTicketReviewEvidence' | 'getTicketReviewEvidenceContent'
   | 'getLeadModels' | 'switchLeadModel' | 'compactLeadContext'
 >>;
 
@@ -597,6 +599,31 @@ export class CompanionStateRuntime {
       if (oldest === undefined) break;
       this.channelImages.delete(oldest);
     }
+    return loading;
+  }
+
+  // 核查证据（工单 #503，GET /v1/tickets/:id/review-evidence）。不缓存，工单变了以后再读一次。旧 daemon 没有这个接口时报错，界面按没有证据画。
+  async getTicketReviewEvidence(ticketId: number, signal?: AbortSignal): Promise<ReviewEvidence[]> {
+    const read = this.dependencies.client.getTicketReviewEvidence;
+    if (typeof read !== 'function') throw new Error('this connection cannot read review evidence');
+    return read.call(this.dependencies.client, ticketId, signal);
+  }
+
+  // 一张核查证据的内容（base64）。挂上以后不变，取过的缓存起来（和附件共用缓存，编号的前缀不同）；取不到时下次再取。
+  loadTicketReviewEvidence(ticketId: number, evidenceId: string): Promise<{ mimeType: string; data: string }> {
+    const key = `${ticketId}:${evidenceId}`;
+    const cached = this.ticketAttachmentContents.get(key);
+    if (cached) return cached;
+    const read = this.dependencies.client.getTicketReviewEvidenceContent;
+    if (typeof read !== 'function') return Promise.reject(new Error('this connection cannot read review evidence'));
+    const loading = read.call(this.dependencies.client, ticketId, evidenceId).then(
+      (content) => ({ mimeType: content.mimeType, data: content.data }),
+      (error: unknown) => {
+        this.ticketAttachmentContents.delete(key);
+        throw error;
+      },
+    );
+    this.ticketAttachmentContents.set(key, loading);
     return loading;
   }
 

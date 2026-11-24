@@ -143,7 +143,11 @@ function ImageViewerBody({
   const chromeStyle = useAnimatedStyle(() => ({ opacity: dragY.value === 0 ? 1 : 0 }));
   const many = items.length > 1;
   const item = items[current];
-  const count = <Text size="label" weight="semibold" tone="inverse" testID={testID ? `${testID}-count` : undefined}>{`${current + 1} / ${items.length}`}</Text>;
+  const count = (
+    <View style={[styles.count, { backgroundColor: palette['ink-raised'] }]}>
+      <Text size="label" weight="semibold" tone="inverse" testID={testID ? `${testID}-count` : undefined}>{`${current + 1} / ${items.length}`}</Text>
+    </View>
+  );
 
   return (
     <Modal transparent visible animationType="fade" statusBarTranslucent navigationBarTranslucent onRequestClose={onClose}>
@@ -208,7 +212,7 @@ function ImageViewerBody({
 
         <Animated.View pointerEvents="box-none" style={[styles.bottom, { bottom: insets.bottom + EDGE }, chromeStyle]}>
           {item?.title || item?.caption ? (
-            <View style={styles.caption} testID={testID ? `${testID}-caption` : undefined}>
+            <View style={[styles.caption, { backgroundColor: palette['ink-raised'] }]} testID={testID ? `${testID}-caption` : undefined}>
               {item.title ? <Text size="label" weight="semibold" tone="inverse" align="center">{item.title}</Text> : null}
               {item.caption ? <Text size="meta" align="center" style={{ color: palette['ink-subtle'] }}>{item.caption}</Text> : null}
             </View>
@@ -429,7 +433,9 @@ const styles = StyleSheet.create({
   side: { position: 'absolute', top: '50%', marginTop: -BUTTON / 2 },
   bottom: { position: 'absolute', left: EDGE, right: EDGE, alignItems: 'center', gap: EDGE },
   dots: { flexDirection: 'row', gap: DOT },
-  caption: { alignItems: 'center', gap: 4, maxWidth: 560 },
+  // 「1 / 3」和图下的说明压在图上：浅色的截图铺满屏幕时白字看不清，所以和按钮一样垫一块 ink-raised 底（工单 #503）。
+  count: { borderRadius: 12, paddingHorizontal: 10, paddingVertical: 4 },
+  caption: { alignItems: 'center', gap: 4, maxWidth: 560, borderRadius: 12, paddingHorizontal: 12, paddingVertical: 8 },
   dot: { width: DOT, height: DOT, borderRadius: DOT / 2 },
   actions: { flexDirection: 'row', gap: 12, justifyContent: 'center' },
   pill: { height: BUTTON, borderRadius: BUTTON / 2, flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 18 },

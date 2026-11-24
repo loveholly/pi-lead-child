@@ -41,6 +41,7 @@ import {
   CHAT_FILES_CAPABILITY,
   CHAT_FILES_INCLUDE,
   TICKET_ATTACHMENT_ID_PATTERN,
+  REVIEW_EVIDENCE_ID_PATTERN,
   CHAT_IMAGES_CAPABILITY,
   CHAT_IMAGES_INCLUDE,
   CHAT_QUOTES_CAPABILITY,
@@ -2966,6 +2967,29 @@ export async function startPairedServer(
           json(req, res, 200, await service().readTicketAttachmentContent(Number(attachmentMatch[1]), id));
         } catch (error) {
           if (error instanceof TicketAttachmentError) throw new HttpError(404, "not_found", "attachment not found");
+          throw error;
+        }
+        return;
+      }
+
+      // 核查证据（工单 #503，protocol 的 review-evidence.ts）：列表和一张图的内容。只读，和附件一样只要 tickets:view。
+      const evidenceListMatch = url.pathname.match(/^\/v1\/tickets\/(\d+)\/review-evidence$/);
+      if (req.method === "GET" && evidenceListMatch) {
+        requireAuth(req, "tickets:view");
+        const items = service().listReviewEvidence(Number(evidenceListMatch[1]));
+        if (!items) throw new HttpError(404, "not_found", "ticket not found");
+        json(req, res, 200, { items });
+        return;
+      }
+      const evidenceMatch = url.pathname.match(/^\/v1\/tickets\/(\d+)\/review-evidence\/([^/]+)$/);
+      if (req.method === "GET" && evidenceMatch) {
+        requireAuth(req, "tickets:view");
+        const id = decodeURIComponent(evidenceMatch[2]!);
+        if (!REVIEW_EVIDENCE_ID_PATTERN.test(id)) throw new HttpError(404, "not_found", "evidence not found");
+        try {
+          json(req, res, 200, await service().readReviewEvidenceContent(Number(evidenceMatch[1]), id));
+        } catch (error) {
+          if (error instanceof TicketAttachmentError) throw new HttpError(404, "not_found", "evidence not found");
           throw error;
         }
         return;

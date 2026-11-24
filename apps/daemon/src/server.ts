@@ -1070,7 +1070,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
   });
 
   // 操作层（engine 的 ui-actions/）用的服务。只建这一个对象：网关的页面入口和 Lead 的工具都拿它，两个入口调的是同一个实例。
-  const uiActionServices: UiActionServices = { runtimeSettings };
+  const uiActionServices: UiActionServices = { runtimeSettings, dataDir: opts.dataDir };
 
   // Lead's model catalog with prices (lead's model-config.ts leadModelCatalog). The provider is asked at most every 30 s:
   // the message box's model picker, the background model (background-model.ts) and Hindsight's automatic slot share it.

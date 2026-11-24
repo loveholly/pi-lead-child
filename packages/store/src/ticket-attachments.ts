@@ -111,13 +111,30 @@ function toAttachment(row: AttachmentRow): TicketAttachment {
   };
 }
 
-/** 附件文件的绝对路径。storage_path 跑出数据目录的 attachments/ 时报错，不去读。 */
-function attachmentPath(dataDir: string, storagePath: string): string {
+/** 附件文件的绝对路径。storage_path 跑出数据目录的 attachments/ 时报错，不去读。核查证据（review-evidence.ts）也用它。 */
+export function attachmentPath(dataDir: string, storagePath: string): string {
   const root = resolve(dataDir, "attachments");
   const path = resolve(dataDir, storagePath);
   const inside = relative(root, path);
   if (!inside || inside.startsWith("..") || inside.includes(`..${sep}`)) throw new Error("ticket attachment path escapes the attachments directory");
   return path;
+}
+
+/**
+ * 把一个文件写进数据目录的 attachments/item-<工单号>/（先写临时文件再改名），返回库里记的相对路径和绝对路径。
+ * 文件名是编号加按类型定的后缀。核查证据（review-evidence.ts）也用它，两者存在同一个地方。
+ */
+export async function writeAttachmentFile(
+  dataDir: string, itemId: number, fileId: string, mimeType: string, data: Uint8Array,
+): Promise<{ storagePath: string; path: string }> {
+  const extension = EXTENSIONS[mimeType] ?? ".txt";
+  const storagePath = ["attachments", `item-${itemId}`, `${fileId}${extension}`].join("/");
+  const path = attachmentPath(dataDir, storagePath);
+  await mkdir(join(dataDir, "attachments", `item-${itemId}`), { recursive: true, mode: 0o700 });
+  const temp = `${path}.tmp-${randomBytes(4).toString("hex")}`;
+  await writeFile(temp, data, { mode: 0o600, flag: "wx" });
+  await rename(temp, path);
+  return { storagePath, path };
 }
 
 /** 一张工单的附件，先挂的在前。 */
@@ -150,14 +167,7 @@ export async function addTicketAttachment(db: Db, dataDir: string, input: Ticket
   }
   const checked = checkTicketAttachment({ name, mimeType: input.mimeType, data: input.data });
   const id = `att_${randomBytes(12).toString("base64url")}`;
-  const extension = EXTENSIONS[checked.mimeType] ?? ".txt";
-  const storagePath = ["attachments", `item-${input.itemId}`, `${id}${extension}`].join("/");
-  const path = attachmentPath(dataDir, storagePath);
-  const dir = join(dataDir, "attachments", `item-${input.itemId}`);
-  await mkdir(dir, { recursive: true, mode: 0o700 });
-  const temp = `${path}.tmp-${randomBytes(4).toString("hex")}`;
-  await writeFile(temp, input.data, { mode: 0o600, flag: "wx" });
-  await rename(temp, path);
+  const { storagePath, path } = await writeAttachmentFile(dataDir, input.itemId, id, checked.mimeType, input.data);
   const createdAt = (input.now ?? new Date()).toISOString();
   const sha256 = createHash("sha256").update(input.data).digest("hex");
   const origin = input.origin;
