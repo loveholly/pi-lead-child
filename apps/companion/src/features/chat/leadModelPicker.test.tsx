@@ -279,8 +279,10 @@ describe('the reasoning effort menu', () => {
     expect(menu.textContent).toBe('Reasoning · Default');
     expect(screen.getByTestId('lead-model-footer').contains(menu)).toBe(true);
     expect(screen.queryByTestId('lead-model-effort-options')).toBeNull();
+    expect(menu.getAttribute('aria-expanded')).toBe('false');
 
     await act(async () => { fireEvent.click(menu); });
+    expect(menu.getAttribute('aria-expanded')).toBe('true');
     const options = Array.from(screen.getByTestId('lead-model-effort-options').querySelectorAll('[data-testid^="lead-model-effort-"]'))
       .map((element) => element.textContent);
     expect(options).toEqual(['Default', 'Low', 'High']);
@@ -290,6 +292,7 @@ describe('the reasoning effort menu', () => {
     await act(async () => { fireEvent.click(screen.getByTestId('lead-model-effort-high')); });
     expect(screen.queryByTestId('lead-model-effort-options')).toBeNull();
     expect(screen.getByTestId('lead-model-effort-menu').textContent).toBe('Reasoning · High');
+    expect(screen.getByTestId('lead-model-effort-menu').getAttribute('aria-expanded')).toBe('false');
 
     // 换到不能选强度的模型：菜单消失。
     await act(async () => { fireEvent.click(screen.getByTestId('lead-model-option-vibeproxy/claude-sonnet-5')); });

@@ -1,5 +1,5 @@
 import {
-  Badge, Box, Button, Column, elevation, FloatingSheet, Icon, PopoverAnchorView, PopoverPanel, Pressable, ProgressBar, Row, ScrollArea,
+  Badge, Box, Button, Column, elevation, FloatingSheet, Icon, isWeb, PopoverAnchorView, PopoverPanel, Pressable, ProgressBar, Row, ScrollArea,
   Spacer, Text, TextField, useBreakpoint, type PopoverAnchor, type PopoverAnchorHandle,
 } from '@pi-lead-child/components';
 import {
@@ -7,7 +7,6 @@ import {
   type LeadModelCatalog, type LeadModelChoice, type LeadModelOption,
 } from '@pi-lead-child/protocol';
 import { useEffect, useMemo, useRef, useState, type ComponentRef, type ReactNode } from 'react';
-import { Platform } from 'react-native';
 
 import { useLocale, useMessages, type Locale } from '@/i18n';
 import { useCompanionRuntime, useControlPlaneStore } from '@/state/CompanionStateProvider';
@@ -394,7 +393,7 @@ function keyboardPress(action: () => void) {
 
 // 推理强度的菜单（视觉稿方案 C，用户 2026-11-24 定）：底部操作条的左边，和「只这一条」「换成主用」同一区，两种用法都带着它。
 // 触发块和右边两颗按钮是同一个 Button（outline、neutral，桌面 sm、手机 lg）：一样高、一样的内边距、字号、字重和圆角
-// （用户 2026-11-24：不要另写一套小号样式）。文字「推理 · 现在的强度」，后面一个箭头。web 上它是 <button>，Tab、Enter、空格都能用。
+// （用户 2026-11-24：不要另写一套小号样式）。文字「推理 · 现在的强度」，后面一个箭头。web 上它是 HTML 的 button 元素，Tab、Enter、空格都能用；aria-expanded 写着菜单开没开。
 // 点开以后，选项是一块向上弹出的浮层：绝对定位在触发块上面，盖住模型列表，不占操作条的高度（用户 2026-11-24：展开时不能把
 // 操作条撑高）。列出这个模型能发出去的强度，第一项「缺省」（不带强度，用服务商的缺省）。只有触发块用按钮的尺寸；选项是列表行：
 // 文字靠左、常规字重，选中的一行 accent-wash 底、accent 字、行尾 check、aria-pressed（用户 2026-11-24）。
@@ -416,8 +415,8 @@ function EffortMenu({ sheet, efforts, value, open, onToggle, onClose, onPick }: 
   const current = value ? m.effortName(value) : m.defaultEffort;
   const options: Array<string | null> = [null, ...efforts];
   const focusTrigger = () => {
-    if (Platform.OS !== 'web' || typeof document === 'undefined') return;
-    // Button 不给 ref：按 testID 找到 web 上的那颗 <button>。
+    if (!isWeb || typeof document === 'undefined') return;
+    // Button 不给 ref：按 testID 找到 web 上的那颗按钮。
     setTimeout(() => (document.querySelector('[data-testid="lead-model-effort-menu"]') as HTMLElement | null)?.focus(), 0);
   };
   const pick = (effort: string | null) => {
@@ -428,7 +427,7 @@ function EffortMenu({ sheet, efforts, value, open, onToggle, onClose, onPick }: 
   // web：菜单开着时，点它外面收起它（这一下照样作用在被点的东西上，P2.5）；Esc 只收起菜单。
   // 在捕获阶段先拿到 Esc 并停住：选择器的 Modal 在 document 上听 keyup，不然 Esc 会把整个选择器关掉。
   useEffect(() => {
-    if (!open || Platform.OS !== 'web' || typeof window === 'undefined') return undefined;
+    if (!open || !isWeb || typeof window === 'undefined') return undefined;
     const inside = (target: EventTarget | null) => {
       const node = container.current as unknown as Node | null;
       return Boolean(node && target instanceof Node && node.contains(target));
@@ -463,6 +462,7 @@ function EffortMenu({ sheet, efforts, value, open, onToggle, onClose, onPick }: 
         size={sheet ? 'lg' : 'sm'}
         icon={open ? 'chevron-up' : 'chevron-down'}
         iconPosition="end"
+        expanded={open}
         onPress={onToggle}
       />
       {open ? (

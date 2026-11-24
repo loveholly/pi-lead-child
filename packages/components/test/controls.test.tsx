@@ -23,6 +23,15 @@ describe('Button', () => {
     expect(onPress).not.toHaveBeenCalled();
     expect(screen.getByTestId('stop').getAttribute('aria-disabled')).toBe('true');
   });
+
+  it('says whether the menu it opens is expanded, and says nothing when it opens none', () => {
+    renderUI(<Button label="推理 · 缺省" expanded={false} testID="closed" />);
+    renderUI(<Button label="推理 · 缺省" expanded testID="open" />);
+    renderUI(<Button label="授权" testID="plain" />);
+    expect(screen.getByTestId('closed').getAttribute('aria-expanded')).toBe('false');
+    expect(screen.getByTestId('open').getAttribute('aria-expanded')).toBe('true');
+    expect(screen.getByTestId('plain').hasAttribute('aria-expanded')).toBe(false);
+  });
 });
 
 describe('IconButton', () => {

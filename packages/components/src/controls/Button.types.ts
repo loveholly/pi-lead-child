@@ -25,6 +25,9 @@ export type ButtonProps = {
   fullWidth?: boolean;
   testID?: string;
   accessibilityLabel?: string;
+  // 这颗按钮打开的菜单现在开着没有（web 上是 aria-expanded）。只有打开菜单的按钮给它。
+  // iOS、Android 的原生按钮不读它，和 accessibilityLabel 一样。
+  expanded?: boolean;
 };
 
 // 只有图标的按钮。label 用作无障碍名称和缺省的 testID。

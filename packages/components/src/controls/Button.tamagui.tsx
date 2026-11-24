@@ -30,7 +30,7 @@ const Frame = styled(View, {
 
 export function TamaguiButton({
   label, onPress, variant, tone, size, shape, icon, iconPosition = 'start', disabled = false, fullWidth = false,
-  testID, accessibilityLabel,
+  testID, accessibilityLabel, expanded,
 }: ButtonProps) {
   const spec = buttonSpec({ variant, tone, size, shape, disabled });
   const iconNode = icon ? <Icon name={icon} size={spec.iconSize} color={spec.text} weight="semibold" /> : null;
@@ -39,6 +39,7 @@ export function TamaguiButton({
       testID={testID}
       aria-label={accessibilityLabel ?? label}
       aria-disabled={disabled || undefined}
+      {...(expanded === undefined ? {} : { 'aria-expanded': expanded })}
       disabled={disabled}
       onPress={disabled ? undefined : onPress}
       h={spec.height}
