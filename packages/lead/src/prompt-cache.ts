@@ -23,9 +23,16 @@
 //    provider can serve the whole prefix from its cache.
 import { convertToLlm, type ExtensionContext, type ExtensionFactory } from "@earendil-works/pi-coding-agent";
 import type { Message } from "@earendil-works/pi-ai";
+import { splitLeadModelEffort } from "./model-config.js";
 
 type AgentMessage = Parameters<typeof convertToLlm>[0][number];
 type ModelRef = { provider: string; id: string; api: string };
+
+// The payload is for another model. A model whose effort goes as a request field (claude-opus-5-5(high) on magpie,
+// model-config.ts leadEffortRequest) sends its id without the suffix: that is still this model.
+function forAnotherModel(payload: Record<string, unknown>, model: Pick<ModelRef, "id">): boolean {
+  return typeof payload.model === "string" && payload.model !== model.id && payload.model !== splitLeadModelEffort(model.id).base;
+}
 
 /** OpenAI documents a 64-character limit for prompt_cache_key; pi-ai clamps to the same length. */
 export const PROMPT_CACHE_KEY_MAX_LENGTH = 64;
@@ -50,7 +57,7 @@ function clampKey(key: string): string {
 export function withPromptCacheKey(payload: unknown, model: Pick<ModelRef, "api" | "id">, sessionId: string | undefined): unknown {
   if (!sessionId || !PROMPT_CACHE_KEY_APIS.has(model.api)) return undefined;
   if (!isRecord(payload) || payload.prompt_cache_key !== undefined) return undefined;
-  if (typeof payload.model === "string" && payload.model !== model.id) return undefined;
+  if (forAnotherModel(payload, model)) return undefined;
   return { ...payload, prompt_cache_key: clampKey(sessionId) };
 }
 
@@ -123,7 +130,7 @@ function withLongTtls(list: unknown): { value: unknown; changed: boolean } {
  */
 export function withLongCacheRetention(payload: unknown, model: Pick<ModelRef, "api" | "id">): unknown {
   if (!isRecord(payload)) return undefined;
-  if (typeof payload.model === "string" && payload.model !== model.id) return undefined;
+  if (forAnotherModel(payload, model)) return undefined;
   let next: Record<string, unknown> = payload;
   let changed = false;
   if (CACHE_CONTROL_APIS.has(model.api)) {

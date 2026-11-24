@@ -39,6 +39,7 @@ import { completeSimple } from "@earendil-works/pi-ai/compat";
 import type { Message } from "@earendil-works/pi-ai";
 import { estimateTokens } from "@pi-lead-child/core";
 import { withPromptCacheKey, type RequestPrefix } from "./prompt-cache.js";
+import { leadEffortRequest } from "./model-config.js";
 
 type CompactionMessage = Parameters<typeof convertToLlm>[0][number];
 type SummaryUsage = Awaited<ReturnType<typeof generateSummaryWithUsage>>["usage"];
@@ -339,7 +340,9 @@ export async function summarizeOnPrefix(input: {
   const complete = input.complete ?? completeSimple;
   let response: Awaited<ReturnType<CompleteFn>>;
   try {
-    response = await complete(model, { messages }, {
+    // This request goes to pi-ai directly, not through the provider: a model whose effort goes as a request field
+    // (magpie, model-config.ts) gets the same id and effort here as in the session's requests.
+    const request = leadEffortRequest(model, {
       maxTokens: input.maxTokens,
       signal: input.signal,
       sessionId: prefix.sessionId,
@@ -348,6 +351,7 @@ export async function summarizeOnPrefix(input: {
       ...(reasoning ? { reasoning: reasoning as never } : {}),
       ...(prefix.promptCacheKey ? { onPayload: (payload: unknown) => withPromptCacheKey(payload, model, prefix.sessionId) } : {}),
     });
+    response = await complete(request.model, { messages }, request.options);
   } catch (error) {
     if (input.signal.aborted) throw new Error("Compaction cancelled");
     throw new PrefixSummaryUnavailable(error instanceof Error ? error.message : String(error));

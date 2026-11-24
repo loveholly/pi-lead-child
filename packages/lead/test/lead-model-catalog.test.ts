@@ -285,11 +285,14 @@ describe("account groups and image input", () => {
     expect(off.models.every((model) => model.group === null)).toBe(true);
   });
 
-  it("reads image input, the name and the windows from a plain catalog, but no effort levels", async () => {
+  // #498: the effort levels of a plain catalog are read too. Lead sends them as a request field, not as the id suffix
+  // (lead-effort-parameter.test.ts).
+  it("reads image input, the name, the windows and the effort levels from a plain catalog", async () => {
     const { models } = await leadModelCatalog(magpieConfig(), {}, magpie as typeof fetch);
     expect(models.find((model) => model.id === "auto/deepseek-flash")).toMatchObject({
-      name: "DeepSeek Flash", input: ["text", "image"], efforts: [], contextWindow: 1_048_576, maxTokens: 393_216,
+      name: "DeepSeek Flash", input: ["text", "image"], efforts: ["low", "high"], contextWindow: 1_048_576, maxTokens: 393_216,
     });
+    expect(models.find((model) => model.id === "deepseek/deepseek-flash")?.efforts).toEqual([]);
     expect(models.find((model) => model.id === "deepseek/deepseek-flash")?.input).toEqual(["text"]);
     expect(models.find((model) => model.id === "bailian/qwen-max")?.input).toEqual(["text"]);
   });

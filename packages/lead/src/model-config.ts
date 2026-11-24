@@ -1,4 +1,6 @@
 import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
+import type { Api, Model, SimpleStreamOptions, ThinkingLevel, ThinkingLevelMap, TranscriptContext } from "@earendil-works/pi-ai";
+import { getApiProvider } from "@earendil-works/pi-ai/compat";
 
 type ProviderConfigInput = Parameters<ModelRuntime["registerProvider"]>[1];
 import {
@@ -218,7 +220,9 @@ export interface LeadCatalogModel {
   // 目录给的显示名。没有时为 null。
   name: string | null;
   input: Array<"text" | "image">;
-  // 可以写在 id 后面的推理强度（vibeproxy 的 (level) 后缀，例如 claude-sonnet-5(high)）。目录没说时是空数组：不能选强度。
+  // 可以写在 id 后面的推理强度（例如 claude-sonnet-5(high)）。目录没说时是空数组：不能选强度。
+  // CLIProxyAPI（有详细目录）：后缀原样发给代理，代理认它。别的服务商（magpie）：Lead 发请求时去掉后缀，
+  // 把强度写进这家接口的字段（effortParameterSupported、leadEffortRequest），所以只列这个字段发得出去的强度。
   efforts: string[];
   defaultEffort: string | null;
   // 目录给的上下文窗口和最大输出（vibeproxy 详细目录的 context_window、max_tokens）。目录没说时为 null。
@@ -388,6 +392,104 @@ export function withLeadModelEffort(spec: string, effort: string | null): string
   return effort ? `${spec}(${effort})` : spec;
 }
 
+// 推理强度作为请求字段发送（magpie 这类不认 (level) 后缀的服务商，工单 #498）。Lead 照旧用带后缀的 id 选模型、写分工、
+// 做「只这一条」，只有发请求的那一步不同：发出的 model 去掉后缀，强度交给 pi 写进这家接口的字段：
+//   anthropic-messages：output_config.effort（pi 的 adaptive thinking，compat.forceAdaptiveThinking）；
+//   openai-completions：reasoning_effort；openai-responses：reasoning.effort。
+// pi 只认这几个强度名（pi-ai 的 THINKING_LEVELS），thinkingLevelMap 把同名的强度原样发出去。目录里别的名字（GPT 的 ultra）
+// pi 发不出去，不列：选了也只会被换成别的强度。
+const PARAMETER_EFFORTS = ["minimal", "low", "medium", "high", "xhigh", "max"] as const satisfies readonly ThinkingLevel[];
+const EFFORT_PARAMETER_APIS: ReadonlySet<OpenAICompatibleApi> = new Set(["anthropic-messages", "openai-completions", "openai-responses"]);
+
+function isParameterEffort(level: string): level is ThinkingLevel {
+  return (PARAMETER_EFFORTS as readonly string[]).includes(level);
+}
+
+/**
+ * Can Lead send an effort to this provider as a request field? Only through an API whose effort field pi writes
+ * (EFFORT_PARAMETER_APIS), and not for a provider that shares its name with one of pi's built-in providers (Lead
+ * replaces the provider's request function to send the field, and a built-in provider has its own). An OpenAI chat
+ * provider whose config turns reasoning_effort off, or picks another thinking format, cannot take it either.
+ */
+export function effortParameterSupported(name: string, provider: Pick<LeadProviderConfig, "api" | "compat">): boolean {
+  const api = provider.api ?? "openai-completions";
+  if (!EFFORT_PARAMETER_APIS.has(api)) return false;
+  if ((getBuiltinProviders() as readonly string[]).includes(name)) return false;
+  if (api === "openai-completions") {
+    const compat = provider.compat ?? {};
+    if (compat.supportsReasoningEffort === false) return false;
+    if (compat.thinkingFormat !== undefined && compat.thinkingFormat !== "openai") return false;
+  }
+  return true;
+}
+
+// pi 的强度表只开这一档：别的强度都标成不支持（null），off 也是，所以 pi 不会把它换成别的强度，也不会发「关掉思考」。
+function singleEffortMap(effort: ThinkingLevel): ThinkingLevelMap {
+  return {
+    off: null,
+    ...Object.fromEntries(PARAMETER_EFFORTS.map((level) => [level, level === effort ? effort : null])),
+  } as ThinkingLevelMap;
+}
+
+/** The effort a registered model sends as a request field, or null when it sends none (no suffix, or the suffix mode). */
+function parameterEffortOf(model: Pick<Model<Api>, "id" | "reasoning" | "thinkingLevelMap">): ThinkingLevel | null {
+  const { effort } = splitLeadModelEffort(model.id);
+  if (!effort || !model.reasoning || !isParameterEffort(effort)) return null;
+  return model.thinkingLevelMap?.[effort] === effort ? effort : null;
+}
+
+/** The effort a request body carries in the field of its API, or null when it carries none. */
+function payloadEffort(api: string, payload: unknown): string | null {
+  if (!isRecord(payload)) return null;
+  const nested = (value: unknown) => (isRecord(value) && typeof value.effort === "string" ? value.effort : null);
+  if (api === "anthropic-messages") return nested(payload.output_config);
+  if (api === "openai-responses") return nested(payload.reasoning);
+  if (api === "openai-completions") {
+    return typeof payload.reasoning_effort === "string" ? payload.reasoning_effort : nested(payload.reasoning);
+  }
+  return null;
+}
+
+/**
+ * The request for a model whose effort goes as a request field (claude-opus-5-5(high) on magpie): the model id without
+ * the suffix, and the effort as pi's reasoning level. Other models come back unchanged. The body is checked after every
+ * payload hook: when it does not carry the chosen effort or carries another model id, the request fails with an error
+ * instead of going out at another effort.
+ */
+export function leadEffortRequest<M extends Model<Api>>(
+  model: M, options: SimpleStreamOptions | undefined,
+): { model: M; options: SimpleStreamOptions | undefined } {
+  const effort = parameterEffortOf(model);
+  if (!effort) return { model, options };
+  const wireId = splitLeadModelEffort(model.id).base;
+  const previous = options?.onPayload;
+  const onPayload: NonNullable<SimpleStreamOptions["onPayload"]> = async (payload, payloadModel) => {
+    const next = (await previous?.(payload, payloadModel)) ?? payload;
+    const sent = payloadEffort(model.api, next);
+    if (sent !== effort) {
+      throw new Error(`Lead could not send the effort ${effort} for ${model.provider}/${wireId} through ${model.api}`
+        + ` (the request carries ${sent ?? "no effort"}); not sending it at another effort.`);
+    }
+    if (isRecord(next) && typeof next.model === "string" && next.model !== wireId) {
+      throw new Error(`Lead would send the model ${next.model} instead of ${wireId} to ${model.provider}; not sending it.`);
+    }
+    return next;
+  };
+  return {
+    model: { ...model, id: wireId },
+    options: { ...options, reasoning: effort, onPayload },
+  };
+}
+
+// The provider's request function when Lead sends efforts as a request field: the same API implementation that pi would
+// call for this provider, with leadEffortRequest in front of it.
+function effortParameterStream(model: Model<Api>, context: TranscriptContext, options?: SimpleStreamOptions) {
+  const api = getApiProvider(model.api);
+  if (!api) throw new Error(`No API provider registered for api: ${model.api}`);
+  const request = leadEffortRequest(model, options);
+  return api.streamSimple(request.model, context, request.options);
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
@@ -443,25 +545,39 @@ function inputKinds(value: unknown): Array<"text" | "image"> | null {
 }
 
 // 普通目录（data[]）的一项里和能力有关的字段。magpie 没有详细目录，把这些写在普通目录里（2026-11-05）：
-// modalities.input（或者 input_modalities）、display_name、context_window、max_output_tokens（或者 max_tokens）。
-// 推理强度不从这里读：Lead 把强度写成 id 后面的 (level) 后缀，只有 CLIProxyAPI 认。
+// modalities.input（或者 input_modalities）、display_name、context_window、max_output_tokens（或者 max_tokens）、
+// 推理强度 supported_reasoning_levels（[{ effort }] 或字符串，没有时读 reasoning_levels）和 default_reasoning_level。
+// reasoning: false 的条目没有强度。强度只在这家服务商能把它作为请求字段发出去时才用（effortParameterSupported）。
 interface PlainCatalogFields {
   input: Array<"text" | "image"> | null;
   name: string | null;
   contextWindow: number | null;
   maxTokens: number | null;
   price: LeadModelPrice | null;
+  efforts: string[];
+  defaultEffort: string | null;
 }
 
 function plainCatalogFields(item: Record<string, unknown>): PlainCatalogFields {
   const modalities = isRecord(item.modalities) ? item.modalities.input : undefined;
+  const reasons = item.reasoning !== false;
+  const levels = stringList(item.supported_reasoning_levels, (level) => (isRecord(level) ? level.effort : level));
   return {
     input: inputKinds(item.input_modalities) ?? inputKinds(modalities),
     name: typeof item.display_name === "string" && item.display_name.trim() ? item.display_name : null,
     contextWindow: positiveInteger(item.context_window),
     maxTokens: positiveInteger(item.max_output_tokens) ?? positiveInteger(item.max_tokens),
     price: catalogPricing(item),
+    efforts: reasons ? (levels.length ? levels : stringList(item.reasoning_levels)) : [],
+    defaultEffort: reasons && typeof item.default_reasoning_level === "string" ? item.default_reasoning_level.trim() || null : null,
   };
+}
+
+// 普通目录的强度里能作为请求字段发出去的那些（PARAMETER_EFFORTS），顺序照目录。缺省强度不在里面时当作没有。
+function parameterEfforts(flat: PlainCatalogFields | undefined): { efforts: string[]; defaultEffort: string | null } {
+  const efforts: string[] = (flat?.efforts ?? []).filter(isParameterEffort);
+  const defaultEffort = flat?.defaultEffort && efforts.includes(flat.defaultEffort) ? flat.defaultEffort : null;
+  return { efforts, defaultEffort };
 }
 
 // 一个 provider 的目录。discover 时先问普通的 OpenAI 目录（id 和 owned_by，拉不到就报错，和以前一样），
@@ -538,9 +654,17 @@ async function providerCatalog(
         if (isRecord(item) && typeof item.slug === "string" && item.visibility !== "hide") details.set(item.slug.trim(), item);
       }
       const capabilities = provider.capabilities ?? "auto";
+      // 强度从哪里读：CLIProxyAPI 的详细目录（后缀发给代理），或者普通目录（作为请求字段发送，这家接口要发得出去）。
+      const plainEfforts = !detailed && effortParameterSupported(name, provider);
       for (const id of uniqueStrings([...owners.keys(), ...details.keys()])) {
         const detail = details.get(id);
         const flat = plain.get(id);
+        const effort = detailed
+          ? {
+            efforts: stringList(detail?.supported_reasoning_levels, (level) => (isRecord(level) ? level.effort : level)),
+            defaultEffort: typeof detail?.default_reasoning_level === "string" ? detail.default_reasoning_level : null,
+          }
+          : plainEfforts ? parameterEfforts(flat) : { efforts: [], defaultEffort: null };
         const detailInput = inputKinds(detail?.input_modalities);
         const fromCatalog = capabilities === "detailed" ? detailInput
           : capabilities === "plain" ? flat?.input ?? null
@@ -552,8 +676,7 @@ async function providerCatalog(
           name: previous?.name ?? (typeof detail?.display_name === "string" ? detail.display_name : flat?.name ?? null),
           // config 写了 input 时以它为准（手动覆盖）；没写时按 capabilities 读目录。
           input: configuredInput.get(id) ?? fromCatalog ?? ["text"],
-          efforts: stringList(detail?.supported_reasoning_levels, (level) => (isRecord(level) ? level.effort : level)),
-          defaultEffort: typeof detail?.default_reasoning_level === "string" ? detail.default_reasoning_level : null,
+          ...effort,
           contextWindow: positiveInteger(detail?.context_window) ?? flat?.contextWindow ?? null,
           maxTokens: positiveInteger(detail?.max_tokens) ?? flat?.maxTokens ?? null,
           created: created.get(id) ?? null,
@@ -655,6 +778,7 @@ export async function registerLeadProviders(
     const modelIds = uniqueStrings([...catalog.models.map((model) => model.id), ...chosen]);
     runtime.registerProvider(name, toProviderConfigInput(
       provider, modelIds, resolveLeadApiKey(provider, env, name), catalog.models, options.maxOutputTokens ?? DEFAULT_MAX_TOKENS,
+      !catalog.info.detailed && effortParameterSupported(name, provider),
     ));
   }
   return notes;
@@ -902,37 +1026,51 @@ function toProviderConfigInput(
   apiKey: string | undefined,
   catalog: readonly LeadCatalogModel[] = [],
   maxOutputTokens: number = DEFAULT_MAX_TOKENS,
+  // 这家的强度作为请求字段发送（effortParameterSupported，不是 CLIProxyAPI）。
+  effortParameter = false,
 ): ProviderConfigInput {
   const configured = new Map((provider.models ?? []).map((model) => [model.id, model]));
   const listed = new Map(catalog.map((model) => [model.id, model]));
+  let sendsEffortParameter = false;
+  const models = modelIds.map((id) => {
+    // 带推理强度后缀的 id 用不带后缀的那个模型的设置和目录信息。
+    const { base, effort } = splitLeadModelEffort(id);
+    const extra = configured.get(id) ?? configured.get(base);
+    const known = listed.get(base);
+    // 强度作为请求字段发送：目录给这个模型列了这个强度时，注册成会思考的模型，pi 的强度表只开这一档；
+    // 发请求时 effortParameterStream 去掉后缀。不带后缀的模型和以前一样，什么强度参数都不发（服务商的缺省）。
+    const parameterEffort = effortParameter && effort && isParameterEffort(effort) && known?.efforts.includes(effort) ? effort : null;
+    if (parameterEffort) sendsEffortParameter = true;
+    const compat = parameterEffort && provider.api === "anthropic-messages"
+      ? { ...provider.compat, forceAdaptiveThinking: true }
+      : provider.compat;
+    return {
+      id,
+      name: extra?.name ?? id,
+      reasoning: parameterEffort ? true : extra?.reasoning ?? false,
+      ...(parameterEffort ? { thinkingLevelMap: singleEffortMap(parameterEffort) } : {}),
+      input: extra?.input ?? known?.input ?? ["text"],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      // config.json 写了窗口时以它为准，没写时用目录的，再没有时用已知的窗口（knownContextWindow）；都没有时按 128K。
+      // 都不超过 LEAD_CONTEXT_WINDOW_LIMIT。
+      contextWindow: Math.min(
+        LEAD_CONTEXT_WINDOW_LIMIT,
+        extra?.contextWindow ?? known?.contextWindow ?? knownContextWindow(base) ?? DEFAULT_CONTEXT_WINDOW,
+      ),
+      // 最大输出按调用方要的（Lead 是 16384），只有目录说的更小时用目录的。
+      maxTokens: extra?.maxTokens ?? Math.min(maxOutputTokens, known?.maxTokens ?? DEFAULT_MAX_TOKENS),
+      ...(compat ? { compat: compat as never } : {}),
+    };
+  });
   return {
     baseUrl: provider.baseUrl,
     api: provider.api,
     apiKey,
     authHeader: provider.authHeader,
     headers: provider.headers,
-    models: modelIds.map((id) => {
-      // 带推理强度后缀的 id 用不带后缀的那个模型的设置和目录信息。
-      const base = splitLeadModelEffort(id).base;
-      const extra = configured.get(id) ?? configured.get(base);
-      const known = listed.get(base);
-      return {
-        id,
-        name: extra?.name ?? id,
-        reasoning: extra?.reasoning ?? false,
-        input: extra?.input ?? known?.input ?? ["text"],
-        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-        // config.json 写了窗口时以它为准，没写时用目录的，再没有时用已知的窗口（knownContextWindow）；都没有时按 128K。
-        // 都不超过 LEAD_CONTEXT_WINDOW_LIMIT。
-        contextWindow: Math.min(
-          LEAD_CONTEXT_WINDOW_LIMIT,
-          extra?.contextWindow ?? known?.contextWindow ?? knownContextWindow(base) ?? DEFAULT_CONTEXT_WINDOW,
-        ),
-        // 最大输出按调用方要的（Lead 是 16384），只有目录说的更小时用目录的。
-        maxTokens: extra?.maxTokens ?? Math.min(maxOutputTokens, known?.maxTokens ?? DEFAULT_MAX_TOKENS),
-        ...(provider.compat ? { compat: provider.compat as never } : {}),
-      };
-    }),
+    // 只在有模型的强度作为请求字段发送时才换掉请求函数；别的服务商照旧走 pi 的。
+    ...(sendsEffortParameter ? { streamSimple: effortParameterStream } : {}),
+    models,
   };
 }
 
