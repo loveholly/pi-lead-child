@@ -168,7 +168,7 @@ export function answersOwnerAsk(input: {
   senderName: string;
   asks: ReadonlyArray<{ at: string; text: string }>;
 }): boolean {
-  if (!input.bot || !input.text.trim() || isPlaceholderText(input.text)) return false;
+  if (!input.bot || !input.text.trim() || isBotStatusLine(input.text)) return false;
   const at = Date.parse(input.at);
   if (Number.isNaN(at)) return false;
   return input.asks.some((ask) => {
@@ -176,6 +176,57 @@ export function answersOwnerAsk(input: {
     if (Number.isNaN(askedAt) || askedAt > at || at - askedAt > ASK_ANSWER_WINDOW_MS) return false;
     return input.audience === "direct" || (input.senderName.trim() !== "" && ask.text.includes(`@${input.senderName}`));
   });
+}
+
+/**
+ * 机器人的状态行（决策边界，纯函数；2026-11-25）：一行、不长，去掉包着它的强调符号（`_` `*` `~`）以后以省略号结尾，
+ * 例如「_Thinking..._」「Searching…」；或者助手署名格式的占位（isPlaceholderText）。认的是格式，不是某一句话。
+ * 它表示正文还在路上，不算回答。认不出的（例如「Thinking」「memory source」这种没有省略号的进度行）由「等机器人停下来」处理
+ * （settledBotAnswer）：进度行很快会被改掉或者删掉，停下来时还留着的才是回答。
+ */
+export function isBotStatusLine(text: string): boolean {
+  const line = text.trim();
+  if (!line || line.includes("\n") || line.length > BOT_STATUS_LINE_MAX) return false;
+  if (isPlaceholderText(line)) return true;
+  const bare = line.replace(/^[_*~]+/, "").replace(/[_*~]+$/, "").trim();
+  return bare.endsWith("…") || bare.endsWith("...");
+}
+
+const BOT_STATUS_LINE_MAX = 80;
+
+/**
+ * 机器人回答你或 Lead 刚问它的话时，要等它安静多久再判断（settledBotAnswer）。2026-11-25：一个机器人在 thread 里跑长任务，
+ * 不停地发进度占位（「206 steps, 54 failed · continued below」「_Thinking..._」），又改又删，间隔最长 42 秒；
+ * 每一次都开了一张卡、叫醒了 Lead 一次。等 60 秒：这样的一串只在它停下来以后判断一次。
+ */
+export const BOT_ANSWER_SETTLE_MS = 60_000;
+
+/** 机器人在一个对话里发的一条消息，按最后的样子（settledBotAnswer 用）：最后一个事件的编号、删了没有、最后的正文。 */
+export interface BotMessageState {
+  seq: number;
+  deleted: boolean;
+  text: string;
+}
+
+/**
+ * 机器人在一个对话里回答你或 Lead 刚问它的话（answersOwnerAsk 认出的候选），现在要不要判断、判断哪一条（决策边界，纯函数）。
+ * 只看结构，不看是哪个机器人：
+ *   - waiting：它最后一次发、改、删消息离现在还不到 settleMs：还在写，等它停下来；
+ *   - none：停下来了，可这一串里的消息都删了，或者只剩空的、状态行（isBotStatusLine）：没有要告诉你的；
+ *   - answer：停下来了，留下来的、有正文的消息里最新的那一条（seq 是它最后一个事件）：当作一条新消息判断一次。
+ * 一串进度占位、编辑和删除因此只判断一次：开一张卡，最多叫醒 Lead 一次。
+ */
+export function settledBotAnswer(input: {
+  now: number;
+  lastActivityAt: number;
+  settleMs: number;
+  messages: ReadonlyArray<BotMessageState>;
+}): { state: "waiting" } | { state: "none" } | { state: "answer"; seq: number } {
+  if (input.now - input.lastActivityAt < input.settleMs) return { state: "waiting" };
+  const kept = input.messages.filter((message) => !message.deleted && message.text.trim() !== "" && !isBotStatusLine(message.text));
+  if (!kept.length) return { state: "none" };
+  const latest = kept.reduce((a, b) => (b.seq > a.seq ? b : a));
+  return { state: "answer", seq: latest.seq };
 }
 
 /**

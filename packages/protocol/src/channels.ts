@@ -45,6 +45,9 @@ export const CHANNEL_EVENT_KINDS = {
   replyNotNeeded: "channel.reply.not_needed",
   // 授权表的决定（落地计划 A5）：按对方的意图，通道做了什么（回表情、代你拒绝、提醒你、代你说一句、要干活、问你、不打扰）。
   authorityDecided: "channel.authority.decided",
+  // 机器人回答你或 Lead 刚问它的话，等它停下来以后定了一次（2026-11-25）：这一串候选里留下来的回答（answerSeq）按新消息判断，
+  // 或者都删了、只剩状态行，什么也不做。through 是这一串最后的候选。
+  botAnswerSettled: "channel.bot_answer.settled",
   // Lead 改选交接说明里的一句（自动代你处理方案 B，用户 2026-10-30 定 D1）：原来选的、改选的、理由和重算的上限。
   situationRepicked: "channel.situation.repicked",
   // 交给 Lead（落地计划 B）：要干活、要打扰你的消息，和信心模型交回的「问你、交给你」，先交给 Lead 决定（B1、B4）；
@@ -352,6 +355,22 @@ export const CHANNEL_KERNEL_EVENT_KINDS: readonly EventKindDefinition[] = [
       summary: Type.String(),
     }),
     description: "别人发来的一条消息，开卡以前授权表判断不打扰用户（例如话题结束了、只是感叹、通知、机器人发的）：没有开卡，只记在「Lead 动态」里。",
+  },
+  {
+    kind: CHANNEL_EVENT_KINDS.botAnswerSettled,
+    sources: ["system"],
+    payload: Type.Object({
+      channel: Type.String({ minLength: 1 }),
+      // 哪个机器人（来源里的编号），和这一串候选里最后一条的事件。
+      senderId: Type.String({ minLength: 1 }),
+      through: Id,
+      // 这一串里有几条候选（发、改的消息）。
+      candidates: Type.Integer({ minimum: 1 }),
+      // 留下来的回答的事件（它的最后一个事件）。都删了、只剩状态行时是 null。
+      answerSeq: Nullable(Id),
+      summary: Type.String(),
+    }),
+    description: "机器人回答用户或助手刚问它的话，停下来以后定了一次：留下来的回答按新消息开卡、交给助手，或者都删了、只是进度占位，什么也不做。",
   },
   {
     kind: CHANNEL_EVENT_KINDS.authorityDecided,

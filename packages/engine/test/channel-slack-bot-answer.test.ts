@@ -6,7 +6,8 @@
 //   - the text of a bot message whose body is only in blocks (markdown, rich_text) or attachments reaches the event;
 //   - an edit that only changes blocks is not dropped, also in a bot's DM that has no lane;
 //   - a bot message with a body that answers a question asked in the same DM or thread within 30 minutes opens a card and
-//     is handed to Lead, even when the intake judges that it needs no reply;
+//     is handed to Lead, even when the intake judges that it needs no reply. It is judged once the bot has been quiet for
+//     BOT_ANSWER_SETTLE_MS (see channel-slack-bot-progress.test.ts for a bot that streams progress);
 //   - every other bot message (nobody asked, asked too long ago, a channel thread where the question did not mention the bot)
 //     is still only recorded.
 // Real SQLite, the real Slack source, fake Slack, a scripted SmartModel, Lead connected as in the daemon. All names are made up.
@@ -15,7 +16,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { tempDir } from "@pi-lead-child/core/testing";
 import { MESSAGE_EVENT_KIND } from "@pi-lead-child/protocol";
 import { getEvent, listChannelCardsForObject, listEvents, openDb, type Db } from "@pi-lead-child/store";
-import { answersOwnerAsk, ASK_ANSWER_WINDOW_MS, ChannelHub, ChannelRegistry, createSlackChannelAdapter } from "../src/index.js";
+import { answersOwnerAsk, ASK_ANSWER_WINDOW_MS, BOT_ANSWER_SETTLE_MS, ChannelHub, ChannelRegistry, createSlackChannelAdapter } from "../src/index.js";
 import { FakeAgentTaskDispatcher, FakeSlack, scriptedSmartModel } from "../testing/index.js";
 
 let db: Db;
@@ -53,6 +54,13 @@ function setup() {
 }
 
 const messageEvents = () => listEvents(db, { kind: MESSAGE_EVENT_KIND });
+
+// The bot has been quiet long enough: the next tick judges its answer.
+async function settle(hub: ChannelHub) {
+  later(BOT_ANSWER_SETTLE_MS);
+  await hub.tick();
+  await hub.idle();
+}
 
 // Lead asks the bot in a thread of the DM with it (send_message on the user's behalf); Slack pushes the message back.
 async function leadAsks(hub: ChannelHub, thread: string) {
@@ -110,8 +118,13 @@ describe("a bot's answer to a question that Lead or the user just asked it", () 
     later(10_000);
     const answer = (await hub.receive("slack", slack.dm("U0ASKBOT", "", { bot: true, thread, blocks: [{ type: "markdown", text: ANSWER }] }))).items[0]!;
     await hub.idle();
+    // Recorded first: the bot may still be writing.
+    expect(getEvent(db, answer.seq!)!.payload).toMatchObject({ text: ANSWER, channelDelivery: "record", answerPending: { replyTarget: { thread_ts: thread } } });
+    expect(messageEvents()).toEqual([]);
 
-    expect(getEvent(db, answer.seq!)!.payload).toMatchObject({ text: ANSWER, answersAsk: true, channelDelivery: "card" });
+    await settle(hub);
+    const settled = listEvents(db, { kind: "slack.dm.received" }).filter((event) => event.payload.answersAsk === true);
+    expect(settled.map((event) => event.payload)).toMatchObject([{ text: ANSWER, answersAsk: true, channelDelivery: "card" }]);
     expect(listChannelCardsForObject(db, answer.objectKey).filter((card) => card.state === "open")).toHaveLength(1);
     expect(messageEvents().map((event) => event.payload.text)).toEqual([ANSWER]);
   });
@@ -131,7 +144,13 @@ describe("a bot's answer to a question that Lead or the user just asked it", () 
     later(8_000);
     const edited = (await hub.receive("slack", slack.edit(placeholder, "", { blocks: [{ type: "markdown", text: ANSWER }] }))).items[0]!;
     await hub.idle();
-    expect(getEvent(db, edited.seq!)!.payload).toMatchObject({ text: ANSWER, answersAsk: true, reopen: true, reopenOf: head.seq });
+    expect(getEvent(db, edited.seq!)!.payload).toMatchObject({ text: ANSWER, channelDelivery: "record", answerPending: {} });
+    expect(messageEvents()).toEqual([]);
+
+    await settle(hub);
+    // Judged as a new message of the kind the placeholder had, with the edited text.
+    const settled = listEvents(db, { kind: "slack.dm.received" }).filter((event) => event.payload.answersAsk === true);
+    expect(settled.map((event) => event.payload)).toMatchObject([{ text: ANSWER, messageId: getEvent(db, head.seq!)!.payload.messageId }]);
     expect(listChannelCardsForObject(db, edited.objectKey).filter((card) => card.state === "open")).toHaveLength(1);
     expect(messageEvents().map((event) => event.payload.text)).toEqual([ANSWER]);
   });
@@ -144,7 +163,9 @@ describe("a bot's answer to a question that Lead or the user just asked it", () 
     later(60_000);
     const answer = (await hub.receive("slack", slack.dm("U0ASKBOT", ANSWER, { bot: true, thread }))).items[0]!;
     await hub.idle();
-    expect(answer.delivery).toBe("card");
+    expect(answer.delivery).toBe("record");
+    await settle(hub);
+    expect(listChannelCardsForObject(db, answer.objectKey)).toHaveLength(1);
     expect(messageEvents()).toHaveLength(1);
   });
 });
@@ -156,6 +177,8 @@ describe("a bot message that nobody asked for", () => {
     await hub.idle();
     expect(item).toMatchObject({ delivery: "record", cardId: null });
     expect(getEvent(db, item.seq!)!.payload).not.toHaveProperty("answersAsk");
+    expect(getEvent(db, item.seq!)!.payload).not.toHaveProperty("answerPending");
+    await settle(hub);
     expect(messageEvents()).toEqual([]);
   });
 
@@ -167,6 +190,8 @@ describe("a bot message that nobody asked for", () => {
     const item = (await hub.receive("slack", slack.dm("U0ASKBOT", ANSWER, { bot: true, thread }))).items[0]!;
     await hub.idle();
     expect(item).toMatchObject({ delivery: "record", cardId: null });
+    await settle(hub);
+    expect(listChannelCardsForObject(db, item.objectKey)).toEqual([]);
     expect(messageEvents()).toEqual([]);
   });
 
@@ -177,6 +202,8 @@ describe("a bot message that nobody asked for", () => {
     const item = (await hub.receive("slack", slack.dm("U0ASKBOT", "Daily digest: 3 new datasets", { bot: true }))).items[0]!;
     await hub.idle();
     expect(item).toMatchObject({ delivery: "record", cardId: null });
+    await settle(hub);
+    expect(listChannelCardsForObject(db, item.objectKey)).toEqual([]);
     expect(messageEvents()).toEqual([]);
   });
 });
@@ -191,6 +218,7 @@ describe("whether a bot message answers a question (inbound.ts, the decision bou
     ["a person's message", { ...base, bot: false }, false],
     ["an empty placeholder", { ...base, text: "  " }, false],
     ["an assistant placeholder", { ...base, text: "Ask Bot (Assistant) is thinking…" }, false],
+    ["a bot status line", { ...base, text: "_Thinking..._" }, false],
     ["no question", { ...base, asks: [] }, false],
     ["a question 31 minutes earlier", { ...base, asks: [asked(31)] }, false],
     ["a question after the message", { ...base, asks: [asked(-1)] }, false],

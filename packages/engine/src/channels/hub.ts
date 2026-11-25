@@ -109,7 +109,8 @@ import {
   buildContextPack, contextParts, repackForText, type BuiltContextPack, type ContextPackDeps, type ContextPackInput, type ContextPackOptions,
 } from "./context-pack.js";
 import {
-  answersOwnerAsk, editMergeOf, externalMessageEvent, isPlaceholderText, mergeEdit, messageCeiling, placeholderBecameText, REOPEN_MAX_AGE_MS, type EditMerge,
+  answersOwnerAsk, BOT_ANSWER_SETTLE_MS, editMergeOf, externalMessageEvent, mergeEdit, messageCeiling, placeholderBecameText, REOPEN_MAX_AGE_MS,
+  settledBotAnswer, type BotMessageState, type EditMerge,
 } from "./inbound.js";
 import { decideByHandbook, type HandbookDecision } from "./handbook-decision.js";
 import { handbookDecisionFor } from "./handbook-suggestions.js";
@@ -191,6 +192,8 @@ export interface ChannelHubOptions {
   noReplyBelow?: number;
   // 还没定开不开卡的消息，收到多久以后由每一拍补上（例如判断时 daemon 重启了）。缺省 60 秒。
   pendingCardGraceMs?: number;
+  // 机器人回答你或 Lead 刚问它的话时，等它安静多久再判断（settleBotAnswers）。缺省 BOT_ANSWER_SETTLE_MS（60 秒）。
+  botAnswerSettleMs?: number;
   replyCheckTimeoutMs?: number;
   // 抽查（落地计划 D2）：信心模型说代你发的，按 rate 的概率照样放到卡上问你。缺省 5%，random 缺省 Math.random（测试里给定）。
   audit?: { rate?: number; random?: () => number };
@@ -442,6 +445,9 @@ export class ChannelHub {
   private readonly pendingCardGraceMs: number;
   // 每个来源扫「还没定开不开卡的消息」从哪个事件以后开始（settleStalePendingCards）：比它早的都定了。启动时是 0，扫一遍以后往前走。
   private readonly pendingScanFrom = new Map<string, number>();
+  private readonly botAnswerSettleMs: number;
+  // 每个来源扫「还在等机器人停下来的回答」从哪个事件以后开始（settleBotAnswers）。启动时是 0，扫一遍以后往前走。
+  private readonly botAnswerScanFrom = new Map<string, number>();
   private readonly sending = new Set<number>();
   private ticking: Promise<void> | null = null;
   // 正在进行的 receive：idle() 等它们。
@@ -483,6 +489,7 @@ export class ChannelHub {
     this.urgencyTimeoutMs = Math.max(options.urgencyTimeoutMs ?? CHANNEL_URGENCY_TIMEOUT_MS, 1);
     this.noReplyBelowOption = options.noReplyBelow === undefined ? undefined : Math.min(Math.max(options.noReplyBelow, 0), 1);
     this.pendingCardGraceMs = Math.max(options.pendingCardGraceMs ?? 60_000, 0);
+    this.botAnswerSettleMs = Math.max(options.botAnswerSettleMs ?? BOT_ANSWER_SETTLE_MS, 0);
     // 插件的种子在登记适配器时才有：这个库打开得更早时，现在同步进去。
     syncSystemStandingOrders(this.db, this.now());
     this.endLegacyReplyMyselfCards();
@@ -730,10 +737,8 @@ export class ChannelHub {
       // 助手按占位判断过不用回、现在正文变了的编辑（reopenOf）和新消息一样问紧急程度，按原来那条消息的类型定投递。
       const reopen = this.reopenOf(adapter.id, item);
       if (item.amends && reopen === null && !getOpenChannelCard(this.db, item.objectKey)) return true;
-      const payload = {
-        ...item.fields, role: item.role, sender: { ...item.sender }, text: item.text, urgent: true,
-        ...(this.answersAsk(adapter.id, item) ? { answersAsk: true } : {}),
-      };
+      // 机器人回答你或 Lead 刚问它的话（answersAsk）这时只记录：等它停下来再判断（settleBotAnswers），那时不问紧急程度。
+      const payload = { ...item.fields, role: item.role, sender: { ...item.sender }, text: item.text, urgent: true };
       return channelDeliveryDecision(channelDeliveryPolicy(this.db, adapter.id), {
         source: adapter.id, kind: reopen?.kind ?? item.kind, entityKey: item.objectKey, payload, rootCause: null,
       }).mode === "record";
@@ -752,7 +757,8 @@ export class ChannelHub {
     return { ready, release };
   }
 
-  private record(adapter: ChannelAdapter, item: ChannelInbound, urgency: ChannelUrgency | null): RecordResult {
+  // settled：机器人回答你或 Lead 刚问它的话，它已经停下来了（settleBotAnswers），这是留下来的那条回答：按新消息开卡、交给 Lead。
+  private record(adapter: ChannelAdapter, item: ChannelInbound, urgency: ChannelUrgency | null, settled = false): RecordResult {
     const db = this.db;
     const base: ChannelReceiveItem = {
       seq: null, inserted: false, kind: item.kind, role: item.role, objectKey: item.objectKey, cardId: null, delivery: null,
@@ -791,8 +797,13 @@ export class ChannelHub {
       ...(urgency ? { urgency: urgency.basis } : {}),
       ...(maybeDuplicateOf !== null ? { maybeDuplicateOf } : {}),
     };
-    // 机器人在回答你或 Lead 刚问它的话（answersOwnerAsk）：投递指令按它开卡，授权表不按「不用回」跳过（answerAction）。
-    if (this.answersAsk(adapter.id, item)) payload.answersAsk = true;
+    // 机器人在回答你或 Lead 刚问它的话（answersOwnerAsk）：先只记录，记下 answerPending，等它停下来（settleBotAnswers，2026-11-25：
+    // 机器人跑长任务时不停地发进度占位、又改又删，每一条都开卡、叫醒 Lead）。停下来以后留下来的那条回答（settled）带 answersAsk：
+    // 投递指令按它开卡，授权表不按「不用回」跳过（answerAction）。
+    if (settled) payload.answersAsk = true;
+    else if (item.role === "message" && this.answersAsk(adapter.id, item)) {
+      payload.answerPending = { at: at.toISOString(), replyTarget: item.replyTarget, fields: item.fields };
+    }
     // 别人发来的消息：先定投递方式，写进事件的 channelDelivery。摘要投递的消息由 06 的「Lead 动态」卡片显示；
     // 会话卡、推送加会话卡的有自己的卡，只记录的不显示：「Lead 动态」不再说一遍（store 的 listLeadActivityEvents）。
     // 助手按占位判断过「不用回」、后来改成了正文：当作新消息再判断一次（reopenOf），投递方式按原来那条消息的类型定。
@@ -815,6 +826,8 @@ export class ChannelHub {
       ? reopen !== null ? { kind: "rejudge" as const, queued: null } : this.editMergeFor(adapter.id, item)
       : null;
     if (decision && merge && merge.kind !== "rejudge") decision = { ...decision, mode: "record" };
+    // 机器人改它已经当回答判断过的消息：只记录，不按新消息再判断（editsSettledAnswer）。
+    if (decision && merge?.kind === "rejudge" && reopen === null && this.editsSettledAnswer(adapter.id, item)) decision = { ...decision, mode: "record" };
     if (item.amends) payload.amends = item.amends;
     if (merge) payload.editMerge = merge.kind;
     // reopen 让常设指令 slack.amendment 不把它压成 record；editMerge 让它成为这条消息新的判断头（editMergeFor），之后的编辑并进来。
@@ -845,7 +858,8 @@ export class ChannelHub {
     if (ambient && decision && !existingLane) {
       return { item: { ...base, seq: event.seq, inserted: true, delivery: decision.mode }, card: null, push: false };
     }
-    const lane = recordChannelLaneMessage(db, {
+    // 停下来以后的回答：道里已经有这条消息（收到时记过）时不再记一遍。
+    const lane = settled && existingLane ? existingLane : recordChannelLaneMessage(db, {
       source: adapter.id, objectKey: item.objectKey, label: item.laneLabel, at,
       message: {
         at: item.occurredAt, seq: event.seq, role: item.role === "message" ? "them" : item.role === "self_reply" ? "me" : "assistant",
@@ -974,10 +988,9 @@ export class ChannelHub {
       if (this.now().getTime() - Date.parse(item.occurredAt) > REOPEN_MAX_AGE_MS) return null;
       const seq = this.judgedHeadSeq(source, item);
       const head = seq === undefined ? undefined : getEvent(this.db, seq);
-      if (!head) return null;
-      const headText = typeof head.payload.text === "string" ? head.payload.text : "";
-      const skipped = head.disposition === "no_action" && head.dispositionDetail?.by === "assistant" && placeholderBecameText(headText, item.text);
-      if (!skipped && !this.botAnswerArrived(source, head, headText, item)) return null;
+      if (!head || head.disposition !== "no_action" || head.dispositionDetail?.by !== "assistant") return null;
+      // 机器人把回答改进只记录过的占位，不在这里重开：等它停下来再判断（settleBotAnswers）。
+      if (!placeholderBecameText(typeof head.payload.text === "string" ? head.payload.text : "", item.text)) return null;
       const answered = this.db.prepare(
         `SELECT 1 FROM events WHERE source = ? AND entity_key = ? AND seq > ? AND json_valid(payload)
            AND json_extract(payload, '$.role') IN ('self_reply', 'echo') LIMIT 1`,
@@ -993,23 +1006,14 @@ export class ChannelHub {
   }
 
   /**
-   * 机器人先发了空的（或者助手格式的）占位、只记录了，现在把回答改了进来，并且是在回答你或 Lead 刚问它的话（2026-11-25）：
-   * 和助手判断过不用回的占位一样，当新消息再判断一次（reopenOf）。占位已经处置过的（例如用户点了忽略）不算。
-   */
-  private botAnswerArrived(source: string, head: EventRecord, headText: string, item: ChannelInbound): boolean {
-    const sender = head.payload.sender as { bot?: unknown } | undefined;
-    if (sender?.bot !== true || head.payload.channelDelivery !== "record" || head.disposition !== null) return false;
-    if (headText.trim() !== "" && !isPlaceholderText(headText)) return false;
-    return this.answersAsk(source, item);
-  }
-
-  /**
    * 这条机器人消息是不是在回答你或 Lead 刚问它的话（inbound.ts 的 answersOwnerAsk）：找同一个对话里最近你本人的话和系统替你发的话。
-   * 读不了库时按「不是」（照旧只记录）。
+   * 删消息不算（它的正文是来源写的「删了一条消息」，不是机器人说的话）。已经当回答判断过的消息（停下来以后记的那条，answersAsk），
+   * 后来的编辑也不算：照普通的编辑处理，有开着的卡时更新卡，不再叫醒 Lead。读不了库时按「不是」（照旧只记录）。
    */
   private answersAsk(source: string, item: ChannelInbound): boolean {
-    if (item.role !== "message" || item.sender.bot !== true || !item.text.trim()) return false;
+    if (item.role !== "message" || item.sender.bot !== true || item.amends === "deleted" || !item.text.trim()) return false;
     try {
+      if (this.editsSettledAnswer(source, item)) return false;
       const rows = this.db.prepare(
         `SELECT occurred_at AS at, json_extract(payload, '$.text') AS text FROM events
          WHERE source = ? AND entity_key = ? AND json_valid(payload) AND json_extract(payload, '$.role') IN ('self_reply', 'echo')
@@ -1023,6 +1027,16 @@ export class ChannelHub {
       this.log(`[channels] ${source}: could not tell whether a bot answered a question in ${item.objectKey}: ${errorText(error)}`);
       return false;
     }
+  }
+
+  /**
+   * 机器人改的是一条已经当回答判断过的消息（停下来以后记的那条，payload.answersAsk）。这样的编辑只记录：不再是候选，
+   * 卡开着时也不按新消息再判断、不再叫醒 Lead（2026-11-25）。
+   */
+  private editsSettledAnswer(source: string, item: ChannelInbound): boolean {
+    if (item.amends !== "edited" || item.sender.bot !== true || !item.messageId) return false;
+    const seq = this.judgedHeadSeq(source, item);
+    return seq !== undefined && getEvent(this.db, seq)?.payload.answersAsk === true;
   }
 
   // 这条消息（来源里的编号）最近的消息事件。没有时是 undefined。
@@ -1116,6 +1130,7 @@ export class ChannelHub {
         const changed = new Set<number>();
         for (const id of this.wakeSnoozed()) changed.add(id);
         for (const id of this.settleStalePendingCards()) changed.add(id);
+        for (const id of await this.settleBotAnswers()) changed.add(id);
         for (const id of await this.retryReplies()) changed.add(id);
         this.cardsChanged([...changed]);
         await this.settleLeftoverNotices();
@@ -4422,6 +4437,144 @@ export class ChannelHub {
     return changed;
   }
 
+  /**
+   * 每一拍：机器人回答你或 Lead 刚问它的话（record 记了 answerPending），等它停下来再判断一次（inbound.ts 的 settledBotAnswer，
+   * 2026-11-25）。按对话和机器人分组：它最后一次发、改、删消息过了 botAnswerSettleMs 以后，这一串里留下来的、有正文的最新一条
+   * 当作新消息记一次（record 的 settled）：开卡、问请求 A、交给 Lead；都删了或者只剩状态行时什么也不做。每组记一个
+   * channel.bot_answer.settled（through 是这一串最后的候选），以后的扫描靠它认出定过的。只看最近一天的候选。
+   */
+  private async settleBotAnswers(): Promise<number[]> {
+    const db = this.db;
+    const changed: number[] = [];
+    for (const adapter of this.options.registry.list()) {
+      const turn = this.reserveTurn();
+      const pushes: ChannelCard[] = [];
+      const followUps: FollowUp[] = [];
+      try {
+        await turn.ready;
+        const now = this.now().getTime();
+        const from = this.botAnswerScanFrom.get(adapter.id) ?? 0;
+        const unsettled = `json_valid(e.payload) AND json_type(e.payload, '$.answerPending') = 'object'
+           AND json_extract(e.payload, '$.answerPending.at') >= ?
+           AND NOT EXISTS (SELECT 1 FROM events m WHERE m.source = 'system' AND m.kind = ? AND m.entity_key = e.entity_key
+             AND json_valid(m.payload) AND json_extract(m.payload, '$.senderId') = json_extract(e.payload, '$.sender.id')
+             AND json_extract(m.payload, '$.through') >= e.seq)`;
+        const dayAgo = new Date(now - DAY_MS).toISOString();
+        const rows = db.prepare(
+          `SELECT e.seq, e.entity_key AS objectKey, json_extract(e.payload, '$.sender.id') AS senderId FROM events e
+           WHERE e.source = ? AND e.seq > ? AND ${unsettled} ORDER BY e.seq LIMIT 500`,
+        ).all(adapter.id, from, dayAgo, CHANNEL_EVENT_KINDS.botAnswerSettled) as Array<{ seq: number; objectKey: string; senderId: unknown }>;
+        const groups = new Map<string, { objectKey: string; senderId: string; seqs: number[] }>();
+        for (const row of rows) {
+          if (typeof row.senderId !== "string") continue;
+          const key = `${row.objectKey}\u0000${row.senderId}`;
+          const group = groups.get(key) ?? { objectKey: row.objectKey, senderId: row.senderId, seqs: [] };
+          group.seqs.push(row.seq);
+          groups.set(key, group);
+        }
+        for (const group of groups.values()) {
+          try {
+            const result = db.transaction(() => this.settleBotAnswer(adapter, group, now))();
+            if (!result) continue;
+            if (result.card) changed.push(result.card.id);
+            if (result.push && result.card) pushes.push(result.card);
+            if (result.followUp) followUps.push(result.followUp);
+          } catch (error) {
+            this.log(`[channels] ${adapter.id}: could not settle a bot's answer in ${group.objectKey}: ${errorText(error)}`);
+          }
+        }
+        // 水位线：最早一条还没定的候选之前的都定了；都定了时走到最新的事件（和 settleStalePendingCards 一样）。
+        const oldest = db.prepare(`SELECT MIN(e.seq) AS seq FROM events e WHERE e.source = ? AND e.seq > ? AND ${unsettled}`)
+          .get(adapter.id, from, dayAgo, CHANNEL_EVENT_KINDS.botAnswerSettled) as { seq: number | null };
+        const latest = db.prepare("SELECT MAX(seq) AS seq FROM events").get() as { seq: number | null };
+        this.botAnswerScanFrom.set(adapter.id, oldest.seq !== null ? oldest.seq - 1 : Math.max(from, latest.seq ?? 0));
+      } catch (error) {
+        this.log(`[channels] ${adapter.id}: could not look for bots' answers to settle: ${errorText(error)}`);
+      } finally {
+        turn.release();
+      }
+      for (const card of pushes) this.pushCard(adapter, card, "new");
+      for (const follow of followUps) {
+        if (follow.kind === "intake") this.later(() => this.runIntake(adapter, follow.cardId, follow.seq), `intake of event #${follow.seq}`);
+      }
+    }
+    return changed;
+  }
+
+  /**
+   * 一个对话里一个机器人的一串候选（settleBotAnswers）：还在写时返回 null，什么也不记；停下来了就记 channel.bot_answer.settled，
+   * 有留下来的回答时按新消息记一次（record 的 settled）。调用方负责事务。
+   */
+  private settleBotAnswer(
+    adapter: ChannelAdapter, group: { objectKey: string; senderId: string; seqs: number[] }, now: number,
+  ): RecordResult | null {
+    const db = this.db;
+    const first = Math.min(...group.seqs);
+    const through = Math.max(...group.seqs);
+    // 这个机器人在这个对话里从第一条候选起发、改、删的消息（按事件的顺序）。
+    const activity = (db.prepare(
+      `SELECT seq FROM events WHERE source = ? AND entity_key = ? AND seq >= ? AND json_valid(payload)
+         AND json_extract(payload, '$.role') = 'message' AND json_extract(payload, '$.sender.id') = ?
+       ORDER BY seq`,
+    ).all(adapter.id, group.objectKey, first, group.senderId) as Array<{ seq: number }>)
+      .map(({ seq }) => getEvent(db, seq)).filter((event): event is EventRecord => event !== undefined);
+    const lastActivityAt = Math.max(...activity.map((event) => Date.parse(event.occurredAt)).filter((at) => !Number.isNaN(at)), 0);
+    // 每条消息最后的样子：候选涉及的消息（按 messageId），看它们最后一个事件。
+    const candidateIds = new Set(activity.filter((event) => group.seqs.includes(event.seq))
+      .map((event) => event.payload.messageId).filter((id): id is string => typeof id === "string"));
+    const lastOf = new Map<string, EventRecord>();
+    for (const event of activity) {
+      const id = event.payload.messageId;
+      if (typeof id === "string" && candidateIds.has(id)) lastOf.set(id, event);
+    }
+    const messages: BotMessageState[] = [...lastOf.values()].map((event) => ({
+      seq: event.seq, deleted: event.payload.amends === "deleted", text: typeof event.payload.text === "string" ? event.payload.text : "",
+    }));
+    const verdict = settledBotAnswer({ now, lastActivityAt, settleMs: this.botAnswerSettleMs, messages });
+    if (verdict.state === "waiting") return null;
+    const answer = verdict.state === "answer" ? getEvent(db, verdict.seq) : undefined;
+    const sender = answer?.payload.sender as { id?: unknown; name?: unknown; trust?: unknown } | undefined;
+    const at = this.now();
+    appendEvent(db, {
+      source: "system", sourceRef: `channel-bot-answer:${group.objectKey}:${group.senderId}:${through}`,
+      kind: CHANNEL_EVENT_KINDS.botAnswerSettled, entityKey: group.objectKey, correlationId: `channel:${group.objectKey}`,
+      level: "record", occurredAt: at.toISOString(),
+      payload: {
+        channel: adapter.id, senderId: group.senderId, through, candidates: group.seqs.length, answerSeq: answer?.seq ?? null,
+        summary: answer
+          ? `机器人停下来了：${group.seqs.length} 条进度和编辑里，留下来的回答按新消息判断一次`
+          : `机器人停下来了：${group.seqs.length} 条进度和编辑都删了或者只是状态行，不用告诉你`,
+      },
+    });
+    if (!answer || typeof sender?.id !== "string" || typeof sender.name !== "string") return null;
+    const messageId = typeof answer.payload.messageId === "string" ? answer.payload.messageId : undefined;
+    // 回复的位置、来源的结构化字段：取这串候选里最后一条记下的（同一个对话，都一样）。
+    const pending = getEvent(db, through)?.payload.answerPending as { replyTarget?: unknown; fields?: unknown } | undefined;
+    const replyTarget = isStringRecord(pending?.replyTarget) ? pending.replyTarget : {};
+    const fields = pending?.fields && typeof pending.fields === "object" ? pending.fields as ChannelInbound["fields"] : {};
+    // 事件类型按这条消息最早的那个事件（例如 thread 里的新消息）：回答是一条新消息，不是编辑。
+    const head = messageId === undefined ? undefined : db.prepare(
+      `SELECT kind FROM events WHERE source = ? AND entity_key = ? AND json_valid(payload) AND json_extract(payload, '$.messageId') = ?
+         AND json_extract(payload, '$.role') = 'message' AND json_extract(payload, '$.amends') IS NULL ORDER BY seq LIMIT 1`,
+    ).get(adapter.id, group.objectKey, messageId) as { kind: string } | undefined;
+    const p = answer.payload;
+    const audience = p.audience === "direct" || p.audience === "group" || p.audience === "channel" ? p.audience : undefined;
+    const replyTo = p.replyTo as { objectKey?: unknown; ref?: unknown } | undefined;
+    const item: ChannelInbound = {
+      deliveryId: `bot-answer:${answer.seq}`, kind: head?.kind ?? answer.kind, role: "message", objectKey: group.objectKey,
+      laneLabel: typeof p.laneLabel === "string" ? p.laneLabel : group.objectKey, occurredAt: answer.occurredAt,
+      sender: {
+        id: sender.id, name: sender.name, trust: sender.trust as ChannelInbound["sender"]["trust"], bot: true,
+      },
+      text: typeof p.text === "string" ? p.text : "", replyTarget, fields,
+      ...(isStringRecord(p.messageRef) ? { messageRef: p.messageRef } : {}),
+      ...(messageId !== undefined ? { messageId } : {}),
+      ...(audience ? { audience } : {}),
+      ...(typeof replyTo?.objectKey === "string" && typeof replyTo.ref === "string" ? { replyTo: { objectKey: replyTo.objectKey, ref: replyTo.ref } } : {}),
+    };
+    return this.record(adapter, item, null, true);
+  }
+
   // 「正在处理」的一句（代查、子 agent 工单都用）：幂等键按卡和消息，回复改写它（落地计划 A3）。返回发送的 promise。
   private sendStatusNotice(adapter: ChannelAdapter, card: ChannelCard, forSeq: number, question: string, playbook: string): Promise<void> {
     const key = `handling:card:${card.id}:seq:${forSeq}`;
@@ -4968,3 +5121,9 @@ export function createChannelHub(options: ChannelHubOptions): ChannelHub {
   return new ChannelHub(options);
 }
 
+
+// 一个只有字符串值的对象（回复的位置、消息的引用）。
+function isStringRecord(value: unknown): value is Record<string, string> {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    && Object.values(value).every((entry) => typeof entry === "string");
+}
