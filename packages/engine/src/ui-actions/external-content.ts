@@ -30,6 +30,21 @@ export interface RuleChangeConfirm {
   externalContent: readonly ExternalContentSource[];
 }
 
+/**
+ * 存进确认卡（rule_change.requested 的 payload，protocol 的 rule-change-confirmations.ts 是严格的契约）的外部内容：
+ * 只留来源和工具，去掉对话（conversation，工单 #533 只给静音的范围用），去重。卡上写的「为什么被拦」只看来源。
+ */
+export function confirmationExternalContent(sources: readonly ExternalContentSource[]): ExternalContentSource[] {
+  const seen = new Set<string>();
+  return sources.flatMap((item): ExternalContentSource[] => {
+    const stored: ExternalContentSource = item.via === "message" ? { via: "message", source: item.source } : { via: "tool", tool: item.tool };
+    const key = stored.via === "message" ? `message:${stored.source}` : `tool:${stored.tool}`;
+    if (seen.has(key)) return [];
+    seen.add(key);
+    return [stored];
+  });
+}
+
 /** 这一轮为什么算外部的一轮（不带句号）。没有记下来源时只说读过外部内容。 */
 export function externalTurnWhy(sources: readonly ExternalContentSource[]): string {
   const messages = [...new Set(sources.flatMap((item) => (item.via === "message" ? [item.source] : [])))];

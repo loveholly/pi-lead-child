@@ -25,7 +25,7 @@ import {
   type Binding, type Db, type EventRecord, type StandingOrderChangeRequest, type StandingOrderPatch,
 } from "@pi-lead-child/store";
 import { AVAILABLE, unavailable } from "../ticket-actions/types.js";
-import type { ExternalContentSource, RuleChangeConfirm, RuleChangeOperation } from "./external-content.js";
+import { confirmationExternalContent, type ExternalContentSource, type RuleChangeConfirm, type RuleChangeOperation } from "./external-content.js";
 import { UiActionError, type UiActionDefinition, type UiActionRun, type UiActionServices, type UiActionTargetKind } from "./types.js";
 import { hostCommandInputOf, runRecordedHostCommand } from "./host-commands.js";
 
@@ -154,7 +154,9 @@ export function requestRuleChangeConfirmation(db: Db, request: RuleChangeConfirm
     const fresh = `rcc_${randomBytes(12).toString("base64url")}`;
     const payload: StoredRequest = {
       id: fresh, operation: request.confirm.operation, label: request.label, name: request.name, where: request.where,
-      reason: request.confirm.reason, why: request.confirm.why, externalContent: [...request.confirm.externalContent],
+      reason: request.confirm.reason, why: request.confirm.why,
+      // 卡的契约是严格的：对话的对象键不存（只给静音的范围用，工单 #533）。
+      externalContent: confirmationExternalContent(request.confirm.externalContent),
       expiresAt: new Date(now.getTime() + RULE_CHANGE_CONFIRMATION_TTL_MS).toISOString(),
     };
     appendEvent(db, {

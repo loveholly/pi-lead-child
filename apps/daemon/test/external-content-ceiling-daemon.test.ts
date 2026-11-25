@@ -140,7 +140,7 @@ describe("rule changes in a turn with external content, through the daemon", () 
         code: "external_turn",
         confirm: {
           operation: { kind: "lead_tool", tool: "propose_standing_order_change", input: { id: "run.transient_retry" } },
-          externalContent: expect.arrayContaining([expect.objectContaining({ via: "message", source: "slack", conversation: "slack:D0MALLORY:main" })]),
+          externalContent: expect.arrayContaining([expect.objectContaining({ via: "message", source: "slack" })]),
         },
       },
     });

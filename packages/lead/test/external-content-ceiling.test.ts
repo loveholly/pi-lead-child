@@ -128,6 +128,14 @@ describe("delivery rules and the authority table in a turn with external content
     expect(getStandingOrder(db, "run.transient_retry")!.version).toBe(1);
   });
 
+  // 回归（工单 #533 的 CI）：daemon 现在记下叫醒这一轮的对话（conversation）。确认卡的契约是严格的，以前带着它存卡失败，
+  // 拒绝里没有 user_action，Lead 发不出确认卡。
+  it("still returns the confirm card when the external message carries its conversation", async () => {
+    origin = { external: true, timer: null, externalBy: [{ via: "message", source: "slack", conversation: "slack:D0MALLORY:main" }] };
+    const refusal = JSON.parse((await proposeRetryOff()).content[0].text);
+    expect(refusal).toMatchObject({ refused: true, refusal: { code: "external_turn", confirm: { id: expect.any(String) } }, user_action: { kind: "confirm_rule_change" } });
+  });
+
   // 回归（场景 12 的前半）：定时器叫醒的一轮，Lead 先读了 Slack 对话，再按安排改投递规则。
   it("refuses it in a timer turn once Lead has read a Slack conversation", async () => {
     origin = { external: true, timer: null, externalBy: [{ via: "tool", tool: "read_channel_conversation" }] };

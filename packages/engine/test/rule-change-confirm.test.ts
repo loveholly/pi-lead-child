@@ -6,9 +6,9 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
 import { tempDir } from "@pi-lead-child/core/testing";
-import { CHANNEL_POLICY_DEFAULTS, UI_ACTION_PERFORMED_KIND } from "@pi-lead-child/protocol";
+import { UI_ACTION_PERFORMED_KIND } from "@pi-lead-child/protocol";
 import {
-  channelPolicy, createItem, createLoopbackBinding, createTurn, getItem, getStandingOrder, listActivities, listEvents, openDb, type Binding, type Db,
+  createItem, createLoopbackBinding, createTurn, getBusyPlacement, getItem, getStandingOrder, listActivities, listEvents, openDb, type Binding, type Db,
 } from "@pi-lead-child/store";
 import { getRuleChangeConfirmation, requestRuleChangeConfirmation, runUiAction } from "../src/index.js";
 
@@ -20,8 +20,11 @@ beforeEach(() => {
   owner = createLoopbackBinding(db, { name: "Mac 网页" }).binding;
 });
 
-const policy = { type: "channel_policy", id: "slack" } as const;
-const tightened = { ...CHANNEL_POLICY_DEFAULTS, autoReply: false };
+// 被拦的改规则操作：设置页的选项「Lead 忙时用户发的消息怎么放」。以前用收紧授权表举例；
+// 工单 #533 起只能收紧的操作（onlyTightens）外部的一轮也能做，不再出卡。
+const policy = { type: "busy_placement", id: "lead" } as const;
+const steer = { placement: "steer" } as const;
+const placement = () => getBusyPlacement(db).placement;
 const external = [{ via: "tool", tool: "read_channel_conversation" }] as const;
 // 定时器叫醒的一轮（不是用户的一轮），读过 Slack 对话。
 const leadInExternalTurn = { kind: "lead", turnId: null, externalContent: external } as const;
@@ -31,7 +34,7 @@ const user = (binding: Binding = owner) => ({
 
 async function refuseTighten(): Promise<any> {
   return runUiAction(db, {
-    target: policy, action: "tighten", input: tightened, reason: "定时器「每天 9 点」的安排：先别自动回复", caller: leadInExternalTurn,
+    target: policy, action: "set", input: steer, reason: "定时器「每天 9 点」的安排：忙时插话", caller: leadInExternalTurn,
   }).catch((error: unknown) => error);
 }
 
@@ -56,14 +59,15 @@ describe("the confirm card for a refused rule change", () => {
     const id = refused.refusal.confirm.id as string;
     expect(id).toMatch(/^rcc_[A-Za-z0-9_-]{8,40}$/);
     expect(refused.refusal.userAction).toEqual({
-      kind: "confirm_rule_change", target: `rule_change:${id}`, title: "确认这一次", reason: "定时器「每天 9 点」的安排：先别自动回复",
+      kind: "confirm_rule_change", target: `rule_change:${id}`, title: "确认这一次", reason: "定时器「每天 9 点」的安排：忙时插话",
     });
     // 卡上的内容都从系统读：要改什么、参数、为什么改（Lead 写的）、为什么被拦（这一轮读过的外部内容）。
     expect(getRuleChangeConfirmation(db, id)).toMatchObject({
-      id, state: "pending", label: "收紧自动代你处理", name: "slack 的自动代你处理", where: "设置 → 消息通道 → 自动代你处理",
-      operation: { kind: "ui_action", target: policy, action: "tighten" },
-      params: expect.arrayContaining([{ name: "autoReply", value: "false" }]),
-      reason: "定时器「每天 9 点」的安排：先别自动回复",
+      id, state: "pending", label: "选 Lead 忙时用户发的消息怎么放", name: "Lead 忙时用户发的消息",
+      where: "设置 → Lead → 身份与风格（Lead 忙时你发的消息）",
+      operation: { kind: "ui_action", target: policy, action: "set" },
+      params: [{ name: "placement", value: "steer" }],
+      reason: "定时器「每天 9 点」的安排：忙时插话",
       why: "这一轮用 read_channel_conversation 读了外部内容",
       externalContent: external,
       resolvedAt: null, resultPreview: null,
@@ -72,7 +76,24 @@ describe("the confirm card for a refused rule change", () => {
     const again = await refuseTighten();
     expect(again.refusal.confirm.id).toBe(id);
     expect(listEvents(db, { kind: "rule_change.requested" })).toHaveLength(1);
-    expect(getStandingOrder(db, "channel.authority")!.version).toBe(1);
+    expect(placement()).toBe("followUp");
+  });
+
+  // 回归（工单 #533 的 CI）：外部的一轮现在带着叫醒它的对话（ExternalContentSource.conversation）。确认卡的契约是严格的，
+  // 以前带着它存卡会失败，拒绝里没有卡（Lead 画 UserAction 时 action 是 undefined）。存卡时只留来源，去重。
+  it("still offers the card when the external sources carry the conversation that woke the turn", async () => {
+    const woke = [
+      { via: "message", source: "slack", conversation: "slack:D0MALLORY:main" },
+      { via: "message", source: "slack", conversation: "slack:C0PROJ:main" },
+      { via: "tool", tool: "read_channel_conversation" },
+    ] as const;
+    const refused: any = await runUiAction(db, {
+      target: policy, action: "set", input: steer, reason: "Mallory 让我忙时插话", caller: { kind: "lead", turnId: null, externalContent: woke },
+    }).catch((error: unknown) => error);
+    expect(refused).toMatchObject({ code: "external_turn", refusal: { userAction: { kind: "confirm_rule_change" }, confirm: { id: expect.any(String) } } });
+    expect(getRuleChangeConfirmation(db, refused.refusal.confirm.id)!.externalContent).toEqual([
+      { via: "message", source: "slack" }, { via: "tool", tool: "read_channel_conversation" },
+    ]);
   });
 
   // 场景 12 的后半（工单 09）：用户点「确认这一次」，只执行这一个操作，参数和卡上的一样。
@@ -80,13 +101,12 @@ describe("the confirm card for a refused rule change", () => {
     const id = (await refuseTighten()).refusal.confirm.id as string;
     const outcome = await resolve(id, "confirm");
     expect(outcome.result).toMatchObject({ confirmation: { id, state: "done", resolvedBy: expect.stringContaining("Mac 网页") } });
-    expect(getStandingOrder(db, "channel.authority")).toMatchObject({ version: 2, author: "lead" });
-    expect(channelPolicy(db, "slack")!.params.autoReply).toBe(false);
+    expect(placement()).toBe("steer");
 
-    // 账本：Lead 代用户做了收紧（凭的是这张确认卡和点它的那台设备），用户确认了这张卡。
+    // 账本：Lead 代用户改了设置（凭的是这张确认卡和点它的那台设备），用户确认了这张卡。
     expect(ledger()).toMatchObject([
       {
-        target: policy, action: "tighten", actor: "lead", authority: "on_behalf", onBehalfOf: "user",
+        target: policy, action: "set", actor: "lead", authority: "on_behalf", onBehalfOf: "user",
         sourceTurnId: `rule_change:${id}`, bindingId: owner.id,
       },
       { target: { type: "rule_change", id }, action: "resolve", actor: "user", authority: "user", detail: { decision: "confirm", state: "done" } },
@@ -101,16 +121,14 @@ describe("the confirm card for a refused rule change", () => {
 
     // 再点一次不会再执行。
     await expect(resolve(id, "confirm")).rejects.toMatchObject({ code: "unavailable" });
-    expect(getStandingOrder(db, "channel.authority")!.version).toBe(2);
-    expect(ledger().filter((payload) => payload.action === "tighten")).toHaveLength(1);
+    expect(ledger().filter((payload) => payload.action === "set")).toHaveLength(1);
   });
 
   it("records 不改, tells Lead, and changes nothing", async () => {
     const id = (await refuseTighten()).refusal.confirm.id as string;
     const outcome = await resolve(id, "decline");
     expect(outcome.result).toMatchObject({ confirmation: { id, state: "declined" } });
-    expect(getStandingOrder(db, "channel.authority")!.version).toBe(1);
-    expect(channelPolicy(db, "slack")!.params.autoReply).toBe(CHANNEL_POLICY_DEFAULTS.autoReply);
+    expect(placement()).toBe("followUp");
     expect(ledger()).toMatchObject([{ target: { type: "rule_change", id }, action: "resolve", actor: "user", detail: { decision: "decline", state: "declined" } }]);
     expect(listEvents(db, { kind: "rule_change.executed" })).toEqual([]);
     expect(inboxFor(id)).toMatchObject([
@@ -130,7 +148,7 @@ describe("the confirm card for a refused rule change", () => {
       });
     }
     expect(getRuleChangeConfirmation(db, id)!.state).toBe("pending");
-    expect(getStandingOrder(db, "channel.authority")!.version).toBe(1);
+    expect(placement()).toBe("followUp");
     expect(ledger()).toEqual([]);
   });
 
@@ -139,7 +157,7 @@ describe("the confirm card for a refused rule change", () => {
     const later = new Date(Date.now() + 25 * 3_600_000);
     expect(getRuleChangeConfirmation(db, id, later)!.state).toBe("expired");
     await expect(resolve(id, "confirm", user(), later)).rejects.toMatchObject({ code: "unavailable" });
-    expect(getStandingOrder(db, "channel.authority")!.version).toBe(1);
+    expect(placement()).toBe("followUp");
   });
 
   it("needs a credential that carries the operation's own scope", async () => {
@@ -147,7 +165,7 @@ describe("the confirm card for a refused rule change", () => {
     const viewer = createLoopbackBinding(db, { name: "只看的设备", scopes: ["tickets:view", "approvals:respond"] }).binding;
     await expect(resolve(id, "confirm", user(viewer))).rejects.toMatchObject({ code: "forbidden" });
     expect(getRuleChangeConfirmation(db, id)!.state).toBe("pending");
-    expect(getStandingOrder(db, "channel.authority")!.version).toBe(1);
+    expect(placement()).toBe("followUp");
   });
 
   // 投递规则（常设指令）还没登记成 UI 动作：确认以后照存下的参数调同一个提议函数，分档照旧。
@@ -177,12 +195,12 @@ describe("the confirm card for a refused rule change", () => {
     const id = (await refuseTighten()).refusal.confirm.id as string;
     const viaCard = { kind: "lead", turnId: null, confirmation: { id, bindingId: owner.id } } as const;
     await expect(runUiAction(db, {
-      target: policy, action: "tighten", input: tightened, reason: "凭确认卡", caller: viaCard,
+      target: policy, action: "set", input: steer, reason: "凭确认卡", caller: viaCard,
     })).rejects.toMatchObject({ code: "forbidden" });
     await expect(runUiAction(db, {
-      target: policy, action: "tighten", input: { ...tightened, autoReply: true }, reason: "凭确认卡", caller: viaCard,
+      target: policy, action: "set", input: { placement: "followUp" }, reason: "凭确认卡", caller: viaCard,
     })).rejects.toMatchObject({ code: "forbidden" });
-    expect(getStandingOrder(db, "channel.authority")!.version).toBe(1);
+    expect(placement()).toBe("followUp");
   });
 });
 
