@@ -160,6 +160,13 @@ export const channelCardMessages = defineMessages({
       },
       messageCount: (n: number) => plural(n, 'message', 'messages'),
       earlier: (n: number) => `${plural(n, 'earlier message', 'earlier messages')}`,
+      // 消息里的图片和文件（工单 #529）。
+      openImage: (name: string) => `Open image ${name}`,
+      imageCount: (n: number) => `[${plural(n, 'image', 'images')}]`,
+      moreImages: (n: number) => `+${n}`,
+      openFile: (name: string) => `Open ${name} in Slack`,
+      openInSlack: 'Open in Slack',
+      openMessage: (at: string) => `Open the message of ${at} in Slack`,
       line: {
         autoReplied: (leadName: string, at: string) => `${leadName} replied for you at ${at}`,
         repliedAsYouSaid: (leadName: string, at: string) => `${leadName} replied at ${at} as you said`,
@@ -344,6 +351,12 @@ export const channelCardMessages = defineMessages({
       },
       messageCount: (n) => `${n} 条`,
       earlier: (n) => `更早的 ${n} 条`,
+      openImage: (name) => `打开图片 ${name}`,
+      imageCount: (n) => `[${n} 张图]`,
+      moreImages: (n) => `+${n}`,
+      openFile: (name) => `在 Slack 打开 ${name}`,
+      openInSlack: '在 Slack 打开',
+      openMessage: (at) => `在 Slack 打开 ${at} 的消息`,
       line: {
         autoReplied: (leadName, at) => `${leadName} ${at} 替你回了`,
         repliedAsYouSaid: (leadName, at) => `${leadName} ${at} 照你的话回了`,

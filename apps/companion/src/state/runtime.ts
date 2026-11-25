@@ -242,7 +242,7 @@ export type CompanionTransport = Pick<
   | 'getOwnerAction' | 'disownOwnerAction'
   | 'getTicketReviewer' | 'getTicketDeliveries' | 'getTicketUsage'
   | 'listTicketActions' | 'runTicketAction' | 'getTicketAcceptanceCriteria' | 'getTicketExecutionPlan'
-  | 'getChatImage' | 'getChatFile' | 'getTicketAttachments' | 'getTicketAttachment'
+  | 'getChatImage' | 'getChatFile' | 'getTicketAttachments' | 'getTicketAttachment' | 'getChannelImage'
   | 'getLeadModels' | 'switchLeadModel' | 'compactLeadContext'
 >>;
 
@@ -298,6 +298,8 @@ export const CONVERSATION_WINDOW_TURNS = 30;
 export const CONVERSATION_PAGE_TURNS = 30;
 // Lead 说完一句以后只取那一轮。一次攒下的轮次比这还多（例如重连后重放了很多事件）时，改取最近一段。
 const MAX_TURN_CORRECTIONS = 20;
+// 外来消息卡的图片最多缓存几张（一张是整张图的 base64，手机上不能无限留）。
+const CHANNEL_IMAGE_CACHE_LIMIT = 40;
 
 export class CompanionStateRuntime {
   readonly control = createControlPlaneStore();
@@ -337,6 +339,8 @@ export class CompanionStateRuntime {
   private chatFiles = new Map<string, Promise<ChatFile>>();
   // 工单附件的内容，按「工单:附件」缓存（附件挂上以后不变）。
   private ticketAttachmentContents = new Map<string, Promise<{ mimeType: string; data: string }>>();
+  // 外来消息卡里的图片（工单 #529），按文件编号缓存（同一个编号的内容不变）。最多留 CHANNEL_IMAGE_CACHE_LIMIT 张，多了丢最早取的。
+  private channelImages = new Map<string, Promise<{ mimeType: string; data: string }>>();
   private leadAvatarImagesLoading = new Set<string>();
   private scopes = new Set<Scope>();
   private capabilities = new Set<string>();
@@ -571,6 +575,28 @@ export class CompanionStateRuntime {
       },
     );
     this.ticketAttachmentContents.set(key, loading);
+    return loading;
+  }
+
+  // 外来消息卡里的一张图片（base64）。取过的缓存起来；取不到时下次再取（卡上先退回文字标记）。
+  loadChannelImage(fileId: string): Promise<{ mimeType: string; data: string }> {
+    const cached = this.channelImages.get(fileId);
+    if (cached) return cached;
+    const read = this.dependencies.client.getChannelImage;
+    if (typeof read !== 'function') return Promise.reject(new Error('this connection cannot read channel images'));
+    const loading = read.call(this.dependencies.client, fileId).then(
+      (image) => ({ mimeType: image.mimeType, data: image.data }),
+      (error: unknown) => {
+        this.channelImages.delete(fileId);
+        throw error;
+      },
+    );
+    this.channelImages.set(fileId, loading);
+    while (this.channelImages.size > CHANNEL_IMAGE_CACHE_LIMIT) {
+      const oldest = this.channelImages.keys().next().value;
+      if (oldest === undefined) break;
+      this.channelImages.delete(oldest);
+    }
     return loading;
   }
 

@@ -68,7 +68,7 @@ export type { FairyMarkProps } from './display/FairyMark';
 export type { IconProps, IconWeight } from './display/Icon';
 export { icons } from './display/icons';
 export type { IconName } from './display/icons';
-export { ImageThumbnail } from './display/ImageThumbnail';
+export { IMAGE_THUMBNAIL_SIZES, ImageThumbnail } from './display/ImageThumbnail';
 export type { ImageThumbnailProps } from './display/ImageThumbnail';
 export { ImagePreview } from './display/ImagePreview';
 export type { ImagePreviewProps } from './display/ImagePreview';

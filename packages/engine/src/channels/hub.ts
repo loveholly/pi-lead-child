@@ -3439,11 +3439,14 @@ export class ChannelHub {
       sender: card.sender,
       excerpt: card.excerpt,
       messageCount: card.messageCount,
-      // 对方在这张卡里说的最近几条（这张卡的 seq 范围里，role 是 them）。
+      // 对方在这张卡里说的最近几条（这张卡的 seq 范围里，role 是 them）。url 是消息在来源里的链接（工单 #529），拿不到时没有。
       recent: (lane?.context ?? [])
         .filter((message) => message.role === "them" && message.seq !== null && message.seq >= card.firstSeq && message.seq <= card.lastSeq)
         .slice(-5)
-        .map((message) => ({ at: message.at, text: redactSecretText(message.text) })),
+        .map((message) => {
+          const url = message.ref ? adapter?.messageLink?.(lane?.objectKey ?? card.objectKey, message.ref) ?? null : null;
+          return { at: message.at, text: redactSecretText(message.text), ...(url ? { url } : {}) };
+        }),
       delivery: card.delivery,
       state: card.state,
       draft: card.draft ? { text: card.draft.text, drafter: card.draft.drafter } : null,

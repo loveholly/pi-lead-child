@@ -17,6 +17,8 @@ const RECOGNIZES_SERVER_TEXT = new Set([
   'features/chat/outagePresentation.ts',
   'features/tickets/activityKeys.ts',
   'features/workspace/model.ts',
+  // 认 daemon 写进 Slack 消息正文的文件标记（工单 #529），不是界面文字。
+  'features/chat/channelAttachments.ts',
   // 测试用的样例数据。
   'features/tickets/ticket66.fixture.ts',
 ]);

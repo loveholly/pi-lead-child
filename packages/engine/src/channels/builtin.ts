@@ -17,7 +17,7 @@ export {
   SLACK_ASSISTANT_EMOJI_DEFAULT, SLACK_EMOJI_SCOPE_MISSING, SLACK_SOURCE, SLACK_TEXT_OBJECT_MAX, slackDisclosureBlocks, slackEmojiCode,
   slackCatchUpWindow, slackChannelList, slackMemoryExclusion, slackMrkdwnFromMarkdown, slackTsOf,
   slackAttachmentsOnly, slackDisplayText, slackMarkupIds, slackMentionsFromNames, slackMessageText, SLACK_SESSION_SECRET_NAMES, slackSecretNames,
-  slackBroadcastOf, slackThreadAddressee,
+  slackBroadcastOf, slackThreadAddressee, slackMessageLink, slackWorkspaceUrl,
 } from "./sources/slack.js";
 export type {
   SlackAddressee, SlackAddresseeBasis, SlackBroadcastRange, SlackChannelOptions, SlackConnection, SlackMemoryExclusion, SlackMentionPerson,

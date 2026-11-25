@@ -1351,6 +1351,7 @@ export * from "./execution-plan.ts";
 export * from "./ticket-actions.ts";
 export * from "./chat-files.ts";
 export * from "./chat-images.ts";
+export * from "./channel-files.ts";
 export * from "./chat-quotes.ts";
 export * from "./ticket-attachments.ts";
 export * from "./lead-models.ts";

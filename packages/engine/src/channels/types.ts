@@ -549,6 +549,11 @@ export interface ChannelAdapter {
    * 编号不对、找不到时抛 ChannelFileNotFoundError；别的原因（缺权限、下载失败）抛错，错误的话是给人看的原因。不支持时没有。
    */
   readFile?(ref: string, options: { maxBytes: number }, context: ChannelAdapterContext): Promise<ChannelFile>;
+  /**
+   * 一条消息在来源里给人点开的链接（例如 Slack 的 permalink），卡上点时间打开（工单 #529）。objectKey 是消息所在的道，
+   * ref 是消息的编号（ChannelInbound.messageId）。拿不到时（还不知道工作区的地址、编号不对）是 null。不支持时没有。
+   */
+  messageLink?(objectKey: string, ref: string): string | null;
   /** 来源里的文档（例如 Slack 的 canvas 和 Markdown 文件）。不支持时没有。建和改是写，writesBlocked 时 hub 不调。 */
   readonly documents?: ChannelDocuments;
   /** 只读：按人名、对话名找可以发消息的对话（Lead 代用户直接发消息，2026-10-23）。不支持时没有。 */

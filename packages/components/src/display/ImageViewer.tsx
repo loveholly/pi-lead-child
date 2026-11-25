@@ -52,6 +52,10 @@ export type ImageViewerProps = {
   initialIndex?: number;
   onClose: () => void;
   actions?: readonly ImageViewerAction[];
+  // 点图片外面的黑底关上（外来消息卡的图片，工单 #529）。缺省不关：点哪里都是放大缩小的手势。
+  closeOnBackdrop?: boolean;
+  // 「1 / 3」写在哪里：缺省在顶上；bottom 写在图下面、操作的上面（外来消息卡：和「在 Slack 打开」放在一起）。
+  counterPosition?: 'top' | 'bottom';
   testID?: string;
 };
 
@@ -61,6 +65,7 @@ export type ImageViewerProps = {
 //     点两下在原大和 2.5 倍之间切换（web 上是双击）。
 //   · 没放大时往下拖，松手时拖得够远或够快就关上，不够就弹回；按返回键（Android）或 Esc（web）也关上。
 //   · 删到一张不剩时自己关上。每张图可以带一行标题和一段小字（例如工单附件的文件名和来源），写在图下面。
+//   · 调用方可以选：点图外面的黑底关上（closeOnBackdrop），「1 / 3」写在下面（counterPosition）。外来消息卡的图片用（工单 #529）。
 // 组件规格：按钮 44、按钮离边 16、圆点 6；底色用 black，按钮用 ink-raised，字和图标用 white。
 const BUTTON = 44;
 const EDGE = 16;
@@ -83,7 +88,9 @@ export function ImageViewer(props: ImageViewerProps) {
   return <ImageViewerBody {...props} />;
 }
 
-function ImageViewerBody({ items, initialIndex = 0, onClose, actions = [], testID }: ImageViewerProps) {
+function ImageViewerBody({
+  items, initialIndex = 0, onClose, actions = [], closeOnBackdrop = false, counterPosition = 'top', testID,
+}: ImageViewerProps) {
   const m = useMessages(displayMessages);
   const insets = useSafeAreaInsets();
   const { width, height } = useBreakpoint();
@@ -136,6 +143,7 @@ function ImageViewerBody({ items, initialIndex = 0, onClose, actions = [], testI
   const chromeStyle = useAnimatedStyle(() => ({ opacity: dragY.value === 0 ? 1 : 0 }));
   const many = items.length > 1;
   const item = items[current];
+  const count = <Text size="label" weight="semibold" tone="inverse" testID={testID ? `${testID}-count` : undefined}>{`${current + 1} / ${items.length}`}</Text>;
 
   return (
     <Modal transparent visible animationType="fade" statusBarTranslucent navigationBarTranslucent onRequestClose={onClose}>
@@ -168,8 +176,10 @@ function ImageViewerBody({ items, initialIndex = 0, onClose, actions = [], testI
               active={pageIndex === current}
               dragY={dragY}
               failedLabel={m.imageFailed}
+              closeLabel={m.close}
               onZoomChange={setZoomed}
               onDismiss={onClose}
+              closeOnBackdrop={closeOnBackdrop}
               testID={testID ? `${testID}-page-${pageIndex}` : undefined}
             />
           ))}
@@ -177,7 +187,7 @@ function ImageViewerBody({ items, initialIndex = 0, onClose, actions = [], testI
 
         <Animated.View pointerEvents="box-none" style={[styles.top, { top: insets.top + EDGE }, chromeStyle]}>
           <GlassButton testID={testID ? `${testID}-close` : undefined} icon="close" label={m.close} onPress={onClose} />
-          {many ? <Text size="label" weight="semibold" tone="inverse" testID={testID ? `${testID}-count` : undefined}>{`${current + 1} / ${items.length}`}</Text> : null}
+          {many && counterPosition === 'top' ? count : null}
           <View style={styles.spacer} />
         </Animated.View>
 
@@ -210,6 +220,7 @@ function ImageViewerBody({ items, initialIndex = 0, onClose, actions = [], testI
               ))}
             </View>
           ) : null}
+          {many && counterPosition === 'bottom' ? count : null}
           {actions.length ? (
             <View style={styles.actions}>
               {actions.map((action) => (
@@ -242,15 +253,17 @@ function GlassButton({ icon, label, onPress, testID }: { icon: IconName; label: 
 }
 
 // 一页：一张图，可以捏合放大、拖着看、点两下切换大小；没放大时往下拖关上。
-function ZoomablePage({ item, width, height, active, dragY, failedLabel, onZoomChange, onDismiss, testID }: {
+function ZoomablePage({ item, width, height, active, dragY, failedLabel, closeLabel, onZoomChange, onDismiss, closeOnBackdrop, testID }: {
   item: ImageViewerItem;
   width: number;
   height: number;
   active: boolean;
   dragY: SharedValue<number>;
   failedLabel: string;
+  closeLabel: string;
   onZoomChange: (zoomed: boolean) => void;
   onDismiss: () => void;
+  closeOnBackdrop: boolean;
   testID: string | undefined;
 }) {
   const scale = useSharedValue(1);
@@ -381,9 +394,21 @@ function ZoomablePage({ item, width, height, active, dragY, failedLabel, onZoomC
 
   return (
     <View testID={testID} style={{ width, height }} {...pan.panHandlers}>
-      <Pressable aria-label={item.label} feedback="none" cursor="zoom-in" onPress={onTap} style={StyleSheet.absoluteFill}>
-        <Animated.View style={[StyleSheet.absoluteFill, styles.center, imageStyle]}>
-          {item.uri ? (
+      {/* closeOnBackdrop：外面一层点了关上，图片自己一层点了放大缩小（里面的先接到点击）。 */}
+      <Pressable
+        aria-label={closeOnBackdrop ? closeLabel : item.label}
+        feedback="none"
+        cursor={closeOnBackdrop ? 'default' : 'zoom-in'}
+        onPress={closeOnBackdrop ? () => callbacks.current.onDismiss() : onTap}
+        style={StyleSheet.absoluteFill}
+        testID={testID ? `${testID}-backdrop` : undefined}
+      >
+        <Animated.View pointerEvents={closeOnBackdrop ? 'box-none' : 'auto'} style={[StyleSheet.absoluteFill, styles.center, imageStyle]}>
+          {item.uri && closeOnBackdrop ? (
+            <Pressable aria-label={item.label} feedback="none" cursor="zoom-in" onPress={onTap} testID={testID ? `${testID}-image` : undefined}>
+              <Image source={{ uri: item.uri }} resizeMode="contain" accessibilityIgnoresInvertColors style={box} />
+            </Pressable>
+          ) : item.uri ? (
             <Image source={{ uri: item.uri }} resizeMode="contain" accessibilityIgnoresInvertColors style={box} />
           ) : item.failed ? (
             <Icon name="error-outline" size={24} color="ink-muted" accessibilityLabel={failedLabel} />

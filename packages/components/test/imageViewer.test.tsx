@@ -70,4 +70,37 @@ describe('ImageViewer', () => {
     fireEvent.click(screen.getByTestId('viewer-action-remove'));
     expect(onClose).toHaveBeenCalled();
   });
+
+  // 外来消息卡的图片（工单 #529）：点图外面的黑底关上，点图片本身不关；「1 / 3」写在下面、操作的上面。
+  it('closes on the backdrop but not on the image when asked, and can put the counter at the bottom', () => {
+    const onClose = vi.fn();
+    renderUI(
+      <ImageViewer
+        testID="viewer"
+        open
+        items={items.slice(0, 2)}
+        onClose={onClose}
+        closeOnBackdrop
+        counterPosition="bottom"
+        actions={[{ id: 'open', label: 'Open in Slack', icon: 'arrow-up-right', onPress: () => {} }]}
+      />,
+    );
+    fireEvent.click(screen.getByTestId('viewer-page-0-image'));
+    expect(onClose).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByTestId('viewer-page-0-backdrop'));
+    expect(onClose).toHaveBeenCalledTimes(1);
+    const count = screen.getByTestId('viewer-count');
+    expect(count.textContent).toBe('1 / 2');
+    // 计数在操作的前面（同一个底部区域里）。
+    const action = screen.getByTestId('viewer-action-open');
+    expect(count.compareDocumentPosition(action) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it('keeps tapping anywhere as the zoom gesture by default', () => {
+    const onClose = vi.fn();
+    renderUI(<ImageViewer testID="viewer" open items={items.slice(0, 2)} onClose={onClose} />);
+    fireEvent.click(screen.getByTestId('viewer-page-0-backdrop'));
+    expect(onClose).not.toHaveBeenCalled();
+    expect(screen.queryByTestId('viewer-page-0-image')).toBeNull();
+  });
 });

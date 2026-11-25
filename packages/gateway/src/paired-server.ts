@@ -2210,7 +2210,7 @@ export async function startPairedServer(
       // Lead 代你回复走同一个函数（用户 2026-10-23）。账本和卡上的 by 带上 binding 号，理由同常设指令。
       if (await handleChannelRoute({
         req, res, url, service: bridge.channels,
-        json: (status, value) => json(req, res, status, value),
+        json: (status, value, headers) => json(req, res, status, value, headers),
         readBody: async () => parseJson(await readBody(req, maxBodyBytes)) ?? {},
         requireAuth: (scope) => { requireAuth(req, scope); },
         perform: async (cardId, action, input, scope) => {

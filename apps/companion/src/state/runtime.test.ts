@@ -983,6 +983,24 @@ describe('CompanionStateRuntime', () => {
     expect(getChatFile).toHaveBeenCalledTimes(2);
   });
 
+  // 外来消息卡里的图片（工单 #529）：同一个文件编号只取一次，取不到的下次再取；缓存有上限，多了丢最早取的。
+  it('loads a channel image by file id once, again after a failure, and keeps a bounded cache', async () => {
+    const getChannelImage = vi.fn(async (fileId: string) => ({ id: fileId, name: 'a.png', mimeType: 'image/png' as const, data: 'AAAA' }));
+    getChannelImage.mockRejectedValueOnce(new Error('offline'));
+    const runtime = createCompanionStateRuntime({ client: transport({ getChannelImage }), credentials: credentialStore(), scheduler: scheduler() });
+
+    await expect(runtime.loadChannelImage('slack:F0A')).rejects.toThrow('offline');
+    await expect(runtime.loadChannelImage('slack:F0A')).resolves.toEqual({ mimeType: 'image/png', data: 'AAAA' });
+    await expect(runtime.loadChannelImage('slack:F0A')).resolves.toEqual({ mimeType: 'image/png', data: 'AAAA' });
+    expect(getChannelImage).toHaveBeenCalledTimes(2);
+    for (let index = 0; index < 40; index++) await runtime.loadChannelImage(`slack:F0N${index}`);
+    expect(getChannelImage).toHaveBeenCalledTimes(42);
+    // 最早取的那张被挤掉了，再要时重新取；最近的还在缓存里。
+    await runtime.loadChannelImage('slack:F0A');
+    await runtime.loadChannelImage('slack:F0N39');
+    expect(getChannelImage).toHaveBeenCalledTimes(43);
+  });
+
   it('does not let an old chat command repopulate state after forget', async () => {
     let resolveCommand!: (value: { turnId: string }) => void;
     const command = new Promise<{ turnId: string }>((resolve) => { resolveCommand = resolve; });

@@ -7140,7 +7140,14 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
         // 外部通道的凭据（设置页「消息通道」）。没有通道时缺席：路由回 503。
         ...(startedChannels ? { channelSettings } : {}),
         // 外部来源的会话卡（工单 11）：卡在通道的 hub 里。卡上的动作经操作层（uiActionServices.channelCards）。
-        ...(channelHub ? { channels: { list: (limit: number) => channelHub!.listCards(limit) } } : {}),
+        // 卡里的图片（工单 #529）：和 Lead 的 read_channel_file 走同一个 readFile；只取收到过的消息里出现过的文件。
+        ...(channelHub ? {
+          channels: {
+            list: (limit: number) => channelHub!.listCards(limit),
+            readFile: (fileId: string, maxBytes: number) => channelHub!.readFile(fileId, maxBytes),
+            fileKnown: (fileId: string) => channelHub!.fileOrigin(fileId) !== null,
+          },
+        } : {}),
         // Lead 的形象（设置页「身份与风格 → 形象」）：配置的 Slack 署名 emoji，和设置页的 Slack 预览（问通道 hub）。
         leadAvatar: {
           configSlackEmoji,

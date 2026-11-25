@@ -203,6 +203,10 @@ import {
   CONVERSATION_INTERRUPTED_INCLUDE,
   CHAT_PLACEMENT_CAPABILITY,
   ChatImageSchema,
+  CHANNEL_CARDS_INCLUDE_LINKS,
+  ChannelImageSchema,
+  channelFilePath,
+  type ChannelImage,
   TicketAttachmentContentSchema,
   TicketAttachmentListSchema,
   type TicketAttachment,
@@ -1215,7 +1219,8 @@ export class ControlPlaneClient {
   // 外部来源的会话卡（工单 11）。旧 daemon 没有这个路由（404）时返回空表。
   async getChannelCards(signal?: AbortSignal): Promise<ChannelCardDto[]> {
     try {
-      const payload = await this.request<ChannelCardListResponse>('/v1/channels/cards', ChannelCardListResponseSchema, { signal });
+      // include=links：卡上每条消息带 Slack 链接（工单 #529）。旧 daemon 不认这个参数，照旧回卡。
+      const payload = await this.request<ChannelCardListResponse>(`/v1/channels/cards?include=${CHANNEL_CARDS_INCLUDE_LINKS}`, ChannelCardListResponseSchema, { signal });
       return payload.items;
     } catch (error) {
       if (error instanceof ControlPlaneClientError && error.status === 404) return [];
@@ -1228,7 +1233,7 @@ export class ControlPlaneClient {
   async actOnChannelCard(
     cardId: number, action: ChannelCardAction, expectedVersion?: number, text?: string, signal?: AbortSignal,
   ): Promise<ChannelCardDto> {
-    const payload = await this.request<ChannelCardActionResponse>(`/v1/channels/cards/${cardId}/actions`, ChannelCardActionResponseSchema, {
+    const payload = await this.request<ChannelCardActionResponse>(`/v1/channels/cards/${cardId}/actions?include=${CHANNEL_CARDS_INCLUDE_LINKS}`, ChannelCardActionResponseSchema, {
       method: 'POST', headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
         action, ...(expectedVersion === undefined ? {} : { expectedVersion }), ...(text === undefined ? {} : { text }),
@@ -1396,6 +1401,12 @@ export class ControlPlaneClient {
     return this.request<TicketAttachmentContent>(
       `/v1/tickets/${ticketId}/attachments/${encodeURIComponent(attachmentId)}`, TicketAttachmentContentSchema, { signal },
     );
+  }
+
+  // 外来消息卡里的一张图片（工单 #529，protocol 的 channel-files.ts）：fileId 是正文里图片标记的文件编号（slack:F…）。
+  // 旧 daemon 没有这个接口（404）时报错，卡上照旧显示文字标记。
+  async getChannelImage(fileId: string, signal?: AbortSignal): Promise<ChannelImage> {
+    return this.request<ChannelImage>(channelFilePath(fileId), ChannelImageSchema, { signal });
   }
 
   // 用户发给 Lead 的一张图片（会话快照的 images 里的 id，protocol 的 chat-images.ts）。

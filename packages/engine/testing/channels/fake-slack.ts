@@ -526,7 +526,7 @@ export class FakeSlack {
     if (token === this.botToken) {
       if (method === "auth.test") {
         return {
-          ok: true, user_id: "U0BOT", user: "assistant-bot", team_id: this.teamId, team: "Home", bot_id: "B0BOT",
+          ok: true, url: FAKE_SLACK_WORKSPACE_URL, user_id: "U0BOT", user: "assistant-bot", team_id: this.teamId, team: "Home", bot_id: "B0BOT",
           response_metadata: { scopes: ["chat:write", "channels:history"] },
         };
       }
@@ -546,7 +546,7 @@ export class FakeSlack {
     switch (method) {
       case "auth.test":
         return {
-          ok: true, user_id: this.self.id, user: "me", team_id: this.teamId, team: "Home",
+          ok: true, url: FAKE_SLACK_WORKSPACE_URL, user_id: this.self.id, user: "me", team_id: this.teamId, team: "Home",
           response_metadata: { scopes: [...this.scopes] },
         };
       case "files.info": {

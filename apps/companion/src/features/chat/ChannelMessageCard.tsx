@@ -20,6 +20,11 @@ import {
   type ChannelLookupView, type ChannelReplyTrackView,
 } from './channelCard';
 import { channelCardMessages } from './channelCard.messages';
+import { channelMessageParts, channelMessageText, type ChannelImageRef, type ChannelMessageParts } from './channelAttachments';
+import {
+  ChannelFileChip, ChannelImagePreview, ChannelMessageTime, ChannelThumbs, failedImages, useChannelImages,
+  type ChannelImageLoader, type ChannelImageState,
+} from './ChannelMessageMedia';
 import { QuoteSource } from './QuoteSource';
 import { MarkdownMessage } from './MarkdownMessage';
 import { slackPlainText, slackToMarkdown } from './slackMarkdown';
@@ -254,7 +259,7 @@ function LookupSection({ id, lookup, reply, onOpenTicket }: {
 //   改一下再发：草稿框原地变成输入框。已发出：框里是发出的原文，加「已发出」。撤回窗口里只剩「撤回 还剩 4:32」。
 //   结束、也没有按钮的卡收成一行（模式「结束行」），点开看全部。
 // 不再用卡片左边的色条（主题 C-18）。数据和按钮的判断还是 channelCard.ts。
-export function ChannelMessageCard({ card, onAction, onOpenTicket, now, leadStuckDetail = null, leadName: leadNameProp, inPanel }: {
+export function ChannelMessageCard({ card, onAction, onOpenTicket, now, leadStuckDetail = null, leadName: leadNameProp, inPanel, loadImage }: {
   card: ChannelCardDto;
   // text：「改一下再发」时用户写的文字（send_edited）。别的动作不带。
   onAction: (action: ChannelCardAction, text?: string) => Promise<void>;
@@ -268,6 +273,8 @@ export function ChannelMessageCard({ card, onAction, onOpenTicket, now, leadStuc
   leadName?: string;
   // 卡画在别人的锚定浮层里（「张三 来了新消息」那一行点开）：只画撑开的样子，收起由浮层管；操作做完调 onDone 收起浮层。
   inPanel?: { onDone: () => void };
+  // 按文件编号取消息里的图片（runtime.loadChannelImage，工单 #529）。不给时图片照旧是文字标记。
+  loadImage?: ChannelImageLoader;
 }) {
   const locale = useLocale();
   const leadName = leadNameProp ?? leadNameNow();
@@ -280,6 +287,19 @@ export function ChannelMessageCard({ card, onAction, onOpenTicket, now, leadStuc
   // 「改一下再发」的输入框：null 是没打开。
   const [edit, setEdit] = useState<string | null>(null);
   const [details, setDetails] = useState(false);
+  // 消息正文里的图片和文件（工单 #529）：卡上所有消息的图片一起取，取不到的退回文字标记。
+  const shown = shownMessages(card);
+  const images = shown.flatMap((message) => message.parts.images);
+  const imageStates = useChannelImages(images, loadImage);
+  const failed = failedImages(imageStates);
+  // 点开的图片：哪条消息的几张、从第几张开始，和这条消息在 Slack 里的链接。
+  const [preview, setPreview] = useState<{ images: readonly ChannelImageRef[]; index: number; url: string | null } | null>(null);
+  const openImage = (message: ShownMessage, index: number) => {
+    const visible = message.parts.images.filter((image) => !failed.has(image.fileId));
+    setPreview({ images: visible, index, url: message.url });
+  };
+  const media = { states: imageStates, failed, onOpen: openImage };
+  const latest = shown.at(-1)!;
   // 撤回窗口里每秒走一次，按钮上的「还剩 4:32」跟着变。
   const [, setTick] = useState(0);
   const counting = card.actions.includes('undo_auto_reply') && card.revokeUntil !== null && Date.parse(card.revokeUntil) > Date.now();
@@ -358,14 +378,14 @@ export function ChannelMessageCard({ card, onAction, onOpenTicket, now, leadStuc
         <Icon name={status.tone === 'success' ? 'check' : 'chat'} size={13} color={status.tone === 'success' ? 'success' : 'text-muted'} />
       </Box>
       <Text size="label" weight="bold" shrink={1} minW={0} numberOfLines={1}>{card.sender.name}</Text>
-      <Text testID={`channel-card-${card.id}-line`} flex={1} minW={0} size="secondary" tone="strong" numberOfLines={1}>{plainLine(card, card.recent?.at(-1)?.text ?? card.excerpt)}</Text>
+      <Text testID={`channel-card-${card.id}-line`} flex={1} minW={0} size="secondary" tone="strong" numberOfLines={1}>{messageLine(card, latest, failed, m)}</Text>
       <Text size="meta" tone="secondary" shrink={0} testID={`channel-card-${card.id}-outcome`}>{view.folded.outcome}</Text>
       <Icon name="chevron-down" size={12} color="text-muted" />
     </Row>
   ) : (
     <Column p="card" gap="card-row">
       {header}
-      <LatestMessage card={card} m={m} />
+      <LatestMessage card={card} m={m} message={latest} media={media} />
       <FairyRow line={fairy} oneLine testID={`channel-card-${card.id}-fairy`} />
       {/* 对方要求改规则（spec D10 的 Jev 标记）：收起时也写，「没有照做」不该点开才看到。 */}
       {view.handling?.ruleChange ? (
@@ -390,7 +410,7 @@ export function ChannelMessageCard({ card, onAction, onOpenTicket, now, leadStuc
           <IconButton icon="chevron-up" label={m.collapse} size="xs" variant="ghost" onPress={() => setOpen(false)} testID={`channel-card-${card.id}-collapse`} />
         )}
       </Row>
-      <MessageStack card={card} m={m} />
+      <MessageStack card={card} m={m} messages={shown} media={media} />
       <Row items="center" gap="inline-item">
         <Box flex={1} minW={0}>
           <FairyRow line={panelFairy} />
@@ -486,7 +506,10 @@ export function ChannelMessageCard({ card, onAction, onOpenTicket, now, leadStuc
     </Column>
   );
 
-  if (inPanel) return panel;
+  const imagePreview = (
+    <ChannelImagePreview preview={preview} states={imageStates} onClose={() => setPreview(null)} testID={`channel-card-${card.id}-preview`} />
+  );
+  if (inPanel) return <>{panel}{imagePreview}</>;
   return (
     <Card w="100%" variant={view.folded ? 'flat' : 'float'} {...(view.folded ? { rounded: 'xl' } : {})} overflow="hidden" bg={view.folded ? 'transparent' : 'surface'} testID={`channel-card-${card.id}`}>
       <DisclosureView
@@ -499,6 +522,7 @@ export function ChannelMessageCard({ card, onAction, onOpenTicket, now, leadStuc
         panel={panel}
       />
       {error && !open ? <Text px="card" pb="card" size="note" tone="danger" testID={`channel-card-${card.id}-error`}>{error}</Text> : null}
+      {imagePreview}
     </Card>
   );
 }
@@ -595,8 +619,35 @@ function FairyRow({ line, oneLine: single = false, testID }: { line: FairyLineVi
   );
 }
 
+// 卡上画的消息：最近几条（没有时用摘录），每条的正文分成字、图片和文件（工单 #529）。
+type ShownMessage = { at: string; text: string; url: string | null; parts: ChannelMessageParts };
+
+function shownMessages(card: ChannelCardDto): ShownMessage[] {
+  const recent = card.recent?.length ? card.recent.slice(-3) : [{ at: card.updatedAt, text: card.excerpt }];
+  return recent.map((message) => ({
+    at: message.at,
+    text: message.text,
+    url: 'url' in message && typeof message.url === 'string' ? message.url : null,
+    parts: channelMessageParts(message.text),
+  }));
+}
+
+type MessageMedia = {
+  states: ReadonlyMap<string, ChannelImageState>;
+  failed: ReadonlySet<string>;
+  onOpen: (message: ShownMessage, index: number) => void;
+};
+
+// 一条消息压成一行字（收起态、结束行）：字、取不到的图片的标记、文件名；只有图片时写「[N 张图]」。
+function messageLine(card: ChannelCardDto, message: ShownMessage, failed: ReadonlySet<string>, m: CardMessages): string {
+  const text = plainLine(card, channelMessageText(message.parts, failed));
+  const images = message.parts.images.filter((image) => !failed.has(image.fileId)).length;
+  return [text, !text && images ? m.imageCount(images) : null, ...message.parts.files.map((file) => file.name)].filter(Boolean).join(' ');
+}
+
 // 对方的话，一行（收起态）：最新那条放在别人说话的气泡里，多条时前面一个「N 条」小标签。
-function LatestMessage({ card, m }: { card: ChannelCardDto; m: CardMessages }) {
+// 这条的时间在右边（Slack 链接）；带图片时下面一排 36 的小图，点了照样能看大图（工单 #529）。
+function LatestMessage({ card, m, message, media }: { card: ChannelCardDto; m: CardMessages; message: ShownMessage; media: MessageMedia }) {
   return (
     <Row items="center" gap="inline-item" minW={0} testID={`channel-card-${card.id}-latest`}>
       {card.messageCount > 1 ? (
@@ -604,26 +655,84 @@ function LatestMessage({ card, m }: { card: ChannelCardDto; m: CardMessages }) {
           <Text size="meta" weight="semibold" tone="strong">{m.messageCount(card.messageCount)}</Text>
         </Box>
       ) : null}
-      <Bubble><Text size="message-lead" numberOfLines={1}>{plainLine(card, card.recent?.at(-1)?.text ?? card.excerpt)}</Text></Bubble>
+      <Bubble>
+        <Row items="center" gap="side-item" minW={0}>
+          <Text size="message-body" numberOfLines={1} shrink={1} minW={0}>{messageLine(card, message, media.failed, m)}</Text>
+          <ChannelMessageTime at={clockWords(message.at) ?? ''} url={message.url} testID={`channel-card-${card.id}-latest-time`} />
+        </Row>
+        <ChannelThumbs
+          images={message.parts.images}
+          states={media.states}
+          size="sm"
+          onOpen={(index) => media.onOpen(message, index)}
+          testID={`channel-card-${card.id}-latest-images`}
+        />
+      </Bubble>
     </Row>
   );
 }
 
-// 撑开以后：对方连发的几条叠在同一个气泡里，每条一个淡时间，更早的写「更早的 N 条」（画布状态 7）。
-function MessageStack({ card, m }: { card: ChannelCardDto; m: CardMessages }) {
-  const recent = card.recent?.length ? card.recent.slice(-3) : [{ at: card.updatedAt, text: card.excerpt }];
-  const earlier = Math.max(0, card.messageCount - recent.length);
+// 撑开以后：对方连发的几条叠在同一个气泡里，更早的写「更早的 N 条」（画布状态 7）。
+// 每条一段，段之间一条虚线（工单 #529 视觉稿）：字和时间一行（时间是浅灰小字，对齐这条的第一行，是 Slack 链接），
+// 下面是 72 的缩略图和文件小标签。正文和会话里的普通消息一样大（message-body）。
+function MessageStack({ card, m, messages, media: mediaOf }: { card: ChannelCardDto; m: CardMessages; messages: ShownMessage[]; media: MessageMedia }) {
+  const earlier = Math.max(0, card.messageCount - messages.length);
+  const texts = messages.map((message) => channelMessageText(message.parts, mediaOf.failed));
   // 对方的话可以引用（设计规范 P17.1）：交给 Lead 时照旧是外部内容（P17.9）。
   return (
-    <QuoteSource source={{ kind: 'card', cardId: card.id }} texts={recent.map((message) => message.text)}>
+    <QuoteSource source={{ kind: 'card', cardId: card.id }} texts={texts}>
     <Bubble wide testID={`channel-card-${card.id}-messages`}>
       {earlier > 0 ? <Text size="meta" tone="secondary">{m.earlier(earlier)}</Text> : null}
-      {recent.map((message, index) => (
-        <Row key={`${index}:${message.at}`} items="flex-end" gap="side-item">
-          <Box flex={1} minW={0}><MarkdownMessage markdown={sourceMarkdown(card, message.text)} size="message-lead" breaks objectLinks={false} /></Box>
-          {recent.length > 1 ? <Text size="meta" mono tone="muted" shrink={0}>{clockWords(message.at) ?? ''}</Text> : null}
-        </Row>
-      ))}
+      {messages.map((message, index) => {
+        const media = (
+          <>
+            <ChannelThumbs
+              images={message.parts.images}
+              states={mediaOf.states}
+              size="lg"
+              onOpen={(at) => mediaOf.onOpen(message, at)}
+              testID={`channel-card-${card.id}-images-${index}`}
+            />
+            {message.parts.files.map((file, fileIndex) => (
+              <ChannelFileChip key={file.fileId} file={file} url={message.url} testID={`channel-card-${card.id}-file-${index}-${fileIndex}`} />
+            ))}
+          </>
+        );
+        const time = (
+          // spacing-exempt: 时间（meta 11/16）和正文第一行（message-body 14/24）的光学对齐
+          <Box mt={3} shrink={0}>
+            <ChannelMessageTime at={clockWords(message.at) ?? ''} url={message.url} testID={`channel-card-${card.id}-time-${index}`} />
+          </Box>
+        );
+        return (
+          <Column
+            key={`${index}:${message.at}`}
+            gap="text-stack"
+            testID={`channel-card-${card.id}-message-${index}`}
+            // 虚线只画上边：别的三条边的宽度写明是 0，web 上 dashed 不会按浏览器缺省的宽度画成四边框。
+            {...(index > 0 ? {
+              pt: 'text-stack' as const, borderStyle: 'dashed' as const, borderColor: 'border' as const,
+              borderTopWidth: 1, borderRightWidth: 0, borderBottomWidth: 0, borderLeftWidth: 0,
+            } : {})}
+          >
+            {/* 有字时：字和时间一行，图和文件在下面，用满气泡的宽度（手机上一排 4 张放得下）。只有图时：图占第一行，时间在右边。 */}
+            {texts[index] ? (
+              <>
+                <Row items="flex-start" gap="side-item">
+                  <Box flex={1} minW={0}><MarkdownMessage markdown={sourceMarkdown(card, texts[index])} size="message-body" breaks objectLinks={false} /></Box>
+                  {time}
+                </Row>
+                {media}
+              </>
+            ) : (
+              <Row items="flex-start" gap="side-item">
+                <Column flex={1} minW={0} gap="text-stack">{media}</Column>
+                {time}
+              </Row>
+            )}
+          </Column>
+        );
+      })}
     </Bubble>
     </QuoteSource>
   );
@@ -770,6 +879,7 @@ export function ChannelNewsLine({ cardId, at }: { cardId: number; at: number }) 
           leadName={leadName}
           onAction={(action, text) => runtime.actOnChannelCard(card.id, action, text)}
           onOpenTicket={openTicket}
+          loadImage={(fileId) => runtime.loadChannelImage(fileId)}
           inPanel={{ onDone: close }}
         />
       )}
@@ -792,6 +902,7 @@ export function ChannelCardSlot({ cardId }: { cardId: number }) {
         leadName={leadName}
         onAction={(action, text) => runtime.actOnChannelCard(card.id, action, text)}
         onOpenTicket={openTicket}
+        loadImage={(fileId) => runtime.loadChannelImage(fileId)}
       />
     </Box>
   );

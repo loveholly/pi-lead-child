@@ -785,6 +785,32 @@ function blockText(block: unknown): string[] {
   return [];
 }
 
+// auth.test 的 url 是不是 Slack 工作区的网址（https，*.slack.com 或 *.slack-gov.com）。是时返回以 / 结尾的网址，不是时 null。
+export function slackWorkspaceUrl(value: unknown): string | null {
+  if (!isString(value)) return null;
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return null;
+  }
+  if (url.protocol !== "https:" || !/^[a-z0-9-]+(\.[a-z0-9-]+)*\.slack(-gov)?\.com$/.test(url.hostname)) return null;
+  return `https://${url.hostname}/`;
+}
+
+/**
+ * 一条消息的 permalink：objectKey 是道（slack:<对话>:<thread 根的 ts 或 main>），ref 是消息的 ts。
+ * thread 里的回复（根不是它自己）带 thread_ts 和 cid，Slack 打开时定位到 thread 里的那条。拼不出来时 null。
+ */
+export function slackMessageLink(workspace: string | null, objectKey: string, ref: string): string | null {
+  if (!workspace) return null;
+  const place = /^slack:([A-Z0-9]+):(main|\d+\.\d+)$/.exec(objectKey);
+  if (!place || !/^\d+\.\d+$/.test(ref)) return null;
+  const [, channel, root] = place;
+  const link = `${workspace}archives/${channel}/p${ref.replace(".", "")}`;
+  return root === "main" || root === ref ? link : `${link}?thread_ts=${root}&cid=${channel}`;
+}
+
 // Slack 的文件编号（F 开头）。readFile 只认它。
 const SLACK_FILE_ID = /^F[A-Z0-9]{1,30}$/;
 
@@ -1115,6 +1141,9 @@ export function createSlackChannelAdapter(options: SlackChannelOptions): Channel
   const conversations = new Map<string, ConversationInfo>();
   // 用户本人所在的工作区：auth.test（会话方式是换好的会话）或者投递的 team_id 告诉我们。补拉的消息靠它认出外部的人。
   let homeTeam: string | null = null;
+  // 用户本人工作区的网址（auth.test 的 url，例如 https://acme.slack.com/），拼消息的 permalink 用。undefined：还没问过；
+  // null：问过，没给或者不是 Slack 的地址。
+  let workspaceUrl: string | null | undefined;
   // 断线这段时间的补拉的上限。
   const gapWindowMs = Math.max(options.catchUp?.windowMs ?? GAP_WINDOW_MS, MINUTE);
   const gapMessages = Math.max(Math.trunc(options.catchUp?.messages ?? GAP_MESSAGES), 1);
@@ -1675,6 +1704,7 @@ export function createSlackChannelAdapter(options: SlackChannelOptions): Channel
       return null;
     }
     if (isString(auth.team_id)) homeTeam = auth.team_id;
+    workspaceUrl = slackWorkspaceUrl(auth.url);
     let accountName: string | undefined;
     try {
       const info = await options.api.call("users.info", { user: auth.user_id }, userToken);
@@ -1706,10 +1736,11 @@ export function createSlackChannelAdapter(options: SlackChannelOptions): Channel
   }): Promise<void> {
     const { transport } = input;
     // 补到的消息靠用户本人的工作区认出外部的人：还不知道时问一次 auth.test。
-    if (!homeTeam) {
+    if (!homeTeam || workspaceUrl === undefined) {
       try {
         const auth = await api("auth.test", {}, input.context);
         if (isString(auth.team_id)) homeTeam = auth.team_id;
+        workspaceUrl = slackWorkspaceUrl(auth.url);
       } catch (error) {
         transport.log(`auth.test failed before the catch-up: ${errorText(error)}`);
       }
@@ -2323,6 +2354,12 @@ export function createSlackChannelAdapter(options: SlackChannelOptions): Channel
         });
       }
       return out;
+    },
+
+    // 消息的 permalink（工单 #529）：工作区网址 + archives/<对话>/p<ts 去掉点>，thread 里的回复再带 thread_ts 和 cid
+    // （和 chat.getPermalink 给的一样，不用为每条消息调一次 API）。还不知道工作区网址时是 null，卡上不显示链接。
+    messageLink(objectKey: string, ref: string): string | null {
+      return slackMessageLink(workspaceUrl ?? null, objectKey, ref);
     },
 
     // 消息附带的文件（2026-11-02）：files.info 问下载地址，再带用户令牌下载。要 files:read（可选的权限，缺了只是看不到文件）。

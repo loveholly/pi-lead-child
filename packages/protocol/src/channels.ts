@@ -731,7 +731,10 @@ export const ChannelCardDtoSchema = StrictObject({
   messageCount: Type.Integer({ minimum: 1 }),
   // 这张卡里对方连发的最近几条（最多 5 条，旧的在前），卡片撑开以后叠在同一个名字下（画布外部消息状态 7，2026-10-27）。
   // 对话只留最近 20 条，被挤掉时只剩摘录。外部的原文，只用来显示。
-  recent: Type.Optional(Type.Array(StrictObject({ at: Type.String(), text: Type.String() }), { maxItems: 5 })),
+  // url：这条消息在来源里的链接（Slack 的 permalink，thread 里的带 thread_ts），卡上点时间打开（工单 #529）。拿不到时没有。
+  recent: Type.Optional(Type.Array(StrictObject({
+    at: Type.String(), text: Type.String(), url: Type.Optional(Type.String({ minLength: 1 })),
+  }), { maxItems: 5 })),
   delivery: Literals(CHANNEL_DELIVERY_MODES),
   state: Literals(CHANNEL_CARD_STATES),
   draft: Type.Union([StrictObject({ text: Type.String(), drafter: Type.String() }), Type.Null()]),
@@ -783,6 +786,16 @@ export type ChannelCardActionResponse = Static<typeof ChannelCardActionResponseS
 
 // 卡变了以后，网关推一条 snapshot.required，payload 是这个。客户端据此重取 /v1/channels/cards。
 export const CHANNEL_CARDS_SNAPSHOT_RESOURCE = "channel-cards";
+
+// 卡上每条消息的链接（recent 的 url，工单 #529）是选收的：客户端在读卡和卡上动作的地址上带 ?include=links 才有。
+// 旧客户端严格校验整张卡，多一个字段整个列表就读不出来。
+export const CHANNEL_CARDS_INCLUDE_LINKS = "links";
+
+/** 去掉卡上每条消息的链接（没要 include=links 的客户端）。 */
+export function channelCardWithoutLinks(card: ChannelCardDto): ChannelCardDto {
+  if (!card.recent?.some((message) => message.url !== undefined)) return card;
+  return { ...card, recent: card.recent.map(({ at, text }) => ({ at, text })) };
+}
 
 // ── 代查的存取校验 ──────────────────────────────────────────────────────────────────
 // store 写 channel_lookups 的 JSON 列以前用这些校验（store 不直接依赖 typebox）：存进去的东西不合格，卡的 DTO 就过不了

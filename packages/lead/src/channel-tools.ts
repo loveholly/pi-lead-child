@@ -13,7 +13,7 @@
 import { Type } from "typebox";
 import { defineTool, resizeImage, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import {
-  EXTERNAL_REVIEW_EVENTS, GRANT_INTENTS, MESSAGE_EVENT_KIND, messageEventConversationKey, type ChannelCardDto, type ChannelCardState, type GrantIntent, type GrantReviewEvent,
+  CHANNEL_FILE_MAX_BYTES, EXTERNAL_REVIEW_EVENTS, GRANT_INTENTS, MESSAGE_EVENT_KIND, messageEventConversationKey, type ChannelCardDto, type ChannelCardState, type GrantIntent, type GrantReviewEvent,
 } from "@pi-lead-child/protocol";
 import { getEvent, type Db } from "@pi-lead-child/store";
 
@@ -150,7 +150,8 @@ function cardFacts(card: ChannelCardDto, request?: Record<string, unknown> | nul
 }
 
 // read_channel_file：最多下载多少字节；图片缩到模型收得下的大小，文本最多给多少字。
-const FILE_MAX_BYTES = 20 * 1024 * 1024;
+// 和 App 取卡里图片的接口同一个上限（protocol 的 channel-files.ts）。
+const FILE_MAX_BYTES = CHANNEL_FILE_MAX_BYTES;
 const FILE_TEXT_MAX = 20_000;
 // 模型能看的图片格式。
 const IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
