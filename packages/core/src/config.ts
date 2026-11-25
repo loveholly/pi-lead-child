@@ -437,6 +437,17 @@ export function buildReviewerPrompt(
 }
 
 // child 初始 prompt（DESIGN §6.1/§6.3：brief + 正文 + 纪律；不塞历史 session）
+// 沙箱里的 GitHub（#546，2026-11-25）：gh 这类 Go 写的工具不认沙箱代理的证书，连 GitHub 报 x509 错误（core 的
+// sandbox-policy.ts）。child 一开始就要知道：GitHub 的事走连接工具，做不到就交回 Lead，不要硬试 gh。
+export const SANDBOX_GITHUB_RULE = "- 命令在沙箱里跑。gh 这类 Go 写的工具在沙箱里常常连不上 GitHub（报 x509: certificate signed by unknown authority）。"
+  + "GitHub 的事（看 PR、评审、CI、rebase 前查状态、合并）一开始就用 search_connection_tools 和 call_connection_tool，不要用 gh；"
+  + "报过这个错也不要换个参数再试。git 本身的 fetch 用 git_fetch 工具。连接工具也做不到时，交回给 Lead："
+  + "ticket_update(status='blocked')，写清哪一步做不到、原样的报错、还有哪些没做。";
+// 没做成就不交 review（#546）：关键工具一开始就失败、什么都没做时，交付不能当成完成。系统也按成果的结构再判一次（daemon 的 run-finished.ts）。
+export const NOT_DONE_RULE = "- 任务要的主要工作没做成时（关键工具一开始就失败、什么都没改、什么都没交），不要交成 review："
+  + "用 ticket_update(status='blocked') 交回，在 summary 里写明「没做成」和缺的是什么。只拿到了部分结果时照常交 review，"
+  + "outcome 里写清做成了哪些、哪些没做，没做的验证写 failed 或 not_run。";
+
 // leadName：用户给 Lead 起的名字（设置 → 身份与风格）。给了时告诉 child：写给用户看的文字里用这个名字称呼 Lead。
 export function buildChildPrompt(t: Pick<Item, "id" | "title" | "brief" | "body">, options: { leadName?: string } = {}): string {
   const parts = [
@@ -472,6 +483,9 @@ export function buildChildPrompt(t: Pick<Item, "id" | "title" | "brief" | "body"
       "- 手动提交 delegation Checkpoint 时必须给出 related_ticket_ids；Coordinator 创建/完成子工单时也会记录确定性的系统 Checkpoint。",
       "- 调研类任务：用 web_fetch 抓取真实网页/文档,产出必须基于并引用检索到的来源,禁止凭记忆编造。",
       "- PLC 的数据目录（~/Library/Application Support/Bytezard Lead/）可以读，用来排查问题：日志、runtime-events、sessions，以及用 sqlite3 -readonly 查 plc.db。不能写 plc.db 和 config.json，也不能改它们的设置（例如连接的写入策略）：要改设置，用 notify_lead 或 request_approval 交给用户在设置页改。写库会被拒绝，并会通知用户。不要打印或复制环境变量、凭证文件里的密钥。",
+      // #546（2026-11-25）：轻子 agent 在沙箱里用 gh，报证书错误，什么都没做就交了 review。
+      SANDBOX_GITHUB_RULE,
+      NOT_DONE_RULE,
       "- Positive example: submit_checkpoint({kind:'milestone', stage:'tests', title:'回归测试通过', summary:'分配的测试现在都通过，原来的失败场景有了覆盖。', next_step:'运行 runtime 回归测试。'})",
       "- Positive example: update_ticket_plan({items:[{id:'read',title:'读现有的解析器',status:'done'},{id:'fix',title:'修复空输入的处理',status:'in_progress'},{id:'test',title:'补回归测试',status:'pending'}]})",
       "- Positive example: submit_checkpoint({kind:'milestone', title:'协议核对完成', summary:'5 项协议检查通过了 3 项。', progress:{current:3,total:5,label:'协议覆盖'}, artifacts:[{ref:'report',name:'report.md',kind:'report',media_type:'text/markdown',relative_path:'report.md'}]})",

@@ -6,9 +6,11 @@ import { tempDir } from "@pi-lead-child/core/testing";
 import {
   createItem, createRun, getItem, isLightTask, markLightTask, openDb, transitionRunState, type Db,
 } from "@pi-lead-child/store";
-import { recordRunFinished } from "../src/run-finished.js";
+import { lightTaskNotDone, recordRunFinished } from "../src/run-finished.js";
 
-function deliveredTask(options: { light: boolean; external?: boolean; summary?: string }): { db: Db; itemId: number; runId: number } {
+function deliveredTask(options: {
+  light: boolean; external?: boolean; summary?: string; changes?: unknown[]; deliverables?: unknown[]; validations?: unknown[];
+}): { db: Db; itemId: number; runId: number } {
   const db = openDb(join(tempDir("plc-light-task-"), "plc.db"));
   const itemId = createItem(db, { title: "评审 PR #217", brief: "b", createdBy: "lead" });
   if (options.light) markLightTask(db, itemId, "lead");
@@ -20,8 +22,12 @@ function deliveredTask(options: { light: boolean; external?: boolean; summary?: 
   db.prepare(
     `INSERT INTO outcome_snapshots (item_id, executor_run_id, source, source_output_sha256, summary, changes_json,
        deliverables_json, validations_json, completeness, missing_fields_json, content_hash, idempotency_key, created_at)
-     VALUES (?, ?, 'system_recovered', 'sha', ?, '[]', '[]', '[]', 'complete', '[]', 'h', ?, datetime('now'))`,
-  ).run(itemId, runId, options.summary ?? "评审结论：依赖改动干净；中等问题 2 条；行内评论 3 条见交付。", `k-${runId}`);
+     VALUES (?, ?, 'system_recovered', 'sha', ?, ?, ?, ?, 'complete', '[]', 'h', ?, datetime('now'))`,
+  ).run(
+    itemId, runId, options.summary ?? "评审结论：依赖改动干净；中等问题 2 条；行内评论 3 条见交付。",
+    JSON.stringify(options.changes ?? []), JSON.stringify(options.deliverables ?? []), JSON.stringify(options.validations ?? []),
+    `k-${runId}`,
+  );
   if (options.external) {
     db.prepare(
       `INSERT INTO run_tool_calls (run_id, item_id, connection, tool, access, decision, outcome, created_at)
@@ -123,6 +129,56 @@ describe("a light sub-agent hands its result back", () => {
     expect(row.summary).toContain("工单现在是 review");
     expect(row.payload).not.toHaveProperty("lightTask");
     expect(row.payload).not.toHaveProperty("external");
+  });
+});
+
+// #546（2026-11-25）：轻子 agent 在沙箱里调 gh 报证书错误，什么都没做，成果却被结成已完成。
+// 没有改动、没有交付物、验证没有一条通过时，系统不结单，退回 blocked，说明开头就写没做成。
+describe("a light sub-agent that got nothing done", () => {
+  const ghFailed = {
+    command: "gh pr view 75 --json state", outcome: "failed", exitCode: 1,
+    summary: "沙箱里 gh 报 TLS 证书错误（x509: certificate signed by unknown authority）", evidenceRef: null,
+  };
+  const notRun = { command: "gh pr merge 75", outcome: "not_run", exitCode: null, summary: "没有运行", evidenceRef: null };
+
+  it("does not close the ticket as done and tells Lead it was not done", () => {
+    const { db, itemId, runId } = deliveredTask({
+      light: true, summary: "我没有 rebase、没有合并：沙箱里 gh 连不上 GitHub。", validations: [ghFailed, notRun],
+    });
+    expect(lightTaskNotDone(db, itemId, runId)).toEqual({ failedValidations: 1 });
+    expect(recordRunFinished(db, { itemId, runId }).woke).toBe(true);
+    expect(getItem(db, itemId)!.stage).toBe("blocked");
+    const row = runFinishedRow(db, itemId);
+    expect(row.summary).toContain("轻子 agent 没做成");
+    expect(row.summary).toContain("验证 1 条失败、没有一条通过");
+    expect(row.summary).toContain("不要转告成已经做完");
+    expect(row.summary).not.toContain("系统已结单");
+    expect(row.payload).toMatchObject({ lightTask: true, lightTaskNotDone: true, stage: "blocked" });
+  });
+
+  it("still closes a result that did something, or that has no validations to judge by", () => {
+    const passed = { ...ghFailed, outcome: "passed", exitCode: 0 };
+    const partial = deliveredTask({ light: true, validations: [ghFailed, passed] });
+    expect(lightTaskNotDone(partial.db, partial.itemId, partial.runId)).toBeNull();
+    const withDeliverable = deliveredTask({
+      light: true, validations: [ghFailed], deliverables: [{ kind: "url", ref: "https://example.com/r", label: "报告" }],
+    });
+    expect(lightTaskNotDone(withDeliverable.db, withDeliverable.itemId, withDeliverable.runId)).toBeNull();
+    const research = deliveredTask({ light: true });
+    expect(lightTaskNotDone(research.db, research.itemId, research.runId)).toBeNull();
+    recordRunFinished(partial.db, { itemId: partial.itemId, runId: partial.runId });
+    expect(getItem(partial.db, partial.itemId)!.stage).toBe("done");
+    expect(runFinishedRow(partial.db, partial.itemId).payload).not.toHaveProperty("lightTaskNotDone");
+  });
+
+  it("says not done when the sub-agent handed it back as blocked itself", () => {
+    const { db, itemId, runId } = deliveredTask({ light: true });
+    db.prepare("UPDATE items SET stage='blocked' WHERE id=?").run(itemId);
+    recordRunFinished(db, { itemId, runId });
+    expect(getItem(db, itemId)!.stage).toBe("blocked");
+    const row = runFinishedRow(db, itemId);
+    expect(row.summary).toContain("轻子 agent 没做成，自己交回了");
+    expect(row.payload).toMatchObject({ lightTask: true, lightTaskNotDone: true });
   });
 });
 

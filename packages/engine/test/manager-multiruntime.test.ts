@@ -399,6 +399,10 @@ describe("generic child manager", () => {
     expect(prompt).toContain("验收标准");
     expect(prompt).toContain("outcome.validations");
     expect(prompt).toContain("relative_path");
+    // #546：沙箱里 gh 连不上 GitHub，一开始就走连接工具；没做成时交回 blocked，不交 review。
+    expect(prompt).toContain("x509: certificate signed by unknown authority");
+    expect(prompt).toContain("call_connection_tool，不要用 gh");
+    expect(prompt).toContain("不要交成 review");
     expect(prompt).toContain("Positive example");
     expect(prompt).toContain("Negative example");
     expect(prompt).toContain("ticket_update(status='review', checkpoint={kind:'completed'");
