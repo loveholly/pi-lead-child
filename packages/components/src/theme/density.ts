@@ -12,7 +12,7 @@ import { useTheme } from '@tamagui/core';
 import { createElement, forwardRef, useContext, type ComponentType, type ForwardRefExoticComponent, type PropsWithoutRef, type RefAttributes } from 'react';
 
 import { DesignPreferencesContext, scaledLeading, scaledRadius, scaledTextSize, type DesignPreferences } from './preferences';
-import { type Density, radius as radiusTokens, spacingByDensity, textLeading, textSizes, textSizesByDensity, type RadiusToken } from './tokens';
+import { type Density, radius as radiusTokens, spacing, spacingByDensity, textLeading, textSizes, textSizesByDensity, type RadiusToken, type SpacingToken } from './tokens';
 
 const DENSITY_INDEX: Record<Density, 0 | 1 | 2> = { compact: 0, standard: 1, comfortable: 2 };
 const THEME_PREFIX = 'd-';
@@ -87,6 +87,13 @@ export function resolveDensityProps<P extends Record<string, unknown>>(
     }
   }
   return (out ?? props) as P;
+}
+
+// 一个语义间距在当前密度区域里是多少像素（例如浮层要按自己的内边距往外扩，AnchoredPanel 的 outset）。
+// 不在密度区域里时是标准值。
+export function useSpacing(name: SpacingToken): number {
+  const theme = useTheme() as unknown as ThemeLike;
+  return themeNumber(theme, `${THEME_PREFIX}${name}`) ?? spacing[name];
 }
 
 // 包住一个 Tamagui 组件。读当前 theme，换掉密度名字，再交给里面的组件。ref 原样透传。

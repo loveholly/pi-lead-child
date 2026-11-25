@@ -542,8 +542,11 @@ export function ChannelEndRow({ lead, name, line, lineTestID, badge, trailing, o
   return (
     <Row items="center" gap="icon-label" py="card-row" minW={0}>
       <Box w={18} shrink={0} items="center">{lead}</Box>
-      <Text size="label" weight="bold" shrink={1} minW={0} numberOfLines={1}>{name}</Text>
-      <Text {...(lineTestID ? { testID: lineTestID } : {})} flex={1} minW={0} size="secondary" tone="strong" numberOfLines={1}>{line}</Text>
+      {/* 名字和那一句分一段宽度：名字最多占一半，再长就截断。手机上长名字不会把那一句挤得只剩几个字（2026-11-25 返工）。 */}
+      <Row flex={1} minW={0} items="center" gap="icon-label">
+        <Text size="label" weight="bold" shrink={1} minW={0} maxW="50%" numberOfLines={1}>{name}</Text>
+        <Text {...(lineTestID ? { testID: lineTestID } : {})} flex={1} minW={0} size="secondary" tone="strong" numberOfLines={1}>{line}</Text>
+      </Row>
       {badge}
       {trailing}
       <Icon name={open ? 'chevron-up' : 'chevron-down'} size={12} color="text-muted" />

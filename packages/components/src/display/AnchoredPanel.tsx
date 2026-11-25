@@ -4,6 +4,8 @@ import { Modal, Platform, ScrollView, StyleSheet, View } from 'react-native';
 import { useBreakpoint } from '../platform';
 import { Pressable } from '../primitives/Pressable';
 import { Box, Column } from '../primitives/layout';
+import { useSpacing } from '../theme/density';
+import type { SpacingToken } from '../theme/tokens';
 import { useMessages } from '../i18n';
 import { displayMessages } from './display.messages';
 import { NativeSheet } from './NativeSheet';
@@ -20,6 +22,11 @@ export type AnchoredPanelProps = {
   /** 给读屏的浮层名字，例如「#77 的进展」。 */
   label: string;
   maxHeight?: number;
+  /**
+   * 宽屏时浮层往左右各多出这个间距再加 1 像素边框（2026-11-25，#537）。头里用同一个间距做左右内边距时，
+   * 头里的内容和收着的那一行严格重合：图标、文字不左右挪。不给时浮层和那一行一样宽。手机宽度的底部面板不受影响。
+   */
+  outset?: SpacingToken;
   testID?: string;
 };
 
@@ -33,12 +40,17 @@ const DEFAULT_MAX_HEIGHT = 440;
 //   · 手机宽度时是从底部升起的面板；
 //   · 点外面、按 Esc（web）或返回键（Android）关闭；
 //   · 用 React Native 的 Modal：web 上渲染到 body，不被滚动区裁掉，页面也不因为它变高、跳动。
-export function AnchoredPanel({ children, open, onClose, header, body, label, maxHeight = DEFAULT_MAX_HEIGHT, testID }: AnchoredPanelProps) {
+export function AnchoredPanel({ children, open, onClose, header, body, label, maxHeight = DEFAULT_MAX_HEIGHT, outset, testID }: AnchoredPanelProps) {
   const m = useMessages(displayMessages);
   const anchorRef = useRef<View>(null);
   const [anchor, setAnchor] = useState<Anchor | null>(null);
   const breakpoint = useBreakpoint();
   const sheet = !breakpoint.tablet;
+  // 浮层的边框是 1 像素（PanelFrame）：往外扩的量算上它，头里的内容才落在那一行原来的位置。
+  const outsetSpace = useSpacing(outset ?? 'conversation-block');
+  // 左右多出内边距加边框；上下只让出边框（那一行自己有上下留白）。
+  const grow = outset ? outsetSpace + 1 : 0;
+  const lift = outset ? 1 : 0;
 
   useEffect(() => {
     if (!open) {
@@ -61,8 +73,8 @@ export function AnchoredPanel({ children, open, onClose, header, body, label, ma
   const position = sheet || !anchor
     ? styles.sheet
     : upward
-      ? { position: 'absolute' as const, left: anchor.x, width: anchor.width, bottom: breakpoint.height - anchor.y - anchor.height }
-      : { position: 'absolute' as const, left: anchor.x, width: anchor.width, top: anchor.y };
+      ? { position: 'absolute' as const, left: anchor.x - grow, width: anchor.width + grow * 2, bottom: breakpoint.height - anchor.y - anchor.height - lift }
+      : { position: 'absolute' as const, left: anchor.x - grow, width: anchor.width + grow * 2, top: anchor.y - lift };
 
   // 手机宽度的原生端：系统的底部面板（2026-11-12）。它自带遮罩、把手、下拉关闭和跟手的动画。
   if (sheet && Platform.OS !== 'web') {

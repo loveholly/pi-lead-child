@@ -154,15 +154,22 @@ describe('the stacked row', () => {
     expect(text.indexOf('+3')).toBeLessThan(text.indexOf('Handled'));
   });
 
-  it('opens a panel in place that lists each message, and closes from its header', async () => {
+  // 验收标准 522：点这一行在原位打开锚定浮层，列出每一条；点浮层的头收起。会话里那一行一直在原位（浮层不占会话的高度）。
+  // 时间用正文字体加等宽数字（2026-11-25 返工）：有 tabular-nums 的原子类，不是等宽字体。
+  it('opens an anchored panel that lists each message, and closes from its header', async () => {
     renderUI(<ChannelStackRow cards={four} entries={entries(four)} now={NOW} />);
     fireEvent.click(screen.getByTestId('channel-stack-22-expand'));
-    const list = await screen.findByTestId('channel-stack-22-list');
+    const panel = await screen.findByTestId('channel-stack-22-anchor-panel');
+    expect(panel.getAttribute('role')).toBe('dialog');
+    // 浮层不在这一组里面（Modal 画在 body 下），会话里的那一行不变高。
+    expect(screen.getByTestId('channel-stack-22').contains(panel)).toBe(false);
+    const list = within(panel).getByTestId('channel-stack-22-list');
     for (const id of [19, 20, 21, 22]) expect(within(list).getByText(`progress ${id}`)).toBeTruthy();
-    expect(within(list).getByText(clockWords(at(19))!)).toBeTruthy();
+    const time = within(list).getByText(clockWords(at(19))!);
+    expect([...time.classList].some((name) => name.startsWith('_fv-'))).toBe(true);
+    expect([...time.classList].some((name) => name.startsWith('font_mono'))).toBe(false);
     fireEvent.click(screen.getByTestId('channel-stack-22-collapse'));
     await waitFor(() => expect(screen.queryByTestId('channel-stack-22-list')).toBeNull());
-    // 收着的那一行一直在原位。
     expect(screen.getByTestId('channel-stack-22-expand')).toBeTruthy();
   });
 

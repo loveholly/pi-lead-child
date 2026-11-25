@@ -1,4 +1,4 @@
-import { AnchoredPanel, Badge, Box, Card, GroupList, Icon, Pressable, Spinner, Text, type GroupEntry } from '@pi-lead-child/components';
+import { AnchoredPanel, Badge, Box, Card, GroupList, Icon, Pressable, Row, Spinner, Text, type GroupEntry } from '@pi-lead-child/components';
 import type { ChannelCardDto } from '@pi-lead-child/protocol';
 import { useState } from 'react';
 import { useShallow } from 'zustand/react/shallow';
@@ -14,7 +14,9 @@ import { channelStackRole, type ChannelStackEntry } from './channelStack';
 // 同一个外部对话里连续的几条合成的一行（工单 #537，视觉稿方案 2b；分组规则见 ./channelStack）。
 // 这一行和结束行（ChannelEndRow）一模一样：外面是最新的一张卡最新的一条，只在时间前面多一个徽标
 // （Badge xs muted：copy 图标 12 和「+N」，N 是叠起来的其余条数）。最新的卡还在「回答中」时，图标列是转圈，结果写「回答中」。
-// 点这一行在原位置打开锚定浮层（AnchoredPanel），头就是这一行，下面是 GroupList，每条一行；点头或者点外面收起，会话不跳。
+// 点这一行在原位置打开锚定浮层（AnchoredPanel），会话不跳：头就是这一行，下面是 GroupList，每条一行；点头或者点外面收起。
+// 浮层往左右各多出自己的内边距（outset），头里的这一行和收着的那一行严格重合，图标和文字不左右挪（2026-11-25 返工）。
+// 时间用正文字体加等宽数字（tabular-nums），不换等宽字体：几行的时间一样宽，后面的话对得齐。
 export function ChannelStackRow({ cards, entries, now }: { cards: readonly ChannelCardDto[]; entries: readonly ChannelStackEntry[]; now?: Date }) {
   const locale = useLocale();
   const m = useMessages(channelCardMessages).card;
@@ -55,12 +57,14 @@ export function ChannelStackRow({ cards, entries, now }: { cards: readonly Chann
     const line = channelPlainLine(card, entry.text, m);
     return {
       key: entry.key,
-      time: clockWords(entry.at),
       content: (
-        <Text size="secondary" tone="strong" numberOfLines={1}>
-          {senders.size > 1 ? <Text size="label" weight="bold" tone="default">{`${entry.sender}  `}</Text> : null}
-          {line}
-        </Text>
+        <Row items="baseline" gap="inline-item" minW={0}>
+          <Text size="meta" tone="secondary" shrink={0} fontVariant={['tabular-nums']}>{clockWords(entry.at) ?? ''}</Text>
+          <Text flex={1} minW={0} size="secondary" tone="strong" numberOfLines={1}>
+            {senders.size > 1 ? <Text size="label" weight="bold" tone="default">{`${entry.sender}  `}</Text> : null}
+            {line}
+          </Text>
+        </Row>
       ),
     };
   });
@@ -70,6 +74,7 @@ export function ChannelStackRow({ cards, entries, now }: { cards: readonly Chann
         open={open}
         onClose={() => setOpen(false)}
         label={m.stackPanel(top.sender.name, entries.length)}
+        outset="card"
         header={(
           <Pressable
             testID={`channel-stack-${id}-collapse`}
