@@ -8,7 +8,8 @@
 // 两个时刻调用它（2026-10-19）：Run 处理完终止事件的那一刻（server.ts 的 onChildEvent），和进程退出时（onChildDone）。
 // pi 的执行 Run 交付以后进程还要停留 5 分钟等新的指令，只在进程退出时说，Lead 就晚 5 分钟知道。
 // 同一个 Run 只说一次。出错结束是另一件事：先说了「结束了」，之后宿主出错时仍然要说。
-// 轻子 agent（lead-tools-and-routing spec D9、D10）：它的工单不要验收。执行 Run 交付以后（工单到了 review）这里直接结单，
+// 轻子 agent（lead-tools-and-routing spec D9、D10）：它的工单不要验收。执行 Run 交付以后（工单到了 review）这里直接结单；
+// 执行 Run 没交接、补交成果的修复回合把工单推到 review 时也一样（#546）。
 // 说明里带上它交回的结果摘要，Lead 不用再查一次。子 agent 调用过连接工具（读了外部系统的内容）时，说明带外部标记：
 // 结果是从别人写的东西里得出来的，叫醒的这一轮按外部的一轮算（turn-origin.ts），外部内容不能借子 agent 改规则。
 // Lead 用 hand_off 交出去的工单（lead-scheduler spec H6，P2）：结果走原请求者的车道（handoffLane，用户的请求是 L0），
@@ -60,13 +61,29 @@ function resultSize(result: string, itemId: number): string {
   return `全文 ${[...result].length} 字，读进来约 ${formatTokenCount(estimateTextTokens(result))} token，用 get_ticket #${itemId} 看`;
 }
 
-/** 轻子 agent 交付了：系统结单（review → done），记一条活动。返回结果摘要；不是这种情况时返回 null。 */
-function closeLightTask(db: Db, itemId: number, run: { id: number; purpose: string }): { result: string | null } | null {
+type FinishedRun = { id: number; purpose: string; resumed_from_run_id: number | null };
+
+/**
+ * 交付执行成果的 Run：执行 Run 自己；补交成果的修复回合交付的是它来源的执行 Run，成果登记在来源 Run 上
+ * （engine 的 outcome-repair.ts）。别的 Run 不交付执行成果，返回 null。
+ */
+function deliveredRunId(run: FinishedRun): number | null {
+  if (run.purpose === "execution") return run.id;
+  if (run.purpose === "outcome_repair") return run.resumed_from_run_id;
+  return null;
+}
+
+/**
+ * 轻子 agent 交付了：系统结单（review → done），记一条活动。返回结果摘要；不是这种情况时返回 null。
+ * 正常交付和修复回合补交（#546）走这同一条路：两种情况工单都停在 review。
+ */
+function closeLightTask(db: Db, itemId: number, run: FinishedRun): { result: string | null; deliveredRunId: number } | null {
   const item = getItem(db, itemId);
-  if (!item || run.purpose !== "execution" || item.stage !== "review" || !isLightTask(db, itemId)) return null;
+  const delivered = deliveredRunId(run);
+  if (!item || delivered === null || item.stage !== "review" || !isLightTask(db, itemId)) return null;
   transition(db, { itemId, to: "done", actor: "system", reason: "轻子 agent 交回了结果，不需要验收", runId: run.id });
   addActivity(db, { itemId, runId: run.id, actor: "system", kind: "decision", payload: { decision: "light_task_closed" } });
-  return { result: latestOutcomeSummary(db, itemId, run.id) };
+  return { result: latestOutcomeSummary(db, itemId, delivered), deliveredRunId: delivered };
 }
 
 const PURPOSE_LABELS: Record<string, string> = {
@@ -84,10 +101,10 @@ export function recordRunFinished(
   const item = getItem(db, args.itemId);
   // 给了 runId 时只说这个 Run，而且它要已经结束：暂停的 Run 也会收到进程退出的事件，但它没有结束。
   const run = (args.runId === undefined
-    ? db.prepare("SELECT id, purpose FROM runs WHERE item_id=? AND ended_at IS NOT NULL ORDER BY id DESC LIMIT 1")
+    ? db.prepare("SELECT id, purpose, resumed_from_run_id FROM runs WHERE item_id=? AND ended_at IS NOT NULL ORDER BY id DESC LIMIT 1")
       .get(args.itemId)
-    : db.prepare("SELECT id, purpose FROM runs WHERE id=? AND item_id=? AND ended_at IS NOT NULL")
-      .get(args.runId, args.itemId)) as { id: number; purpose: string } | undefined;
+    : db.prepare("SELECT id, purpose, resumed_from_run_id FROM runs WHERE id=? AND item_id=? AND ended_at IS NOT NULL")
+      .get(args.runId, args.itemId)) as FinishedRun | undefined;
   if (args.runId !== undefined && !run) return { woke: false, note: "" };
   const plainSubject = `工单 #${args.itemId}${item ? `「${item.title}」` : ""}的 Run${run ? ` #${run.id}（${PURPOSE_LABELS[run.purpose] ?? run.purpose}）` : ""}`;
   const plainNote = args.error
@@ -99,10 +116,13 @@ export function recordRunFinished(
   const current = light ? getItem(db, args.itemId) : item;
   const subject = `工单 #${args.itemId}${current ? `「${current.title}」` : ""}的 Run${run ? ` #${run.id}（${PURPOSE_LABELS[run.purpose] ?? run.purpose}）` : ""}`;
   // 后台检查开的子 agent（.scratch/lead-watch/spec.md D2）：说明里写是哪个检查、Lead 设它时写的话；外部来源的检查按外部的一轮算。
-  const watched = run?.purpose === "execution" ? watchCheckOfItem(db, args.itemId) : null;
+  const delivers = run ? deliveredRunId(run) !== null : false;
+  const watched = delivers ? watchCheckOfItem(db, args.itemId) : null;
   const watchExternal = watched !== null && watchOrigin(watched.watch).kind === "external";
-  const readExternal = Boolean(light && run && readExternalSystems(db, run.id));
-  const handoff = run?.purpose === "execution" ? itemHandoff(db, args.itemId) : null;
+  // 修复回合补交时，结果是执行 Run 读外部系统得出来的：两个 Run 都看。
+  const readExternal = Boolean(light && run
+    && (readExternalSystems(db, run.id) || (light.deliveredRunId !== run.id && readExternalSystems(db, light.deliveredRunId))));
+  const handoff = delivers ? itemHandoff(db, args.itemId) : null;
   const handoffExternal = Boolean(light && handoff?.external);
   const external = readExternal || watchExternal || handoffExternal;
   // 交接出去的工单：结果交回原来的车道；用户的请求，请 Lead 写一条回复转告（进度卡上已经先显示了结果）。

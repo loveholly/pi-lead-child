@@ -21,7 +21,8 @@ import { RuntimeRegistry } from "@pi-lead-child/runtime";
 import type {
   AgentRuntime, RuntimeCapabilities, RuntimeEvent, RuntimeHandle, RuntimeStartRequest,
 } from "@pi-lead-child/runtime";
-import { openDb, type Db } from "@pi-lead-child/store";
+import { markLightTask, openDb, type Db } from "@pi-lead-child/store";
+import { recordRunFinished } from "../src/run-finished.js";
 import { listInbox } from "@pi-lead-child/store";
 import { createItem, getItem, transition } from "@pi-lead-child/store";
 import { getOutcomeSnapshotForRun } from "@pi-lead-child/store";
@@ -198,6 +199,29 @@ describe("outcome repair turn (spec D4)", () => {
       model: "stub/model", sessionId: "stub", busy: false, runningItemIds: [], aish: null,
     }) });
     expect(control.listRuns(itemId).map((run) => run.purpose)).toEqual(["execution", "execution"]);
+  });
+
+  // #546（2026-11-25）：轻子 agent 的执行 Run 没交接，修复回合补交了成果。工单停在 review 等用户验收；
+  // 按设计它要和正常交付一样，由系统直接结单，结果随 Run 结束的说明交给 Lead。
+  it("closes a light sub-agent ticket after the repair turn, like a normal delivery", async () => {
+    const { itemId, tick } = harness([
+      finishedWithoutHandoff(),
+      repairTurn(`Here is the outcome.\n${envelope("Review verdict: two medium issues (repaired)")}`),
+    ]);
+    markLightTask(db, itemId, "lead");
+    await tick();
+    expect(getItem(db, itemId)!.stage).toBe("blocked");
+    await tick();
+    // daemon 在 child 退出时（onChildDone）说 Run 结束，不带 runId：说的是最后结束的修复回合。
+    recordRunFinished(db, { itemId });
+    expect(getItem(db, itemId)!.stage).toBe("done");
+    const note = db.prepare(
+      `SELECT summary, payload FROM inbox WHERE item_id=? AND json_extract(payload, '$.kind')='run_finished'
+       ORDER BY id DESC LIMIT 1`,
+    ).get(itemId) as { summary: string; payload: string };
+    expect(note.summary).toContain("轻子 agent 交回了结果，系统已结单");
+    expect(note.summary).toContain("Review verdict: two medium issues (repaired)");
+    expect(JSON.parse(note.payload)).toMatchObject({ purpose: "outcome_repair", stage: "done", lightTask: true, wakeLead: true });
   });
 
   it("keeps the original blocker and stage when the repair turn returns no outcome, and repairs only once", async () => {
