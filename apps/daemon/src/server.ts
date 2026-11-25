@@ -38,6 +38,8 @@ import {
 import { isSummaryTokenCapError, leadCompactionInstructions, LEAD_COMPACTION_BUDGETS, type CompactionProgress } from "@pi-lead-child/lead";
 import { contextUsageLine, leadContextUsage, type LeadContextUsage } from "@pi-lead-child/lead";
 import { isInterruptedForSteer } from "@pi-lead-child/lead";
+import { compactionBeforeTurn } from "@pi-lead-child/lead";
+import { ClockGapDetector, clockGapThreshold, EMPTY_RED_LINE_FAILURE, modelHoldAfterUnit } from "@pi-lead-child/lead";
 import {
   AutoCallBudget, autoCallBudgetLimits, autoCallUsageLine, cacheRetentionOf, ModelHold, modelBreakerLimitsFromEnv, PREFIX_WARM_LONG_MS,
   PREFIX_WARM_MS, uncachedTokens, wakePaceDecision, type ModelHoldPort,
@@ -831,10 +833,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       pendingInput: () => hasUnansweredUserTurn()
         || (leadInput.pendingMessages().length > 0 && !(leadWakeRetry && leadWakeRetry.at > Date.now())),
       contextRatio: () => leadContextRatio(),
-      thresholdRatio: () => {
-        const usage = currentContextUsage();
-        return usage && usage.compactAt !== null && usage.window > 0 ? usage.compactAt / usage.window : null;
-      },
+      thresholdRatio: () => leadCompactThresholdRatio(),
       runPrecipitation: () => runPrecipitation(),
       writeInFlight: () => Object.values(sched.unit?.tools ?? {}).find((tool) => tool.write)?.name ?? null,
       yieldUnit: (by) => {
@@ -1042,6 +1041,15 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
   // 两盏灯（lead 的 overflow.ts 和 red-line.ts，用户 2026-11-03）的状态和红线的阶段在调度器里（core.ts）。
   // 这里只留交接窗口的定时器：它是执行层的东西，到点时告诉调度器（handoff.timeout）。
   let handoffTimer: NodeJS.Timeout | null = null;
+  // 进程停住的时间（机器睡眠、合盖）：轮询和交接窗口的定时器每次被叫到时报一下（lead 的 clock-gap.ts）。停住的那一段
+  // 不算进就地预算和交接窗口（2026-11-24 夜里的挂起风暴）。
+  const clockGap = new ClockGapDetector({ thresholdMs: clockGapThreshold(), expectedMs: Number(process.env.PLC_NOTICE_POLL_MS ?? 3000) });
+  function noteClockGap(): void {
+    const gapMs = clockGap.observe(Date.now());
+    if (gapMs <= 0) return;
+    log(schedulerLine("clock.gap_seen", { gapMs, unit: sched.unit?.id ?? "-" }));
+    sched.dispatch({ type: "clock.gap", gapMs });
+  }
   const RED_LINE_TOOLS: ReadonlySet<string> = new Set(RED_LINE_HANDOFF_TOOLS);
   let publishControlEvent: (args: Parameters<typeof publishGatewayEvent>[1]) => ReturnType<typeof publishGatewayEvent> =
     (args) => publishGatewayEvent(db, args);
@@ -4133,8 +4141,16 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
   // 写到上限时按更严的预算再写一次。都不成时：上一次是溢出恢复失败（上下文确实满了），这一轮不调模型，按上下文溢出失败
   // （模型切换按连续溢出算）；只是到了压缩线，照常调模型（还有一点余量），失败只记下。
   async function recoverLeadContext(): Promise<void> {
-    const due = compactionDue;
-    if (due === null || typeof session.compact !== "function") return;
+    // 开一轮以前也按现在的用量看一眼（lead 的 turn-compaction.ts）：过了压缩线先压缩，超过窗口必须先压缩。
+    // 以前只在上一次自动压缩失败时才补（2026-11-24 夜里上下文涨到窗口的 111% 才开始的一轮）。
+    if (typeof session.compact !== "function") return;
+    const ratio = leadContextRatio();
+    const due = compactionBeforeTurn({ due: compactionDue, ratio, thresholdRatio: leadCompactThresholdRatio() });
+    if (due === null) return;
+    if (due !== compactionDue) {
+      log(`context at ${ratio === null ? "?" : (ratio * 100).toFixed(0)}% before the turn: compacting first (${due})`);
+      compactionDue = due;
+    }
     // 压缩刚失败过（不管是谁发起的）：退避到时以前不补压缩，compactionDue 留着，到时的那一轮再补（2026-11-15 的重试风暴：
     // 模型一直出错时，每一轮开头都补压缩一次、失败一次）。溢出照常补：不压缩这一轮就答不了。
     const retryAt = idleLane.compactionRetryAt();
@@ -4178,6 +4194,12 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
   // 替身会话没有这个接口时读最后一次回答的用量（precipitate.ts）。
   // pi 的估算按 4 个字符 1 个 token 算，对数字、编号多的文字偏少（开发模式下估算 85%，服务商报的是 94%）；pi 自己的
   // 压缩线按服务商报的用量判断（_checkCompaction）。所以取两者中大的：最后一次回答报的用量（四项相加）和 pi 的估算。
+  // 压缩线占窗口的比例（pi 的压缩参数）。不知道时为 null。
+  function leadCompactThresholdRatio(): number | null {
+    const usage = currentContextUsage();
+    return usage && usage.compactAt !== null && usage.window > 0 ? usage.compactAt / usage.window : null;
+  }
+
   function leadContextRatio(): number | null {
     if (typeof session.getContextUsage !== "function") return contextUsageRatio(session);
     const usage = session.getContextUsage();
@@ -4453,6 +4475,8 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     only?: EventRecord[];
     // 单元的车道（lead-scheduler spec P2）：为挂起的单元叫醒 Lead 时用挂起的那个单元的车道。不给时按来源定（D2）。
     lane?: Lane;
+    // 这一轮是为挂起的单元叫醒 Lead 开的（值是那个交接包的编号）：它被停下、又什么都没做时不再挂起成新的单元。
+    suspendedWake?: string;
     // 预算的暂停不拦这一轮（外部通道里在等的人、到点的提醒、用户本人设的跟进；wakeForEvents）。账号级的暂停和熔断照样拦：
     // 那时模型调不通。
     pastBudget?: true;
@@ -4816,6 +4840,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       // 交接包的目标（H3）：用户的原话，或者交给这一轮的事和系统的说明。只进交接包，不进日志。
       handoffs.beginUnit({
         unitId, turnId: channelTurn?.turn.id ?? null,
+        ...(options.suspendedWake ? { wakeFor: options.suspendedWake } : {}),
         goal: {
           text: channelTurn ? channelTurn.turn.user_text : [delivered?.text ?? "", unwrapNote(message)].filter(Boolean).join("\n\n"),
           source: unitSource, origin: options.system ?? null, lane: sched.unit?.lane ?? 0,
@@ -5052,7 +5077,13 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       if (digested) log(`digest: ${digested} event(s) digested`);
       if (deliveredInboxIds.length) outcome.inboxIds = deliveredInboxIds;
       // 这一轮答上了：模型账号是好的，解除模型暂停（暂停期间只有用户本人的消息能开一轮）。下面的 dispatchLeadWork 接着交排着的事。
-      if (succeeded) modelHold.lift(options.system ? "lead_turn" : "user_turn");
+      // 例外：这个单元一个工具都没调就被红线停下了（模型一直没回答）。它不算答上，记一次失败：连续 3 次熔断，暂停自动调用，
+      // 告诉用户（model-hold.ts），不再一轮轮静默地挂起（2026-11-24 夜里的挂起风暴）。
+      const holdAfterUnit = modelHoldAfterUnit(succeeded, sched.unit);
+      if (holdAfterUnit === "fail") {
+        log(schedulerLine("unit.empty_cut", { unit: sched.unit?.id ?? "-", aborts: sched.unit?.aborts.map((reason) => reason.kind).join(",") ?? "-" }));
+        modelHold.failed("turn", EMPTY_RED_LINE_FAILURE);
+      } else if (holdAfterUnit === "lift") modelHold.lift(options.system ? "lead_turn" : "user_turn");
       if (carriedEvents && !offline && !interrupted) {
         if (succeeded || modelHold.held) {
           // 模型暂停：不排重试，事件留在游标后面，解除以后再交。
@@ -5549,6 +5580,8 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
   // 空闲车道的心跳（P4）：单元结束时和空闲满 graceMs 时都会看一眼；这里兜住启动时（会话还没建好）和别的漏掉的时机。
   const IDLE_HEARTBEAT_MS = 30_000;
   function pollNotices(): void {
+    // 先看进程有没有停住过：下面的预算检查要用扣掉睡眠以后的时间。
+    pollStep("clock-gap", () => noteClockGap());
     pollStep("idle-lane", () => {
       if (!sched.busy && !sched.starting) idleLane.check({ ifOlderThanMs: Math.min(IDLE_HEARTBEAT_MS, idleLane.limits.graceMs) });
     });
@@ -6176,7 +6209,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     const next = handoffs.nextWake();
     if (!next) return;
     log(schedulerLine("suspended.wake_start", { pkg: next.pkg.id, of: next.pkg.unitId, lane: `L${next.lane}`, raised: next.raised }));
-    void runTurn(SUSPENDED_WAKE_TEXT, { system: SYSTEM_TURN_ORIGINS.blocker, lane: next.lane }).then((outcome) => {
+    void runTurn(SUSPENDED_WAKE_TEXT, { system: SYSTEM_TURN_ORIGINS.blocker, lane: next.lane, suspendedWake: next.pkg.id }).then((outcome) => {
       if (!outcome.deferred && !outcome.offline) handoffs.noteWake(next.pkg.id, next.lane);
     });
   }
@@ -6285,6 +6318,10 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       case "unit.suspend":
         handoffs.suspend(effect.reason);
         return;
+      // 交接窗口因为机器睡眠往后推了：再等剩下的那一段。
+      case "handoff.rearm":
+        armHandoffTimer(effect.inMs, schedulerLimits().handoffMs);
+        return;
       default:
         return;
     }
@@ -6310,6 +6347,21 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     return counted.length ? counted : atStop;
   }
 
+  // 交接窗口的定时器。到点时先看进程有没有停住过（机器睡眠时定时器在醒来那一刻到点）：停住过，调度器把窗口往后推，
+  // 给出 handoff.rearm，这里再定一次时。
+  function armHandoffTimer(inMs: number, windowMs: number): void {
+    if (handoffTimer) clearNodeTimeout(handoffTimer);
+    handoffTimer = setNodeTimeout(() => {
+      handoffTimer = null;
+      if (schedRedLinePhase(sched.state) !== "handoff") return;
+      noteClockGap();
+      const effects = sched.dispatch({ type: "handoff.timeout" });
+      if (effects.some((effect) => effect.type === "handoff.rearm")) return;
+      log(`lead red line: the hand-off took over ${Math.round(windowMs / 1_000)}s; ending the turn`);
+    }, Math.max(0, inMs));
+    handoffTimer.unref();
+  }
+
   // 红线中断以后，这一次 prompt 返回了：在同一轮里马上给 Lead 红线消息。pi 先送这条，再送排着的插话；排队的消息
   // 等 Lead 交接完（这一段最后的回答）才送，那时工具限制已经解除。交接超过 PLC_LEAD_HANDOFF_MS 时再中断一次，这一轮结束。
   // 交接是这个单元的第二段运行：用一个新的 controller（AbortSignal 只能触发一次）。
@@ -6323,13 +6375,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       if (!handoff) return;
       activeTurnError = null;
       sched.nextSegment();
-      handoffTimer = setNodeTimeout(() => {
-        handoffTimer = null;
-        if (schedRedLinePhase(sched.state) !== "handoff") return;
-        log(`lead red line: the hand-off took over ${Math.round(handoff.timeoutMs / 1_000)}s; ending the turn`);
-        sched.dispatch({ type: "handoff.timeout" });
-      }, handoff.timeoutMs);
-      handoffTimer.unref();
+      armHandoffTimer(handoff.timeoutMs, handoff.timeoutMs);
       // 交接这一段 Lead 说了什么：没说话时系统替它写一句确认（lead-scheduler spec H6）。
       const spokenBefore = activeChannelTurn?.assistantText.length ?? 0;
       try {

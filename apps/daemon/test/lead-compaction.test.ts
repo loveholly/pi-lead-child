@@ -40,7 +40,8 @@ type Compaction = { kind: "ok" } | { kind: "fail"; errorMessage: string } | { ki
 
 // 不调用模型的 Lead。每一轮先回答一句话，再按 plan 的下一项做一次压缩（整理笔记那一轮只回 NO_REPLY，不压缩）。
 // compactError：会话有 compact（daemon 在一轮开头的补压缩用它），每次都按这句话失败；compacts 记它被调了几次。
-function stubLead(plan: Array<Compaction | null>, options: { contextFull?: boolean; compactError?: string } = {}) {
+// contextOver：每一轮以后上下文到窗口的 120%；compactOk：会话的 compact 成功，上下文回到 10%。
+function stubLead(plan: Array<Compaction | null>, options: { contextFull?: boolean; contextOver?: boolean; compactError?: string; compactOk?: boolean } = {}) {
   const compacts: number[] = [];
   const listeners: Array<(event: any) => void> = [];
   const prompts: string[] = [];
@@ -59,7 +60,7 @@ function stubLead(plan: Array<Compaction | null>, options: { contextFull?: boole
     modelName: "stub/model",
     session: {
       sessionId: "stub-session",
-      ...(options.contextFull ? {
+      ...(options.contextFull || options.contextOver ? {
         model: { contextWindow: 100 },
         agent: { state: { messages: [{ role: "assistant", usage }] } },
       } : {}),
@@ -70,7 +71,7 @@ function stubLead(plan: Array<Compaction | null>, options: { contextFull?: boole
       },
       async prompt(message: string) {
         prompts.push(message);
-        usage.input = 90;
+        usage.input = options.contextOver ? 120 : 90;
         if (message.includes("沉淀检查")) {
           say("NO_REPLY");
           return;
@@ -107,6 +108,12 @@ function stubLead(plan: Array<Compaction | null>, options: { contextFull?: boole
         async compact() {
           compacts.push(Date.now());
           throw new Error(options.compactError);
+        },
+      } : options.compactOk ? {
+        async compact() {
+          compacts.push(Date.now());
+          usage.input = 10;
+          return { summary: "摘要", firstKeptEntryId: "entry-1", tokensBefore: 120 };
         },
       } : {}),
       async steer() {},
@@ -247,6 +254,26 @@ describe("the compaction backoff", () => {
     expect(logs.some((line) => line.includes("compaction before the turn skipped"))).toBe(true);
     const failures = db.prepare("SELECT count(*) AS n FROM events WHERE kind = 'lead.compaction_failed'").get() as { n: number };
     expect(failures.n).toBe(1);
+  });
+});
+
+// 2026-11-24 夜里：空闲车道的压缩都在机器睡眠里超时，上下文涨到窗口的 111%。以前开一轮以前只在「上一次自动压缩失败了」时
+// 才补压缩，没有这个标记就带着超出窗口的上下文直接调模型。现在开一轮以前按现在的用量看：超过窗口先压缩，再调模型。
+describe("the context before a turn", () => {
+  it("compacts first when the context is over the window, then sends the turn", async () => {
+    // 空闲车道不在两轮之间自己压缩：这里只看开一轮以前的那一次。
+    vi.stubEnv("PLC_LEAD_IDLE_GRACE_MS", "600000");
+    const lead = stubLead([], { contextOver: true, compactOk: true });
+    const { logs, chat } = await start(lead);
+    await chat("第一轮");
+    await vi.waitFor(() => expect(userPrompts(lead.prompts)).toHaveLength(1));
+    expect(lead.compacts).toHaveLength(0);
+    const before = Date.now();
+    await chat("第二轮");
+    await vi.waitFor(() => expect(userPrompts(lead.prompts)).toHaveLength(2));
+    expect(lead.compacts).toHaveLength(1);
+    expect(lead.compacts[0]).toBeGreaterThanOrEqual(before);
+    expect(logs.some((line) => line.includes("before the turn: compacting first (overflow)"))).toBe(true);
   });
 });
 

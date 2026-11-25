@@ -10,6 +10,7 @@ export * from "./handoffs.js";
 export * from "./budget-status.js";
 export * from "./idle-lane.js";
 export * from "./idle-compaction.js";
+export * from "./clock-gap.js";
 export {
   IdleLaneRuntime, idleLaneExtension, IDLE_APPLY_INSTRUCTIONS, IDLE_PROBE_INSTRUCTIONS,
   type IdleLaneHost, type IdleLaneRuntimeOptions, type ManualCompactRefusal, type ManualCompactReport, type ManualCompactTicket, type PrecipitationOutcome,

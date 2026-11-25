@@ -47,7 +47,13 @@ export interface UnitGoalInput {
   unitId: string;
   turnId: string | null;
   goal: HandoffGoal;
+  // 这个单元是系统为挂起的单元叫醒 Lead 开的（值是那个交接包的编号）。它自己被停下、又什么都没做时不再挂起成新的单元：
+  // 挂起的那一个还在，下一次照常叫醒（防反馈环，2026-11-24 夜里一个挂起的单元滚成约 50 个）。
+  wakeFor?: string;
 }
+
+/** 挂起时没有存新包的原因：叫醒挂起单元的那一轮什么都没做（empty_wake），或者已经有一个同样目标、也什么都没做的包（merged）。 */
+export type SuspendSkip = { skipped: "empty_wake" | "merged"; into: string | null };
 
 export interface LeadHandoffsOptions {
   dataDir: string;
@@ -253,6 +259,16 @@ export class LeadHandoffs {
     const goal = this.#goal;
     const unit = this.#options.scheduler.unit;
     if (!goal || !unit || unit.id !== goal.unitId || this.handedOffThisUnit(unit.id)) return null;
+    const skip = this.#emptySuspend(goal);
+    if (skip) {
+      this.#options.log(schedulerLine("suspend.skipped", {
+        unit: unit.id, turn: unit.turnId ?? "-", lane: laneName(unit.lane), reason, why: skip.skipped, into: skip.into,
+      }));
+      this.#record("decided", {
+        unitId: unit.id, turnId: unit.turnId, lane: laneName(unit.lane), decision: "suspend_skipped", reason, why: skip.skipped, into: skip.into,
+      });
+      return null;
+    }
     const started = this.#now();
     const { pkg, files } = this.#build("suspended", null);
     const state: HandoffRecordState = { state: "suspended", reason, wakes: 0, lane: pkg.goal.lane, at: new Date(this.#now()).toISOString() };
@@ -268,6 +284,20 @@ export class LeadHandoffs {
       steps: stats.steps as number, committed: stats.committed as number, unknown: stats.unknown as number,
     });
     return pkg;
+  }
+
+  // 一个工具都没调过的单元，挂起它不会多存下任何做过的事：
+  //   · 叫醒挂起单元的那一轮：它的目标就是「去处理挂起的单元」，那个单元还挂着，不再生一个新的（防反馈环）；
+  //   · 已经有一个同样目标、也一步没做的挂起包：并进那一个，不重复。
+  #emptySuspend(goal: UnitGoalInput): SuspendSkip | null {
+    if ((this.#work?.calls ?? 0) > 0) return null;
+    if (goal.wakeFor) {
+      const target = this.#stored.get(goal.wakeFor);
+      return { skipped: "empty_wake", into: target?.state.state === "suspended" ? goal.wakeFor : null };
+    }
+    const same = [...this.#stored.values()].find((stored) => stored.state.state === "suspended"
+      && stored.pkg.steps.length === 0 && stored.pkg.goal.text === goal.goal.text);
+    return same ? { skipped: "merged", into: same.pkg.id } : null;
   }
 
   /** Lead 处理一个挂起的单元：接着做（resume），或者丢下（drop）。返回给 Lead 的说明。 */

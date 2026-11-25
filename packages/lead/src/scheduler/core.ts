@@ -62,6 +62,11 @@ export interface RedLineState {
   // 停下时在等的人（送交接消息时都已经送到了，就用这一份）。
   waiting: WaitingEntry[];
   stoppedAt: number;
+  // 交接窗口什么时候到（handoff 阶段才有）。机器睡着的时间不算（clock.gap 把它往后推）：窗口的定时器在醒来时到点，
+  // 还没到这个时间就重新定时（handoff.rearm）。
+  handoffDueAt?: number;
+  // 交接窗口里机器睡过（clock.gap）：只有这时窗口的定时器才可能早于 handoffDueAt 到点、需要重新定时。
+  slept?: boolean;
 }
 
 export interface ToolInFlight {
@@ -107,6 +112,8 @@ export interface UnitState {
   handedOff: string | null;
   // 用户本人的消息要抢占这个单元，但当时有工具在跑：到下一个让出点再中止（P3）。by 是用户那一轮。
   preemptPending: { by: string; at: number } | null;
+  // 机器睡着、进程停住的时间（clock.gap，工单「夜间挂起风暴」）。预算和交接窗口不算这段时间。
+  pausedMs: number;
 }
 
 export interface SchedulerState {
@@ -161,7 +168,10 @@ export type SchedulerEvent =
   // P3：用户本人的消息（by 是那一轮）要抢占正在跑的单元。stage 是这一步现在的阶段（只为日志）。
   | { type: "preempt.request"; by: string; stage: string | null }
   // 排着等抢占的用户消息都被取消了（P3 收尾）：不用再让，撤回等着的抢占。by 是最后取消的那一条。
-  | { type: "preempt.withdraw"; by: string };
+  | { type: "preempt.withdraw"; by: string }
+  // 进程停住了一段时间（机器睡眠、合盖，或者主线程被卡住）：gapMs 是没有醒着的时间。就地预算和交接窗口按醒着的时间算，
+  // 不把它算进去（2026-11-24 夜里：合盖以后每次只醒几秒，墙钟把 8–17 分钟的睡眠算成「就地做了」，一醒就停下）。
+  | { type: "clock.gap"; gapMs: number };
 
 /** 要写进 events 表和会话文件的调度记录（D12）。payload 里只有编号、数字和种类。 */
 export type SchedulerRecordKind = "unit_started" | "unit_ended" | "decided" | "aborted" | "lane_changed" | "stage_slow"
@@ -183,7 +193,9 @@ export type SchedulerEffect =
   // 红线中断以后这一次 prompt 返回了：在同一个单元里送红线消息，并在 timeoutMs 以后发 handoff.timeout。
   | { type: "redline.handoff"; elapsedMs: number; waiting: WaitingEntry[]; timeoutMs: number }
   // P2：把这个单元挂起（H10）：交接包存下来，不需要模型调用。
-  | { type: "unit.suspend"; reason: "handoff_timeout" | "handoff_skipped" | "preempt" };
+  | { type: "unit.suspend"; reason: "handoff_timeout" | "handoff_skipped" | "preempt" }
+  // 交接窗口的定时器到点了，可是窗口因为机器睡眠往后推了：inMs 以后再定一次时。
+  | { type: "handoff.rearm"; inMs: number };
 
 export interface SchedulerStep {
   state: SchedulerState;
@@ -225,6 +237,28 @@ export function abortedByRedLine(state: SchedulerState): boolean {
   const phase = redLinePhase(state);
   return phase === "aborting" || phase === "closing";
 }
+
+/**
+ * 这个单元一个工具都没调过，却被红线停下了（就地预算到了，或者交接窗口到了）：它没有做任何事，这不是「就地做久了」，
+ * 是模型一直没有给出回答（请求挂住、连不上）。daemon 把它记成一次模型调用失败（model-hold.ts 的熔断），
+ * 连续几次以后暂停自动调用、告诉用户，不再一轮轮静默地挂起（2026-11-24 夜里的挂起风暴）。
+ */
+export function emptyRedLineUnit(unit: Pick<UnitState, "totalToolCalls" | "aborts"> | null | undefined): boolean {
+  if (!unit || unit.totalToolCalls > 0) return false;
+  return unit.aborts.some((reason) => reason.kind === "budget" || reason.kind === "handoff_timeout");
+}
+
+/**
+ * 一轮结束时，对模型暂停（model-hold.ts）做什么：答上了解除（lift），一个工具都没调就被红线停下的记一次失败（fail）。
+ * 没答上的一轮在出错的地方已经记过失败，这里不再记（null）。以前答上了就一律解除，空转的单元把熔断的计数一次次清零。
+ */
+export function modelHoldAfterUnit(succeeded: boolean, unit: Pick<UnitState, "totalToolCalls" | "aborts"> | null | undefined): "lift" | "fail" | null {
+  if (!succeeded) return null;
+  return emptyRedLineUnit(unit) ? "fail" : "lift";
+}
+
+/** 记进模型熔断的那句失败（不像断网、不像账号问题：model-hold.ts 按普通的失败数）。 */
+export const EMPTY_RED_LINE_FAILURE = "Lead's turn reached the in-place budget without one tool call: the model gave no answer";
 
 /** 交接时这一轮只能用的工具；没有限制时为 null。 */
 export function handoffGate<T>(state: SchedulerState, tools: T): T | null {
@@ -433,7 +467,7 @@ export function schedulerStep(state: SchedulerState, event: SchedulerEvent, now:
         id: event.id, lane: event.lane, source: event.source, origin: event.origin, turnId: event.turnId,
         openedAt: now, beganAt: null, budgetStartedAt: null, toolCalls: 0, totalToolCalls: 0, steps: 0,
         yellowReminded: false, secondReminded: false, queueNoticed: false, queueHeld: false, redLine: null, aborts: [],
-        tools: {}, segment: 1, handedOff: null, preemptPending: null,
+        tools: {}, segment: 1, handedOff: null, preemptPending: null, pausedMs: 0,
       };
       const deadline = LANES[event.lane].firstResponseMs;
       return {
@@ -487,11 +521,12 @@ export function schedulerStep(state: SchedulerState, event: SchedulerEvent, now:
         effects: [
           { type: "log", line: schedulerLine("unit.end", {
             ...unitFields(unit), outcome: event.outcome, ms, steps: unit.steps, toolCalls: unit.totalToolCalls, aborts,
-            redLine: unit.redLine?.phase ?? "-",
+            redLine: unit.redLine?.phase ?? "-", ...(unit.pausedMs ? { pausedMs: unit.pausedMs } : {}),
           }) },
           { type: "record", kind: "unit_ended", payload: {
             unitId: unit.id, turnId: unit.turnId, lane: laneName(unit.lane), source: unit.source, outcome: event.outcome,
             ms, steps: unit.steps, toolCalls: unit.totalToolCalls, aborts, redLine: unit.redLine?.phase ?? null,
+            ...(unit.pausedMs ? { pausedMs: unit.pausedMs } : {}),
           } },
         ],
       };
@@ -530,7 +565,9 @@ export function schedulerStep(state: SchedulerState, event: SchedulerEvent, now:
       // 红线中断以后这一次 prompt 返回了：在同一个单元里马上叫 Lead 交接（以前的 continueAfterRedLine）。
       if (!unit?.redLine || unit.redLine.phase !== "aborting" || abortedForRestart(state)) return { state, effects: [] };
       const elapsed = now - (unit.budgetStartedAt ?? now);
-      const next: UnitState = { ...unit, redLine: { ...unit.redLine, phase: "handoff" }, segment: unit.segment + 1 };
+      const next: UnitState = {
+        ...unit, redLine: { ...unit.redLine, phase: "handoff", handoffDueAt: now + event.limits.handoffMs }, segment: unit.segment + 1,
+      };
       return {
         state: withUnit(state, next),
         effects: [
@@ -544,6 +581,17 @@ export function schedulerStep(state: SchedulerState, event: SchedulerEvent, now:
     }
     case "handoff.timeout": {
       if (!unit?.redLine || unit.redLine.phase !== "handoff") return { state, effects: [] };
+      // 定时器在机器醒来时到点，可是醒着的时间还没到窗口：再等剩下的那一段。
+      const dueAt = unit.redLine.handoffDueAt;
+      if (unit.redLine.slept && dueAt !== undefined && now < dueAt) {
+        return {
+          state,
+          effects: [
+            { type: "log", line: schedulerLine("decide", { ...unitFields(unit), decision: "handoff_rearm", inMs: dueAt - now, pausedMs: unit.pausedMs }) },
+            { type: "handoff.rearm", inMs: dueAt - now },
+          ],
+        };
+      }
       const reason: LeadAbortReason = { kind: "handoff_timeout" };
       // 交接窗口到了还没交（H1）：中止这一段，单元挂起（H10）。已经交了（Lead 还在写那句话）时只中止。
       const suspend: SchedulerEffect[] = unit.handedOff ? [] : [
@@ -656,6 +704,29 @@ export function schedulerStep(state: SchedulerState, event: SchedulerEvent, now:
         };
       }
       return preemptNow(state, event.by, now, "model");
+    }
+    case "clock.gap": {
+      if (!unit || !(event.gapMs > 0)) return { state, effects: [] };
+      const gap = event.gapMs;
+      const redLine = unit.redLine
+        ? {
+          ...unit.redLine, stoppedAt: unit.redLine.stoppedAt + gap,
+          ...(unit.redLine.handoffDueAt !== undefined ? { handoffDueAt: unit.redLine.handoffDueAt + gap, slept: true } : {}),
+        }
+        : null;
+      const next: UnitState = {
+        ...unit, budgetStartedAt: unit.budgetStartedAt === null ? null : unit.budgetStartedAt + gap, redLine, pausedMs: unit.pausedMs + gap,
+        ...(unit.preemptPending ? { preemptPending: { ...unit.preemptPending, at: unit.preemptPending.at + gap } } : {}),
+      };
+      return {
+        state: withUnit(state, next),
+        effects: [
+          { type: "log", line: schedulerLine("clock.gap", { ...unitFields(unit), gapMs: gap, pausedMs: next.pausedMs, redLine: unit.redLine?.phase ?? "-" }) },
+          { type: "record", kind: "decided", payload: {
+            unitId: unit.id, turnId: unit.turnId, lane: laneName(unit.lane), decision: "clock_gap", gapMs: gap, pausedMs: next.pausedMs,
+          } },
+        ],
+      };
     }
     case "preempt.withdraw": {
       if (!unit?.preemptPending) return { state, effects: [] };

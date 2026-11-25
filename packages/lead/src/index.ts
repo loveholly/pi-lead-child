@@ -13,6 +13,7 @@ export * from "./environment.js";
 export * from "./model-config.js";
 export * from "./model-failover.js";
 export * from "./model-hold.js";
+export * from "./turn-compaction.js";
 export * from "./auto-call-budget.js";
 export * from "./subscriptions.js";
 export * from "./wake-pace.js";
