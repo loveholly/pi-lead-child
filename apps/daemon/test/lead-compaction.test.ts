@@ -43,6 +43,8 @@ type Compaction = { kind: "ok" } | { kind: "fail"; errorMessage: string } | { ki
 // contextOver：每一轮以后上下文到窗口的 120%；compactOk：会话的 compact 成功，上下文回到 10%。
 function stubLead(plan: Array<Compaction | null>, options: { contextFull?: boolean; contextOver?: boolean; compactError?: string; compactOk?: boolean } = {}) {
   const compacts: number[] = [];
+  // 空闲车道碰会话的那几次（取对话、接上摘要）：不是压缩。
+  const idleCompacts: string[] = [];
   const listeners: Array<(event: any) => void> = [];
   const prompts: string[] = [];
   // 每次 prompt 进来时上下文的用量（窗口是 100）：看有没有一轮带着超出窗口的上下文发给模型。
@@ -113,7 +115,15 @@ function stubLead(plan: Array<Compaction | null>, options: { contextFull?: boole
           throw new Error(options.compactError);
         },
       } : options.compactOk ? {
-        async compact() {
+        async compact(instructions?: string) {
+          // 空闲车道用 session.compact 取对话（IDLE_PROBE_INSTRUCTIONS）和接上摘要（IDLE_APPLY_INSTRUCTIONS）。真的 pi 里
+          // 空闲车道的 beforeCompact 钩子取消取对话那一次，pi 抛「Compaction cancelled」，会话不变（agent-session.js 的
+          // session_before_compact）。这个替身没有那个钩子，照样做：不算一次压缩，用量不变。
+          // 以前替身把它当成真的压缩，用量降到 10%，开一轮以前就不需要压缩了（CI 上这条测试因此失败两次）。
+          if (instructions?.startsWith("[plc idle lane")) {
+            idleCompacts.push(instructions);
+            throw new Error("Compaction cancelled");
+          }
           compacts.push(Date.now());
           usage.input = 10;
           return { summary: "摘要", firstKeptEntryId: "entry-1", tokensBefore: 120 };
@@ -124,7 +134,7 @@ function stubLead(plan: Array<Compaction | null>, options: { contextFull?: boole
       dispose() {},
     },
   });
-  return { factory, prompts, promptUsage, aborts, compacts };
+  return { factory, prompts, promptUsage, aborts, compacts, idleCompacts };
 }
 
 async function start(lead: ReturnType<typeof stubLead>) {
