@@ -45,6 +45,8 @@ function stubLead(plan: Array<Compaction | null>, options: { contextFull?: boole
   const compacts: number[] = [];
   const listeners: Array<(event: any) => void> = [];
   const prompts: string[] = [];
+  // 每次 prompt 进来时上下文的用量（窗口是 100）：看有没有一轮带着超出窗口的上下文发给模型。
+  const promptUsage: number[] = [];
   const emit = (event: unknown) => { for (const listener of listeners) listener(event); };
   const say = (text: string) => {
     emit({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: text } });
@@ -71,6 +73,7 @@ function stubLead(plan: Array<Compaction | null>, options: { contextFull?: boole
       },
       async prompt(message: string) {
         prompts.push(message);
+        promptUsage.push(usage.input);
         usage.input = options.contextOver ? 120 : 90;
         if (message.includes("沉淀检查")) {
           say("NO_REPLY");
@@ -121,7 +124,7 @@ function stubLead(plan: Array<Compaction | null>, options: { contextFull?: boole
       dispose() {},
     },
   });
-  return { factory, prompts, aborts, compacts };
+  return { factory, prompts, promptUsage, aborts, compacts };
 }
 
 async function start(lead: ReturnType<typeof stubLead>) {
@@ -267,12 +270,12 @@ describe("the context before a turn", () => {
     const { logs, chat } = await start(lead);
     await chat("第一轮");
     await vi.waitFor(() => expect(userPrompts(lead.prompts)).toHaveLength(1));
-    expect(lead.compacts).toHaveLength(0);
-    const before = Date.now();
+    // 第一轮以后上下文到了窗口的 120%。之后开的每一轮（第二轮，也可能先有一个系统回合）都要先压缩再调模型。
+    // 以前：没有压缩失败留下的标记，第二轮带着 120% 的上下文直接发给模型。
     await chat("第二轮");
     await vi.waitFor(() => expect(userPrompts(lead.prompts)).toHaveLength(2));
-    expect(lead.compacts).toHaveLength(1);
-    expect(lead.compacts[0]).toBeGreaterThanOrEqual(before);
+    expect(lead.compacts.length).toBeGreaterThanOrEqual(1);
+    expect(lead.promptUsage.every((tokens) => tokens <= 100)).toBe(true);
     expect(logs.some((line) => line.includes("before the turn: compacting first (overflow)"))).toBe(true);
   });
 });
