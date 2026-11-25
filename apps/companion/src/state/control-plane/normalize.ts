@@ -122,10 +122,17 @@ export function normalizeConversationSnapshot(
     createdAt: turns[0]?.createdAt ?? null,
     updatedAt: turns.at(-1)?.updatedAt ?? null,
   };
+  // A ticket's snapshot changes only that ticket's part of this session. The other sessions in the store (a topic is
+  // its own session, state/topics.ts) stay as they are: before ticket #535 they were dropped here, and a topic that a
+  // ticket detail replaced on the right came back with no messages.
+  const otherSessions = <T>(record: Record<string, T>): Record<string, T> => (scopedToTicket ? record : {});
   const sessionsById = reuseRecord(previous.sessionsById, {
+    ...otherSessions(previous.sessionsById),
     [sessionId]: reuseValue(previous.sessionsById[sessionId], session),
   });
-  const sessionIds = reuseArray(previous.sessionIds, [sessionId]);
+  const sessionIds = scopedToTicket
+    ? (previous.sessionIds.includes(sessionId) ? previous.sessionIds : [...previous.sessionIds, sessionId])
+    : reuseArray(previous.sessionIds, [sessionId]);
   const turnsById: Record<string, LeadTurnEntity> = scopedToTicket ? { ...previous.turnsById } : {};
   const messagesById: Record<string, MessageEntity> = scopedToTicket ? { ...previous.messagesById } : {};
   const messagePartsById: Record<string, MessagePart> = scopedToTicket ? { ...previous.messagePartsById } : {};
@@ -190,10 +197,12 @@ export function normalizeConversationSnapshot(
     sessionIds,
     turnsById: reuseRecord(previous.turnsById, turnsById),
     turnIdsBySession: reuseRecord(previous.turnIdsBySession, {
+      ...otherSessions(previous.turnIdsBySession),
       [sessionId]: reuseArray(previous.turnIdsBySession[sessionId] ?? [], turnIds),
     }),
     messagesById: reuseRecord(previous.messagesById, messagesById),
     messageIdsBySession: reuseRecord(previous.messageIdsBySession, {
+      ...otherSessions(previous.messageIdsBySession),
       [sessionId]: reuseArray(previous.messageIdsBySession[sessionId] ?? [], messageIds),
     }),
     messageIdsByTicket: reuseRecord(previous.messageIdsByTicket, messageIdsByTicket),

@@ -194,6 +194,22 @@ describe('control-plane snapshot normalization', () => {
     ]);
   });
 
+  // Ticket #535: a topic is its own session in the same store. A ticket's snapshot must not drop it.
+  it('keeps the other sessions (a topic) when a ticket\'s snapshot replaces that ticket\'s conversation', () => {
+    const withTopic = normalizeConversationSnapshot(conversationProjection(), 'topic:5', [
+      turn({ id: 'tturn_1', ticketId: null, userText: '哪个最短？', assistantText: '第二个。' }),
+    ]);
+    const result = normalizeConversationSnapshot(withTopic, 'session-1', [turn({ id: 'ticket-turn', ticketId: 49 })], { ticketId: 49 });
+
+    expect(result.messageIdsBySession['topic:5']).toEqual(['topic:5:tturn_1:user', 'topic:5:tturn_1:assistant']);
+    expect(result.messageIdsBySession['topic:5']).toBe(withTopic.messageIdsBySession['topic:5']);
+    expect(result.turnIdsBySession['topic:5']).toEqual(['tturn_1']);
+    expect(result.sessionsById['topic:5']).toBe(withTopic.sessionsById['topic:5']);
+    expect(result.sessionIds).toEqual(['topic:5', 'session-1']);
+    expect(result.messagesById['topic:5:tturn_1:assistant']).toBe(withTopic.messagesById['topic:5:tturn_1:assistant']);
+    expect(result.messageIdsByTicket[49]).toEqual(['session-1:ticket-turn:user', 'session-1:ticket-turn:assistant']);
+  });
+
   it('is idempotent and does not fabricate non-text parts from assistant text', () => {
     const first = normalizeConversationSnapshot(conversationProjection(), 'session-1', [turn()]);
     const second = normalizeConversationSnapshot(first, 'session-1', [turn()]);
