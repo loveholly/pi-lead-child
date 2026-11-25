@@ -13,7 +13,7 @@ import {
 import type { Scope } from "@pi-lead-child/protocol";
 import { createLeadTools, type LeadDeps } from "../src/tools.js";
 import { enableHostBypass } from "@pi-lead-child/engine";
-import { hostBypassActive, withExternalContent, type LeadTurnOrigin } from "../src/turn-origin.js";
+import { authorityTurnId, hostBypassActive, withExternalContent, type LeadTurnOrigin } from "../src/turn-origin.js";
 
 let db: Db;
 let deps: LeadDeps;
@@ -128,6 +128,18 @@ describe("a follow-up the user set counts as the user's turn when it fires", () 
     origin = { external: true, timer: id };
     await expect(tool("update_lead_profile").execute("t", { name: "Mallory" })).rejects.toThrow(/外部通道/);
     expect(getLeadProfile(db).name).toBe("Jarvis");
+  });
+
+  // 维护者定（2026-11-04）：和外部消息合在同一轮的用户跟进也算用户的一轮（按 setBy，凭 timer:<编号>）。
+  // 读过外部原文的规则不变：设的跟进不带 setBy（规则 2），改名字照样被拒（规则 3，上一条）。
+  it("still counts as the user's turn when an external message joins it", async () => {
+    const { id } = userFollowUp(new Date(Date.now() - 1_000));
+    origin = { external: true, timer: id, externalBy: [{ via: "message", source: "slack" }], externalEvents: [42] };
+    expect(authorityTurnId({ currentTurnId: () => null, turnOrigin: () => origin })).toBe(`timer:${id}`);
+    const set = await tool("follow_up").execute("t", { at: later, note: "按对方说的到点再看一次" });
+    expect(set.isError).toBeUndefined();
+    expect(followUps().find((row) => row.note === "按对方说的到点再看一次")).toMatchObject({ origin: { kind: "user", turnId: `timer:${id}` } });
+    expect(followUps().find((row) => row.note === "按对方说的到点再看一次")!.setBy).toBeUndefined();
   });
 });
 
