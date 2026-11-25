@@ -158,6 +158,8 @@ describe("syncing the system orders only moves forward", () => {
       "triage.jev": "1:d81bb76672a7",
       "channel.authority": "1:6f297a03d6d3",
       "channel.handbook": "4:f5a1373e9469",
+      // 对话熔断和静音（工单 #533，2026-11-25）。
+      "channel.mute": "1:74546f750650",
     });
   });
 

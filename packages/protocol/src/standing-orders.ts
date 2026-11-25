@@ -17,6 +17,7 @@ import { CHANNEL_INTENT_PERMISSIONS, CHANNEL_INTENTS, DELEGATION_CATEGORIES, SEN
 import { LOOKUP_PLAYBOOKS } from "./channel-lookup.ts";
 import { ChannelConfidenceParamsSchema } from "./channel-confidence.ts";
 import { channelHandbookProblems, ChannelHandbookSchema } from "./channel-handbook.ts";
+import { ChannelMuteParamsSchema } from "./channel-mutes.ts";
 
 // 分诊能定的级别。conversation 只给用户自己的消息，常设指令不能定。
 export const TRIAGE_LEVELS = ["record", "digest", "auto", "tell", "interrupt"] as const;
@@ -71,6 +72,8 @@ export const STANDING_ORDER_RULES = [
   "channel.authority",
   // 交接说明（自动代你处理方案 B，channel-handbook.ts）：每种情况一句话、一种做法，加上对方的上限。只有一条，对所有来源生效。
   "channel.handbook",
+  // 对话的熔断和静音（channel-mutes.ts，工单 #533）：反复叫醒 Lead 都不用管时静音多久，Lead 最长能静音多久。只有一条，对所有来源生效。
+  "channel.mute",
 ] as const;
 export type StandingOrderRule = typeof STANDING_ORDER_RULES[number];
 
@@ -296,6 +299,7 @@ export const STANDING_ORDER_RULE_PARAMS: Record<StandingOrderRule, TSchema> = {
   // 交接说明（channel-handbook.ts）。除了形状，还要有兜底的一句、编号不重复、客户的上限不超过「交给你」
   // （validStandingOrderRuleParams 和 validateStandingOrderDefinition 用 channelHandbookProblems 查）。
   "channel.handbook": ChannelHandbookSchema,
+  "channel.mute": ChannelMuteParamsSchema,
 };
 
 /** 规则的参数合不合格（store 读出一个版本时用：不合格的版本不用）。 */

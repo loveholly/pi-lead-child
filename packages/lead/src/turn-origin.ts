@@ -128,12 +128,13 @@ export function isExternalTextTool(name: string): boolean {
 }
 
 /**
- * 这一轮又带进了一份外部内容：只加不减，同一个来源只记一次。外部消息和声明为外部的工具同时让 external 为 true
+ * 这一轮又带进了一份外部内容：只加不减，同一个来源（的同一个对话）只记一次。外部消息和声明为外部的工具同时让 external 为 true
  * （规则 1–3）；没有声明的工具只记进 externalBy（规则 4），不扩大规则 1–3 的范围。
  */
 export function withExternalContent(origin: LeadTurnOrigin, source: ExternalContentSource): LeadTurnOrigin {
   const known = origin.externalBy ?? [];
-  const seen = known.some((item) => (item.via === "message" && source.via === "message" && item.source === source.source)
+  const seen = known.some((item) => (item.via === "message" && source.via === "message" && item.source === source.source
+      && item.conversation === source.conversation)
     || (item.via === "tool" && source.via === "tool" && item.tool === source.tool));
   const sourceText = source.via === "message" || EXTERNAL_TEXT_TOOLS.has(source.tool);
   return { ...origin, external: origin.external || sourceText, externalBy: seen ? known : [...known, source] };

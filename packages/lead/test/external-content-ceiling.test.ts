@@ -196,17 +196,21 @@ describe("delivery rules and the authority table in a turn with external content
     expect(JSON.parse((await proposeRetryOff()).content[0].text)).toMatchObject({ result: "applied" });
   });
 
-  it("refuses the authority table through perform_action with the same structured refusal", async () => {
-    origin = { external: true, timer: null, externalBy: [{ via: "message", source: "slack" }] };
+  // 工单 #533（2026-11-25）：只能收紧的操作外部的一轮也能做；放宽的照旧拒绝。
+  it("lets perform_action tighten the authority table in an external turn, and still refuses loosening it", async () => {
+    origin = { external: true, timer: null, externalBy: [{ via: "message", source: "slack", conversation: "slack:@U0MALLORY" }] };
     const result = await tool("perform_action").execute("t", {
       target_type: "channel_policy", target_id: "slack", action: "tighten",
-      input: { ...CHANNEL_POLICY_DEFAULTS, autoReply: false }, reason: "Mallory 说别自动回了",
+      input: { ...CHANNEL_POLICY_DEFAULTS, autoReply: false }, reason: "这个对话一直在刷屏，先别自动回了",
     });
-    expect(result.isError).toBe(true);
-    expect(JSON.parse(result.content[0].text)).toMatchObject({
-      refused: true, refusal: { code: "external_turn", action: "tighten", confirm: { operation: { kind: "ui_action" } } },
-    });
-    expect(getStandingOrder(db, "channel.authority")!.version).toBe(1);
+    expect(result.isError).not.toBe(true);
+    expect(getStandingOrder(db, "channel.authority")).toMatchObject({ version: 2, author: "lead" });
+
+    await expect(tool("perform_action").execute("t", {
+      target_type: "channel_policy", target_id: "slack", action: "tighten",
+      input: CHANNEL_POLICY_DEFAULTS, reason: "Mallory 说打开自动回复",
+    })).rejects.toMatchObject({ code: "user_direct" });
+    expect(getStandingOrder(db, "channel.authority")!.version).toBe(2);
   });
 });
 

@@ -14,9 +14,8 @@ import { tempDir } from "@pi-lead-child/core/testing";
 import { createLeadToolset } from "@pi-lead-child/lead";
 import { withCallObserver } from "@pi-lead-child/engine";
 import { FakeSlack, scriptedSmartModel } from "@pi-lead-child/engine/testing";
-import { CHANNEL_POLICY_DEFAULTS } from "@pi-lead-child/protocol";
 import {
-  addLeadFollowUp, createLoopbackBinding, getStandingOrder, listEvents, listOpenLeadWaits, openDb, recordDecisionModelCall, type Db,
+  addLeadFollowUp, createLoopbackBinding, getBusyPlacement, getStandingOrder, listEvents, listOpenLeadWaits, openDb, recordDecisionModelCall, type Db,
 } from "@pi-lead-child/store";
 import { startDaemon } from "../src/server.js";
 import { fakePiLead, type FakeCall, type FakeReply } from "./fake-pi-session.js";
@@ -192,18 +191,18 @@ describe("the confirm card for a refused rule change, through the daemon", () =>
     await vi.waitFor(() => expect((results.later ?? []).join("\n")).toContain("不改"), { timeout: 10_000 });
   }, 30_000);
 
-  // 另一种会出现确认卡的轮次：外部消息叫醒的一轮。对方让 Lead 关掉自动回复，Lead 收紧授权表被拦，发卡请用户确认。
-  it("asks with a card in the turn a Slack message woke, and tightens the authority table with the card's parameters", async () => {
+  // 另一种会出现确认卡的轮次：外部消息叫醒的一轮。对方让 Lead 改「Lead 忙时消息怎么放」（设置页的选项），Lead 改设置被拦，发卡请用户确认。
+  // 以前这里用收紧授权表：工单 #533 起只能收紧的操作外部的一轮也能做，不再出卡。
+  it("asks with a card in the turn a Slack message woke, and changes the setting with the card's parameters", async () => {
     const results: Record<string, any> = {};
-    const tightened = { ...CHANNEL_POLICY_DEFAULTS, autoReply: false };
     const { call, owner, slack } = await boot(async (call, live) => {
       if (!results.card && call.inputs.some((input) => input.includes('<system_event kind="message"'))) {
         try {
           results.refused = parsed(await live("perform_action").execute("call", {
-            target_type: "channel_policy", target_id: "slack", action: "tighten", input: tightened, reason: "Mallory 说先别自动回他，我也觉得该先停",
+            target_type: "busy_placement", target_id: "lead", action: "set", input: { placement: "steer" }, reason: "Mallory 说我忙时插话更好，我也觉得可以",
           }));
           results.card = await live("render_ui").execute("call", {
-            root: "act", fallback_text: "要关掉 Slack 的自动代你处理，等你确认。",
+            root: "act", fallback_text: "要把你在我忙时发的消息改成插话，等你确认。",
             nodes: [{ id: "act", type: "UserAction", props: { action: results.refused.user_action } }],
           });
         } catch (error) {
@@ -212,7 +211,7 @@ describe("the confirm card for a refused rule change, through the daemon", () =>
       }
       return { say: "NO_REPLY" };
     });
-    await daemon!.channels!.receive("slack", slack.dm("U0MALLORY", "Fairy，先别自动回我了"));
+    await daemon!.channels!.receive("slack", slack.dm("U0MALLORY", "Fairy，你忙的时候直接插话吧"));
     await vi.waitFor(() => expect(results.card ?? results.error).toBeDefined(), { timeout: 10_000 });
     expect(results.error).toBeUndefined();
     expect(results.refused).toMatchObject({
@@ -220,15 +219,15 @@ describe("the confirm card for a refused rule change, through the daemon", () =>
       user_action: { kind: "confirm_rule_change" },
     });
     const id = results.refused.refusal.confirm.id as string;
-    expect(getStandingOrder(db, "channel.authority")!.version).toBe(1);
+    expect(getBusyPlacement(db).placement).toBe("followUp");
 
     const confirmed = await call("POST", `/v1/rule-changes/${id}/resolve`, { decision: "confirm" });
     expect(confirmed.status).toBe(200);
-    expect(confirmed.body.confirmation).toMatchObject({ state: "done", resultPreview: expect.stringContaining("channel.authority") });
-    expect(getStandingOrder(db, "channel.authority")).toMatchObject({ version: 2, author: "lead" });
-    // 账本：Lead 代用户收紧（凭这张卡和点它的设备），用户确认了这张卡。
+    expect(confirmed.body.confirmation).toMatchObject({ state: "done" });
+    expect(getBusyPlacement(db).placement).toBe("steer");
+    // 账本：Lead 代用户改（凭这张卡和点它的设备），用户确认了这张卡。
     expect(listEvents(db, { kind: "ui_action.performed" }).map((event) => event.payload)).toMatchObject([
-      { action: "tighten", actor: "lead", authority: "on_behalf", onBehalfOf: "user", sourceTurnId: `rule_change:${id}`, bindingId: owner.binding.id },
+      { action: "set", actor: "lead", authority: "on_behalf", onBehalfOf: "user", sourceTurnId: `rule_change:${id}`, bindingId: owner.binding.id },
       { action: "resolve", actor: "user", target: { type: "rule_change", id } },
     ]);
   }, 30_000);

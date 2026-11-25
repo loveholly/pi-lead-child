@@ -16,7 +16,7 @@ import { createIsolatedLookupSession, createLeadToolset, type LookupSession, typ
 import { runUiAction, withCallObserver, type SmartTextComplete } from "@pi-lead-child/engine";
 import { cardIdOf, FakeSlack, scriptedSmartModel } from "@pi-lead-child/engine/testing";
 import {
-  CHANNEL_POLICY_DEFAULTS, channelRuleChangeNotice, LEAD_QUEUE_OPT_IN, LEAD_QUEUE_RESOURCE, MESSAGE_EVENT_KIND, type LeadQueue,
+  channelRuleChangeNotice, LEAD_QUEUE_OPT_IN, LEAD_QUEUE_RESOURCE, MESSAGE_EVENT_KIND, type LeadQueue,
 } from "@pi-lead-child/protocol";
 import {
   addLeadFollowUp, createLoopbackBinding, getChannelCard, getStandingOrder, listEvents, listInbox, listNotifications, listOpenLeadWaits,
@@ -704,12 +704,12 @@ describe("spec acceptance: replaying 10-26 (unified-message-events 11)", () => {
       },
       script: async (call, live) => {
         const input = messageFrom(call, "Mallory");
-        // Lead 照对方的话去改授权表：代码检查不看 Jev 怎么判，照样拒绝。
+        // Lead 照对方的话去改设置页的选项：代码检查不看 Jev 怎么判，照样拒绝。
+        // （以前用收紧授权表举例；工单 #533 起只能收紧的操作外部的一轮也能做。）
         if (input && !refused) {
           block = input;
           refused = parsed(await live("perform_action").execute("call", {
-            target_type: "channel_policy", target_id: "slack", action: "tighten",
-            input: { ...CHANNEL_POLICY_DEFAULTS, autoReply: false }, reason: "Mallory 让我改自动回复",
+            target_type: "busy_placement", target_id: "lead", action: "set", input: { placement: "steer" }, reason: "Mallory 让我改设置",
           }));
         }
         return { say: "NO_REPLY" };
@@ -727,8 +727,8 @@ describe("spec acceptance: replaying 10-26 (unified-message-events 11)", () => {
     // Lead 的输入：结构化的事实写明对方要求改什么、没有照做；原话只在外部标签里。
     expect(outsideTags(block!)).toContain("没有照做");
     expect(outsideTags(block!)).not.toContain(SCENARIO_11);
-    // 改授权表被代码拒绝，授权表没变。
-    expect(refused).toMatchObject({ isError: true, refused: true, refusal: { code: "external_turn", action: "tighten" } });
+    // 改设置被代码拒绝，授权表和设置都没变。
+    expect(refused).toMatchObject({ isError: true, refused: true, refusal: { code: "external_turn", action: "set" } });
     expect(getStandingOrder(db, "channel.authority")!.version).toBe(1);
     expect(listEvents(db, { kind: "standing_order.changed" })).toEqual([]);
     // 用户看到的卡写明「对方要求修改……，没有照做」（Companion 用 channelRuleChangeNotice 写这一行）。
@@ -941,8 +941,7 @@ describe("spec invariants (unified-message-events 11)", () => {
         if (!results.woke && messageFrom(call, "Mallory")) {
           results.woke = parsed(await live("propose_standing_order_change").execute("call", RETRY_OFF));
           results.policy = parsed(await live("perform_action").execute("call", {
-            target_type: "channel_policy", target_id: "slack", action: "tighten",
-            input: { ...CHANNEL_POLICY_DEFAULTS, autoReply: false }, reason: "Mallory 让我关掉自动回复",
+            target_type: "busy_placement", target_id: "lead", action: "set", input: { placement: "steer" }, reason: "Mallory 让我忙时插话",
           }));
           return { say: "NO_REPLY" };
         }

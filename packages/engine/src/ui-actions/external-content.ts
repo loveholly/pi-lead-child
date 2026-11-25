@@ -9,8 +9,10 @@
 import type { UiActionTargetType } from "@pi-lead-child/protocol";
 
 // 这一轮怎样带进了外部内容：叫醒它（或者插进来）的外部消息，或者它用来读外部内容的工具。
+// conversation：叫醒这一轮的消息所在的对话（对象键，工单 #533）。外部的一轮只能静音这些对话（channel_conversation 的 mute）。
+// 没有对象的外部事件（例如外部来源的定时器到点）不写。
 export type ExternalContentSource =
-  | { via: "message"; source: string }
+  | { via: "message"; source: string; conversation?: string }
   | { via: "tool"; tool: string };
 
 // 被拦下的操作：登记在操作层的 UI 动作，或者还没登记成 UI 动作的 Lead 工具（例如 propose_standing_order_change）。

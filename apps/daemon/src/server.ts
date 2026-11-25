@@ -988,7 +988,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     isExternalTool: isExternalTextTool,
     turnOrigin: () => ({
       external: runOrigin.external,
-      sources: (runOrigin.externalBy ?? []).map((source) => (source.via === "message" ? source.source : source.tool)),
+      sources: [...new Set((runOrigin.externalBy ?? []).map((source) => (source.via === "message" ? source.source : source.tool)))],
     }),
     ticketOpen: (ticketId) => {
       const item = getItem(db, ticketId);
@@ -6276,7 +6276,9 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       const named = typeof event.payload.source === "string" && event.payload.source ? event.payload.source : null;
       const source = named
         ?? (event.kind.startsWith("channel.") ? /^([a-z][a-z0-9_-]*):/u.exec(event.entityKey)?.[1] ?? event.kind : event.source);
-      const marked = withExternalContent(next, { via: "message", source });
+      // 消息事件和通道 hub 的事件的对象就是那个对话（对象键）：外部的一轮只能静音这些对话（工单 #533）。
+      const conversation = (event.kind === MESSAGE_EVENT_KIND || event.kind.startsWith("channel.")) && event.entityKey ? event.entityKey : null;
+      const marked = withExternalContent(next, { via: "message", source, ...(conversation ? { conversation } : {}) });
       return { ...marked, externalEvents: [...(marked.externalEvents ?? []), event.seq] };
     }, origin);
   }

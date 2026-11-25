@@ -85,14 +85,14 @@ import {
 import { LLM_BACKEND } from "../smart-model/llm.js";
 import type { SmartModel, SmartTextComplete } from "../smart-model/types.js";
 import {
-  appendEvent, appendEventGuarded, channelAuthorityTable, getChannelCatchUpMark, setChannelCatchUpMark, channelDelegatePolicy, channelHandbook, CHANNEL_HANDBOOK_ORDER_ID, channelDeliveryPolicy, channelPolicy, channelReplyPolicy,
+  activeChannelMute, appendEvent, appendEventGuarded, channelAuthorityTable, getChannelCatchUpMark, setChannelCatchUpMark, channelDelegatePolicy, channelHandbook, CHANNEL_HANDBOOK_ORDER_ID, channelDeliveryPolicy, channelPolicy, channelReplyPolicy,
   clipEventText, createChannelLookup, findNoteByTitle, getActiveLookupForCard, getChannelCard, getChannelLane,
   getChannelLaneById, getChannelLookup, getEvent, getLocale, getRun, getLatestChannelCard, getLatestLookupForCard, getOpenChannelCard, hasRecentChannelLane, isActiveLookupState,
-  leadDisplayName, listActiveLookups, listChannelCards, listChannelCardsForObject, listDueSnoozedChannelCards,
+  leadDisplayName, listActiveLookups, markChannelLaneMessageDeleted, listChannelCards, listChannelCardsForObject, listDueSnoozedChannelCards,
   listOpenChannelLanes, listRecentChannelLanes, openChannelCard,
   recordChannelLaneMessage, setChannelLaneOrigin, setChannelLaneSummary, setEventDisposition, syncSystemStandingOrders, updateChannelCard,
   updateChannelLookup, CHANNEL_LANE_ORIGIN_LIMIT,
-  type ChannelCard, type ChannelCardPatch, type ChannelCardSent, type ChannelLane, type ChannelLaneMessage, type ChannelLookup,
+  type ChannelCard, type ChannelCardPatch, type ChannelMuteRecord, type ChannelCardSent, type ChannelLane, type ChannelLaneMessage, type ChannelLookup,
   type Db, type EventRecord,
 } from "@pi-lead-child/store";
 import { channelDeliveryDecision } from "./delivery.js";
@@ -131,6 +131,7 @@ import {
   channelCalibration, confidenceParamsFrom, judgePastMessages, judgePolicyCase, pastChannelMessages, scoredInputRecord, scoreTestMessage,
   type DraftScores, type PastChannelMessage,
 } from "./policy.js";
+import { breakerCheck } from "./mute.js";
 import { maskEmails } from "./pii-mask.js";
 import { channelReplyDecision, type ChannelReplyDecisionResult } from "./reply-decision.js";
 import { replyConfidenceBucket } from "./reply-gate.js";
@@ -705,6 +706,9 @@ export class ChannelHub {
   private urgencyFor(adapter: ChannelAdapter, item: ChannelInbound): { urgency: Promise<ChannelUrgency | null>; release: () => void } {
     const none = { urgency: Promise.resolve(null), release: () => {} };
     if (item.role !== "message") return none;
+    // 删消息只记录（开着的卡上标成已删除），静音的对话只记录：都不用问（工单 #533）。
+    if (item.amends === "deleted") return { urgency: Promise.resolve(channelUrgencyNotAsked("deleted")), release: () => {} };
+    if (this.muteOf(item.objectKey)) return { urgency: Promise.resolve(channelUrgencyNotAsked("muted")), release: () => {} };
     // 不是对用户说的消息最多进摘要，紧急也不推送：不用问。
     if (item.ambient) return { urgency: Promise.resolve(channelUrgencyNotAsked("ambient")), release: () => {} };
     if (this.recordOnly(adapter, item)) return { urgency: Promise.resolve(channelUrgencyNotAsked("record_only")), release: () => {} };
@@ -736,6 +740,7 @@ export class ChannelHub {
   // 别人发来的这条消息即使紧急也只会记录：投递指令按「紧急」算也是 record，或者它改的是一条消息、这个对话又没有没结束的卡。
   // 读不了库时按「不是」处理（照常问）。
   private recordOnly(adapter: ChannelAdapter, item: ChannelInbound): boolean {
+    if (item.amends === "deleted" || this.muteOf(item.objectKey)) return true;
     try {
       // 助手按占位判断过不用回、现在正文变了的编辑（reopenOf）和新消息一样问紧急程度，按原来那条消息的类型定投递。
       const reopen = this.reopenOf(adapter.id, item);
@@ -800,17 +805,23 @@ export class ChannelHub {
       ...(urgency ? { urgency: urgency.basis } : {}),
       ...(maybeDuplicateOf !== null ? { maybeDuplicateOf } : {}),
     };
+    // 删消息（工单 #533）：一律只记录。道里有被删的那条时标成已删除，开着的卡跟着更新（markDeletedNow），不开卡、不交给 Lead。
+    const deleted = item.role === "message" && item.amends === "deleted";
+    // 这个对话在静音（channel-mutes.ts）：别人发来的消息只记录，不开卡、不交给 Lead、不问请求 A（工单 #533）。
+    // 静音期间机器人的回答也不记 answerPending：不等它停下来，也不在停下来以后交给 Lead。
+    const mute = item.role === "message" ? this.muteOf(item.objectKey) : null;
+    if (mute) payload.muted = { until: mute.until, by: mute.by };
     // 机器人在回答你或 Lead 刚问它的话（answersOwnerAsk）：先只记录，记下 answerPending，等它停下来（settleBotAnswers，2026-11-25：
     // 机器人跑长任务时不停地发进度占位、又改又删，每一条都开卡、叫醒 Lead）。停下来以后留下来的那条回答（settled）带 answersAsk：
     // 投递指令按它开卡，授权表不按「不用回」跳过（answerAction）。
-    if (settled) payload.answersAsk = true;
-    else if (item.role === "message" && this.answersAsk(adapter.id, item)) {
+    if (settled && !mute) payload.answersAsk = true;
+    else if (!settled && !mute && item.role === "message" && this.answersAsk(adapter.id, item)) {
       payload.answerPending = { at: at.toISOString(), replyTarget: item.replyTarget, fields: item.fields };
     }
     // 别人发来的消息：先定投递方式，写进事件的 channelDelivery。摘要投递的消息由 06 的「Lead 动态」卡片显示；
     // 会话卡、推送加会话卡的有自己的卡，只记录的不显示：「Lead 动态」不再说一遍（store 的 listLeadActivityEvents）。
     // 助手按占位判断过「不用回」、后来改成了正文：当作新消息再判断一次（reopenOf），投递方式按原来那条消息的类型定。
-    const reopen = item.role === "message" ? this.reopenOf(adapter.id, item) : null;
+    const reopen = item.role === "message" && !mute ? this.reopenOf(adapter.id, item) : null;
     let decision = item.role === "message"
       ? channelDeliveryDecision(channelDeliveryPolicy(db, adapter.id), {
         source: adapter.id, kind: reopen?.kind ?? item.kind, entityKey: item.objectKey, payload, rootCause: null,
@@ -822,10 +833,11 @@ export class ChannelHub {
     }
     // 不是对用户说的消息：投递指令要开卡、推送时也只进摘要（用户改过投递指令也一样）。
     if (decision && ambient && decision.mode !== "record") decision = { ...decision, mode: "digest" };
+    if (decision && (deleted || mute) && decision.mode !== "record") decision = { ...decision, mode: "record" };
     // 合并编辑（统一消息事件 spec D6，inbound.ts）：交给 Lead 时，Lead 拿走以前对方改的消息并进那条消息，不再问一次请求 A，
     // 也不产生新的 Lead 输入：这条编辑只记录，记下以后再并（mergeEditNow）。拿走以后照旧：有卡时更新卡、按新消息再判断。
     // 重开的编辑（reopenOf）按新消息再判断：机器人只记录过的占位没有判断过，editMergeFor 会把它当成「还在判断」压成只记录。
-    const merge = decision && item.amends === "edited" && this.options.lead
+    const merge = decision && item.amends === "edited" && this.options.lead && !mute
       ? reopen !== null ? { kind: "rejudge" as const, queued: null } : this.editMergeFor(adapter.id, item)
       : null;
     if (decision && merge && merge.kind !== "rejudge") decision = { ...decision, mode: "record" };
@@ -860,6 +872,10 @@ export class ChannelHub {
     // 不是对用户说的消息没有道时不开道：它进摘要（事件的级别），沉淀进记忆，但不是用户在场的对话。
     if (ambient && decision && !existingLane) {
       return { item: { ...base, seq: event.seq, inserted: true, delivery: decision.mode }, card: null, push: false };
+    }
+    if (deleted) {
+      const card = this.markDeletedNow(item, text, at);
+      return { item: { ...base, seq: event.seq, inserted: true, delivery: "record", cardId: card?.id ?? null }, card, push: false };
     }
     // 停下来以后的回答：道里已经有这条消息（收到时记过）时不再记一遍。
     const lane = settled && existingLane ? existingLane : recordChannelLaneMessage(db, {
@@ -929,6 +945,43 @@ export class ChannelHub {
       // 对话型来源别人发来的消息：问请求 A（授权表和代查都要它）。
       ...(adapter.kind === "conversation" ? { followUp: { kind: "intake" as const, cardId: card.id, seq: event.seq } } : {}),
     };
+  }
+
+  // 熔断（mute.ts 的 breakerCheck）：Lead 判断一条消息事件不用管以后看一次。出错时只写日志：处置已经记下了。
+  private tripBreaker(objectKey: string): void {
+    try {
+      const muted = this.db.transaction(() => breakerCheck(this.db, objectKey, this.now()))();
+      if (muted) this.log(`[channels] muted ${objectKey} until ${muted.record.until}: it woke Lead repeatedly with nothing to do`);
+    } catch (error) {
+      this.log(`[channels] could not check the breaker of ${objectKey}: ${errorText(error)}`);
+    }
+  }
+
+  // 这个对话现在在静音时，那一次静音（channel-mutes.ts）。读不了库时按没在静音（照常处理）。
+  private muteOf(objectKey: string): ChannelMuteRecord | null {
+    try {
+      return activeChannelMute(this.db, objectKey, this.now());
+    } catch (error) {
+      this.log(`[channels] could not tell whether ${objectKey} is muted: ${errorText(error)}`);
+      return null;
+    }
+  }
+
+  /**
+   * 对方删了一条消息（工单 #533）：道里的那一条标成已删除（文字换成来源给的删除说明，原文不留），不加新的一条。
+   * 这个对话没结束的卡里有它时卡跟着更新：它是卡上最新的一条时摘录也换掉。卡的状态、条数、草稿、投递都不动，不交给 Lead。
+   * 调用方负责事务。返回更新了的卡，没有时是 null。
+   */
+  private markDeletedNow(item: ChannelInbound, text: string, at: Date): ChannelCard | null {
+    const db = this.db;
+    if (!item.messageId) return null;
+    const marked = markChannelLaneMessageDeleted(db, item.objectKey, item.messageId, text, at);
+    if (!marked) return null;
+    this.refreshLaneSummary(marked.lane);
+    const open = getOpenChannelCard(db, item.objectKey);
+    if (!open || !marked.seqs.some((seq) => seq >= open.firstSeq && seq <= open.lastSeq)) return null;
+    const last = getEvent(db, open.lastSeq);
+    return updateChannelCard(db, open.id, last?.payload.messageId === item.messageId ? { excerpt: oneLine(text, EXCERPT_MAX) } : {}, { at }) ?? open;
   }
 
   private possibleDuplicate(source: string, item: ChannelInbound): number | null {
@@ -2783,6 +2836,8 @@ export class ChannelHub {
     }
     if (event.kind === MESSAGE_EVENT_KIND) {
       setEventDisposition(this.db, event.seq, input.disposition, { by: "lead", reason, cardId: card.id }, this.now());
+      // 熔断（工单 #533）：这个对话反复交给 Lead、每次都不用管时，静音它一会儿。
+      if (input.disposition === "no_action") this.tripBreaker(event.entityKey ?? card.objectKey);
     }
     const after = getChannelCard(this.db, card.id)!;
     return { cardId: after.id, state: after.state, note: open ? null : `卡 #${after.id} 已经结束（${cardStateLabel(after)}）` };

@@ -229,6 +229,10 @@ export const UI_ACTION_INPUT_SCHEMAS = {
       text: Type.String({ minLength: 1, maxLength: CHANNEL_CARD_TEXT_MAX }),
       words: Type.Union([Type.Literal("user"), Type.Literal("assistant")]),
     }),
+    // 静音这个对话 minutes 分钟（工单 #533，channel-mutes.ts）：消息只记录，不开卡、不叫醒 Lead。上限由常设指令 channel.mute 定，
+    // 这里只挡明显不对的数。unmute：提前取消。
+    mute: StrictObject({ minutes: Type.Integer({ minimum: 1, maximum: 24 * 60 }) }),
+    unmute: StrictObject({}),
   },
   // 设置 → 消息通道 → 自动代你处理（channel-confidence.ts）。update 和 tighten 的输入是改完以后的一整份。
   channel_policy: {

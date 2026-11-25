@@ -468,6 +468,10 @@ export interface UiActionDefinition<T = any, I = any> {
   // 改规则的操作（external-content.ts）：授权表、投递规则（常设指令）、连接配置、设置页的选项。外部的一轮里 Lead 做不了。
   // 每个操作都要写明。新加的操作属于这几类时写 true。
   changesRules: boolean;
+  // 只能收紧的改规则操作（例如 channel_handbook、channel_policy 的 tighten：有一项放宽就整个拒绝）。它只减少 Lead 代你做的事，
+  // 外部的一轮也能做（用户 2026-11-25，工单 #533：Lead 在外部消息叫醒的一轮里想收紧交接说明止住刷屏，被改规则的底线拦了）。
+  // 要和 changesRules: true 一起写；放宽的检查必须在 run 里，不能只靠这个标记。
+  onlyTightens?: boolean;
   // 不改规则、但外部的一轮里也不能替用户做的操作：例如批准 child 的动作（2026-10-28，放开 userTurnOnly 时留下的一条底线：
   // Slack 里的话不能替用户批准）。值是一句话，说这是什么（不带句号），按目标算时返回 null 表示这次不受限。
   // 外部的一轮里和改规则的操作一样：拒绝，带确认卡。

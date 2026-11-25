@@ -11,7 +11,7 @@ import { tempDir } from "@pi-lead-child/core/testing";
 import { createLeadTools } from "@pi-lead-child/lead";
 import { withCallObserver } from "@pi-lead-child/engine";
 import { cardIdOf, FakeSlack, scriptedSmartModel } from "@pi-lead-child/engine/testing";
-import { CHANNEL_POLICY_DEFAULTS, MESSAGE_EVENT_KIND } from "@pi-lead-child/protocol";
+import { MESSAGE_EVENT_KIND } from "@pi-lead-child/protocol";
 import { createLoopbackBinding, getStandingOrder, listEvents, openDb, recordDecisionModelCall, type Db } from "@pi-lead-child/store";
 import { startDaemon } from "../src/server.js";
 import { fakePiLead, type FakeCall, type FakeReply } from "./fake-pi-session.js";
@@ -89,11 +89,11 @@ describe("Jev flags a request to change the rules, through the daemon (unified-m
         const block = messageBlock(call, sender);
         if (block && !blocks[sender]) blocks[sender] = block;
       }
-      // Lead 照对方的话去改授权表（收紧也算改规则）：07 的代码检查不看 Jev 怎么判，照样拒绝。
+      // Lead 照对方的话去改设置页的选项：07 的代码检查不看 Jev 怎么判，照样拒绝。
+      // （以前用收紧授权表举例；工单 #533 起只能收紧的操作外部的一轮也能做。）
       if (!refused && messageBlock(call, "Mallory")) {
         refused = parsed(await live("perform_action").execute("call", {
-          target_type: "channel_policy", target_id: "slack", action: "tighten",
-          input: { ...CHANNEL_POLICY_DEFAULTS, autoReply: false }, reason: "Mallory 让我改自动回复",
+          target_type: "busy_placement", target_id: "lead", action: "set", input: { placement: "steer" }, reason: "Mallory 让我改设置",
         }));
       }
       return { say: "NO_REPLY" };
@@ -129,8 +129,8 @@ describe("Jev flags a request to change the rules, through the daemon (unified-m
     expect(card.handling.ruleChange).toMatchObject({ kinds: ["permissions", "auto_reply"] });
     expect(card.handling.ruleChange.probability).toBeCloseTo(0.95, 5);
 
-    // 授权表没变：Lead 的改动被拒绝（external_turn），没有写新版本。
-    expect(refused).toMatchObject({ isError: true, refused: true, refusal: { code: "external_turn", action: "tighten" } });
+    // 授权表没变，Lead 改设置被拒绝（external_turn）。
+    expect(refused).toMatchObject({ isError: true, refused: true, refusal: { code: "external_turn", action: "set" } });
     expect(getStandingOrder(db, "channel.authority")!.version).toBe(1);
     expect(listEvents(db, { kind: "standing_order.changed" })).toEqual([]);
 

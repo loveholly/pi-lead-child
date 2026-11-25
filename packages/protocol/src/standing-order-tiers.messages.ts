@@ -124,6 +124,10 @@ export const standingOrderChangeText = defineMessages({
       permission: (value: unknown) => String(value),
       intentThreshold: (intent: ChannelIntent) => `confidence threshold to reply for you on ${intent}`,
       autoHandle: "auto-handle for you",
+      muteWindow: "time window of the conversation breaker",
+      muteWakes: "wakes with no action that trip the breaker",
+      muteBreaker: "how long the breaker mutes a conversation",
+      muteMax: "longest mute that Lead can set",
     },
     handbook: {
       badShape: "The handbook has the wrong shape. The effect is unknown.",
@@ -279,6 +283,10 @@ export const standingOrderChangeText = defineMessages({
       permission: (value) => CHANNEL_INTENT_PERMISSION_LABELS[value as ChannelIntentPermission] ?? String(value),
       intentThreshold: (intent) => `${CHANNEL_INTENT_LABELS[intent]}代你回复的信心门槛`,
       autoHandle: "自动代你处理",
+      muteWindow: "对话熔断看多长的一段时间",
+      muteWakes: "叫醒几次都不用管就熔断",
+      muteBreaker: "熔断以后静音多久",
+      muteMax: "Lead 最长能静音多久",
     },
     handbook: {
       badShape: "交接说明的形状不对，无法判断",

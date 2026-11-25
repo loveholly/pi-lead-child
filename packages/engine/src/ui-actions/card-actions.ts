@@ -2,17 +2,23 @@
 // 哪种事件带哪个操作写在这里；现在能不能做由操作层的 available 判断（和页面、Lead 的 list_actions 是同一个函数）。
 // 做不了时卡上没有按钮。网关算卡时调它（gateway 的 lead-activity.ts）。
 import {
-  CORE_MEMORY_CHANGED_KIND, LEAD_INSTALL_CHANGED_KIND, MEMORY_FACT_CHANGED_KIND, type LeadActivityCardAction,
+  CHANNEL_MUTE_STARTED_KIND, CORE_MEMORY_CHANGED_KIND, LEAD_INSTALL_CHANGED_KIND, MEMORY_FACT_CHANGED_KIND, type LeadActivityCardAction,
 } from "@pi-lead-child/protocol";
-import type { Db, EventRecord } from "@pi-lead-child/store";
+import { getLocale, type Db, type EventRecord } from "@pi-lead-child/store";
+import { channelMuteMessages } from "../channels/mute.messages.js";
 import { UI_ACTIONS, UI_ACTION_TARGETS } from "./catalog.js";
 import type { UiActionEnv } from "./types.js";
 
 const idOf = (value: unknown): number | null => (typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : null);
 
 // 这条事件报告的是 Lead 自己做的一件能撤销的事时，撤销它的操作。
-function undoFor(event: Pick<EventRecord, "kind" | "payload">): LeadActivityCardAction | null {
+function undoFor(db: Db, event: Pick<EventRecord, "kind" | "payload">): LeadActivityCardAction | null {
   const payload = event.payload;
+  if (event.kind === CHANNEL_MUTE_STARTED_KIND && typeof payload.conversation === "string") {
+    // 一个对话开始静音（工单 #533）：熔断的带「取消静音」，Lead 和你自己静音的带「撤销」。到点或者取消以后按钮消失（unmute 做不了）。
+    const text = channelMuteMessages(getLocale(db));
+    return { target: { type: "channel_conversation", id: payload.conversation }, action: "unmute", label: payload.by === "breaker" ? text.unmute : text.undo };
+  }
   if (event.kind === CORE_MEMORY_CHANGED_KIND) {
     const changeId = idOf(payload.changeId);
     if (payload.actor !== "lead" || payload.undoOf !== null || changeId === null) return null;
@@ -35,7 +41,7 @@ function undoFor(event: Pick<EventRecord, "kind" | "payload">): LeadActivityCard
 
 /** 卡里最新一条事件带的按钮。现在做不了（已经撤销过、之后又改过……）时为 null。 */
 export function leadActivityCardAction(db: Db, event: Pick<EventRecord, "kind" | "payload">, now = new Date()): LeadActivityCardAction | null {
-  const proposal = undoFor(event);
+  const proposal = undoFor(db, event);
   if (!proposal) return null;
   const type = proposal.target.type as keyof typeof UI_ACTIONS;
   const definition = UI_ACTIONS[type]?.[proposal.action];

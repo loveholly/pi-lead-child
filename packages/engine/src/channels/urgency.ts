@@ -62,8 +62,10 @@ export function channelUrgencyState(text: string): string {
  *   unavailable：没有 SmartModel，或者它一个后端都没有。timeout：没有按时回答。error：调用失败或者回答不合法。
  *   bot：机器人发的消息。empty：消息没有文字。record_only：紧急也只会记录（不开卡、不推送），不用问。
  *   ambient：不是对用户说的（ChannelInbound.ambient），最多进摘要，不推送，不用问。
+ *   deleted：删消息（工单 #533）：只记录，开着的卡上标成已删除，不用问。muted：这个对话在静音（channel-mutes.ts），只记录，不用问。
  */
-export type ChannelUrgencyReason = "unavailable" | "timeout" | "error" | "bot" | "empty" | "record_only" | "ambient";
+export type ChannelUrgencyReason =
+  | "unavailable" | "timeout" | "error" | "bot" | "empty" | "record_only" | "ambient" | "deleted" | "muted";
 
 /** 写进事件 payload 的 urgency：这条消息的 urgent 是怎样定的。 */
 export interface ChannelUrgencyBasis {

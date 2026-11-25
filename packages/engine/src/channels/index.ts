@@ -10,6 +10,7 @@ export * from "./delivery.js";
 export * from "./outbound.js";
 export * from "./hub.js";
 export * from "./inbound.js";
+export * from "./mute.js";
 export * from "./context-pack.js";
 export * from "./payload.js";
 export * from "./urgency.js";

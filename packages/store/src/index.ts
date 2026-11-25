@@ -92,6 +92,7 @@ export * from "./background-model.js";
 export * from "./lead-call-guards.js";
 export * from "./channel-connections.js";
 export * from "./channel-catch-up.js";
+export * from "./channel-mutes.js";
 export * from "./security-alerts.js";
 export * from "./reminder-occurrence.js";
 export * from "./reminders.js";

@@ -3,6 +3,7 @@
 //   - update：改交接说明，可以放宽（一句的做法、对方的上限、打开开关、加一句）。放宽等于给 Lead 更大的权力，只有你本人能做
 //     （user_direct）。输入是改完以后的一整份。
 //   - tighten：只收紧，Lead 可以自己判断（和常设指令的规则一样：收紧 Lead 能直接改），有一项放宽就拒绝，说明去哪里改。
+//     只减少 Lead 代你做的事，外部消息叫醒的一轮也能做（onlyTightens，工单 #533）。
 //   - rehearse：预演一条消息。只读，不发任何东西。
 //   - propose：把一句随口的话整理成交接说明里的一句（handbook-propose.ts）。只读，不保存，要调一次便宜模型。
 //   - suggestions、accept_suggestion、dismiss_suggestion：页边批注（channels/handbook-suggestions.ts，issue 08）。接受一条等于改交接说明：
@@ -123,7 +124,8 @@ export const CHANNEL_HANDBOOK_ACTIONS = {
   },
   tighten: {
     target: "channel_handbook", id: "tighten", label: "收紧交接说明", scope: "tickets:create",
-    permission: "lead_allowed", changesRules: true, external: false, irreversible: false,
+    // 只收紧：外部消息叫醒的一轮也能做（工单 #533）。放宽的在 writeHandbook 里照旧拒绝。
+    permission: "lead_allowed", changesRules: true, onlyTightens: true, external: false, irreversible: false,
     where: HANDBOOK_WHERE,
     hint: "input 是改完以后的一整份交接说明（先用 list_actions 看现在的 handbook，只改要收紧的项）：把一句改严（例如「直接处理」改成"
       + "「做好，先给我看再发」）、把对方的上限改严、关掉开关、加一句不比兜底的一句宽的。有一项放宽就会被拒绝。改了会告诉用户。"

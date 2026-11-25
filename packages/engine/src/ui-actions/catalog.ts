@@ -33,6 +33,7 @@ import { REPLY_STYLE_ACTIONS, REPLY_STYLE_TARGET } from "./reply-style.js";
 import { HOST_BYPASS_ACTIONS, HOST_BYPASS_TARGET } from "./host-bypass.js";
 import { BUSY_PLACEMENT_ACTIONS, BUSY_PLACEMENT_TARGET } from "./busy-placement.js";
 import { WAKE_PACE_ACTIONS, WAKE_PACE_TARGET } from "./wake-pace.js";
+import { CHANNEL_CONVERSATION_MUTE_ACTIONS } from "./channel-mutes.js";
 import { LEAD_SHADOW_ACTIONS, LEAD_SHADOW_TARGET } from "./lead-shadow.js";
 import { BACKGROUND_MODEL_ACTIONS, BACKGROUND_MODEL_TARGET } from "./background-model.js";
 import { LEAD_CONTEXT_ACTIONS, LEAD_CONTEXT_TARGET } from "./lead-context.js";
@@ -608,6 +609,8 @@ const CHANNEL_CONVERSATION_ACTIONS = {
       words: (run.input as { words: string }).words,
     }),
   },
+  // 静音一个对话、取消静音（工单 #533，channel-mutes.ts）。
+  ...CHANNEL_CONVERSATION_MUTE_ACTIONS,
 } satisfies Record<string, UiActionDefinition<ChannelConversationTarget, any>>;
 
 // 你本人做的，或者 Lead 在你这一轮里代你做的（出站扩展据此定署名，统一消息事件 spec D9）。
@@ -722,6 +725,7 @@ const CHANNEL_POLICY_TARGET: UiActionTargetKind<ChannelPolicyTarget> = {
 };
 
 // 自动代你处理（授权表）：update 和 tighten 都是改规则的操作。只读的 test、replay 不是。
+// tighten 只能收紧（onlyTightens）：外部消息叫醒的一轮也能做（工单 #533）。
 const CHANNEL_POLICY_ACTIONS = {
   update: {
     target: "channel_policy", id: "update", label: "改自动代你处理", scope: "tickets:create",
@@ -736,7 +740,8 @@ const CHANNEL_POLICY_ACTIONS = {
   },
   tighten: {
     target: "channel_policy", id: "tighten", label: "收紧自动代你处理", scope: "tickets:create",
-    permission: "lead_allowed", changesRules: true, external: false, irreversible: false,
+    // 只收紧：外部消息叫醒的一轮也能做（工单 #533）。放宽的在 writeChannelPolicy 里照旧拒绝。
+    permission: "lead_allowed", changesRules: true, onlyTightens: true, external: false, irreversible: false,
     where: POLICY_WHERE,
     hint: "input 是改完以后的一整份（先用 list_actions 看现在的 autoReply、intents、confidence，只改要收紧的项）："
       + "关掉自动代你处理（autoReply=false）、提高门槛、调高指数、把授权表的一项改成问你。有一项放宽就会被拒绝。"

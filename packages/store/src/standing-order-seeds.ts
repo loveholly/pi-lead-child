@@ -12,7 +12,7 @@
 //   跟进设下 → 熔断折进来的 → 要叫醒 Lead 的 → 瞬时重试、模型目录的说明 → 其余 inbox → 提醒的通知 → 其余通知 → 跟进到点。
 // 都不匹配时按来源的默认级别（source.*）。
 import {
-  CHANNEL_AUTHORITY_DEFAULTS, CHANNEL_HANDBOOK_DEFAULTS, type StandingOrderDefinition, type StandingOrderStatus,
+  CHANNEL_AUTHORITY_DEFAULTS, CHANNEL_HANDBOOK_DEFAULTS, CHANNEL_MUTE_DEFAULTS, type StandingOrderDefinition, type StandingOrderStatus,
 } from "@pi-lead-child/protocol";
 
 /** 一条系统种子：指令的内容，加上它的修订号和状态（缺省 active）。 */
@@ -299,6 +299,19 @@ export const SYSTEM_STANDING_ORDERS: readonly SystemStandingOrderSeed[] = [
     reason: "用户 2026-10-30 选定方案 B（.scratch/auto-handling-handbook/spec.md）：每种情况一句话、一种做法；"
       + "对方是外部的人、客户、认不出的人时有上限；借权限、收不回的事、凭据和薪资、改规则四条底线写在代码里。"
       + "以后取代授权表（channel.authority）。放宽要你本人改，收紧 Lead 可以直接改。",
+  },
+  {
+    id: "channel.mute",
+    seedRevision: 1,
+    title: "对话熔断：同一个外部对话反复叫醒 Lead 都不用管时静音一会儿；Lead 也能自己静音一个对话",
+    priority: 100,
+    condition: {},
+    action: { type: "rule", rule: "channel.mute", params: { ...CHANNEL_MUTE_DEFAULTS } },
+    limits: null,
+    escalateTo: null,
+    reason: "用户 2026-11-25（工单 #533）：同一个对话 10 分钟里叫醒 Lead 5 次、每次都不用管，就静音 30 分钟，期间消息只记录，"
+      + "开始时告诉你一次，带「取消静音」，到点自动恢复。Lead 最长能静音一个对话 120 分钟。"
+      + "静音让交给你和 Lead 的更少：更容易熔断、静音更久要你批准，反方向 Lead 可以直接改。",
   },
 ];
 

@@ -1317,6 +1317,7 @@ export * from "./connections.ts";
 export * from "./channel-policy.ts";
 export * from "./channel-confidence.ts";
 export * from "./channel-handbook.ts";
+export * from "./channel-mutes.ts";
 export * from "./channels.ts";
 export * from "./message-events.ts";
 export * from "./lead-queue.ts";

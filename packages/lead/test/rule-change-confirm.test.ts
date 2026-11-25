@@ -6,7 +6,6 @@
 import { join } from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
 import { tempDir } from "@pi-lead-child/core/testing";
-import { CHANNEL_POLICY_DEFAULTS } from "@pi-lead-child/protocol";
 import { createLoopbackBinding, createTurn, getStandingOrder, listOpenLeadWaits, openDb, type Db } from "@pi-lead-child/store";
 import { createLeadToolset, type LeadDeps } from "../src/tools.js";
 import { createTurnUserActions } from "../src/wait-tools.js";
@@ -58,10 +57,10 @@ describe("a refused rule change asks the user with a confirm card", () => {
     expect(drawn.isError).not.toBe(true);
   });
 
-  it("returns the same kind of card for the authority table", async () => {
+  // 以前用收紧授权表举例；工单 #533 起只能收紧的操作外部的一轮也能做，换成设置页的选项。
+  it("returns the same kind of card for a settings option", async () => {
     const body = parsed(await tool("perform_action").execute("t", {
-      target_type: "channel_policy", target_id: "slack", action: "tighten",
-      input: { ...CHANNEL_POLICY_DEFAULTS, autoReply: false }, reason: "定时器的安排：先别自动回复",
+      target_type: "busy_placement", target_id: "lead", action: "set", input: { placement: "steer" }, reason: "定时器的安排：忙时插话",
     }));
     expect(body).toMatchObject({
       isError: true, refused: true, refusal: { code: "external_turn" },

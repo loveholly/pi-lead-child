@@ -705,6 +705,14 @@ const RULE_PARAM_CHECKS: Record<StandingOrderRule, ParamCheck> = {
     ];
   },
   "channel.handbook": (old, next) => handbookFindings(old, next),
+  // 对话的熔断和静音（工单 #533）：静音让交给你和 Lead 的更少，所以更容易熔断（窗口更长、次数更少）、静音更久都是更放开；
+  // 反方向 Lead 可以直接改。
+  "channel.mute": (old, next) => [
+    ...numberParam("breakerWindowMs", old.breakerWindowMs, next.breakerWindowMs, "lower", t.params.muteWindow),
+    ...numberParam("breakerWakes", old.breakerWakes, next.breakerWakes, "higher", t.params.muteWakes),
+    ...numberParam("breakerMuteMs", old.breakerMuteMs, next.breakerMuteMs, "lower", t.params.muteBreaker),
+    ...numberParam("maxMuteMs", old.maxMuteMs, next.maxMuteMs, "lower", t.params.muteMax),
+  ],
 };
 
 // 交接说明（channel.handbook，自动代你处理方案 B）。下面这些都更放开，要用户本人改；反方向 Lead 可以直接改：

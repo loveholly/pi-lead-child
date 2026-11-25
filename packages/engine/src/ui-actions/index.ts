@@ -163,6 +163,8 @@ function ruleCeilingOf(
   externalContent: readonly ExternalContentSource[] | null,
 ): readonly ExternalContentSource[] | null {
   if (externalContent === null || !(definition.changesRules || externalTurnFloorOf(definition, target))) return null;
+  // 只能收紧的改规则操作（onlyTightens）只减少 Lead 代你做的事：外部的内容不算数（工单 #533）。放宽的在 run 里照旧拒绝。
+  if (definition.onlyTightens && !externalTurnFloorOf(definition, target)) return null;
   if (definition.promptSetting || (definition.externalRefusalNext && !definition.liveUserTurnExempt)) return externalContent;
   if (uiUserTurnOnlyOf(definition, target, env).on) return externalContent;
   return isLiveUserTurn(db, turnId, definition.scope) ? null : externalContent;
@@ -527,6 +529,7 @@ const PERMISSION_WORDS: Record<ActionPermission, string> = {
 };
 
 const RULE_CHANGE_WORDS = "改规则：外部消息叫醒的一轮、读过外部内容的一轮做不了（用户本人正在说话的那一轮除外），被拒时请用户确认";
+const TIGHTEN_WORDS = "只能收紧的改规则操作：在哪一轮都能做，外部消息叫醒的一轮也行；有一项放宽就整个拒绝";
 const PROMPT_SETTING_WORDS = "写进提示词的设置：外部消息叫醒的一轮、读过外部内容的一轮都做不了，用户本人的一轮也一样，被拒时请用户确认";
 
 // 输入的字段，给 Lead 看：固定值写成 name=值，几个固定值之一写成 name=a|b。整个输入有几种写法（anyOf）时用「或」连起来。
@@ -562,7 +565,9 @@ export function uiActionCatalogText(types: readonly UiActionTargetType[] = UI_AC
       // 不改规则、只在外部的一轮里按目标拒绝的（例如事实失效：用户本人来源的）：permissionNote 写明哪些不能做。
       const floorWords = !definition.changesRules && definition.externalRefusalNext && definition.permissionNote
         ? `${definition.permissionNote}，被拒时不发确认卡。` : "";
-      const rules = (definition.promptSetting ? `${PROMPT_SETTING_WORDS}。` : definition.changesRules ? `${RULE_CHANGE_WORDS}。` : floorWords)
+      const rules = (definition.promptSetting ? `${PROMPT_SETTING_WORDS}。`
+        : definition.onlyTightens ? `${TIGHTEN_WORDS}。`
+        : definition.changesRules ? `${RULE_CHANGE_WORDS}。` : floorWords)
         .replace("被拒时请用户确认", definition.externalRefusalNext ? "被拒时不发确认卡" : "被拒时请用户确认");
       return `  - ${definition.id}（${definition.label}）：${who}。${where}${rules}input：${inputText(schema)}。${definition.hint}`;
     });

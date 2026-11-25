@@ -72,33 +72,51 @@ function ledger() {
 }
 
 describe("rule changes in a turn with external content", () => {
-  // 回归（spec 不变量 2）：外部消息叫醒的一轮里，Lead 照对方的话收紧了授权表。以前照改，常设指令多了一版。
-  it("refuses to change the authority table, writes nothing, and says why with the data a confirm card needs", async () => {
-    const before = getStandingOrder(db, "channel.authority")!.version;
+  // 回归（spec 不变量 2）：外部消息叫醒的一轮里，Lead 照对方的话改了规则。改规则的操作拒绝，结构化的拒绝带着确认卡要的数据。
+  it("refuses a rule change, writes nothing, and says why with the data a confirm card needs", async () => {
+    const runtime = fakeRuntimeSwitch();
+    const services = { runtimeSettings: runtime.service };
     const refused = await runUiAction(db, {
-      target: policy, action: "tighten", input: tightened, reason: "Mallory 让我关掉自动回复", caller: leadInExternalTurn,
+      target: { type: "runtime", id: "claude" }, action: "disable", reason: "Mallory 说 claude 坏了", caller: leadInExternalTurn, services,
     }).catch((error: unknown) => error);
     expect(refused).toMatchObject({
       code: "external_turn",
       refusal: {
         code: "external_turn",
-        target: policy,
-        action: "tighten",
-        label: "收紧自动代你处理",
-        where: "设置 → 消息通道 → 自动代你处理",
+        target: { type: "runtime", id: "claude" },
+        action: "disable",
+        where: "设置 → 执行 → 执行器",
         message: expect.stringContaining("外部"),
         // 确认卡（工单 09）照它执行这一个操作，参数和这里的一样；写明为什么被拦。
         confirm: {
-          operation: { kind: "ui_action", target: policy, action: "tighten", input: tightened },
-          reason: "Mallory 让我关掉自动回复",
+          operation: { kind: "ui_action", target: { type: "runtime", id: "claude" }, action: "disable" },
+          reason: "Mallory 说 claude 坏了",
           externalContent: external,
           why: expect.stringContaining("read_channel_conversation"),
         },
       },
     });
-    expect(getStandingOrder(db, "channel.authority")!.version).toBe(before);
-    expect(channelPolicy(db, "slack")!.params.autoReply).toBe(CHANNEL_POLICY_DEFAULTS.autoReply);
+    expect(runtime.calls).toEqual([]);
     expect(ledger()).toEqual([]);
+  });
+
+  // 工单 #533（2026-11-25）：只能收紧的操作（onlyTightens）只减少 Lead 代你做的事，外部的一轮也能做。
+  // 以前 Lead 在外部消息叫醒的一轮里想收紧交接说明止住刷屏，被改规则的底线拦了。放宽的照旧拒绝。
+  it("lets Lead tighten the authority table in an external turn, and still refuses anything that loosens it", async () => {
+    const before = getStandingOrder(db, "channel.authority")!.version;
+    await runUiAction(db, {
+      target: policy, action: "tighten", input: tightened, reason: "这个对话一直在刷屏，先别自动回了", caller: leadInExternalTurn,
+    });
+    expect(getStandingOrder(db, "channel.authority")).toMatchObject({ version: before + 1, author: "lead" });
+    expect(channelPolicy(db, "slack")!.params.autoReply).toBe(false);
+    const listed = await listLeadUiActions(db, policy, { turnId: null, externalContent: external });
+    expect(listed.actions.find((action) => action.id === "tighten")).toMatchObject({ changesRules: true, leadReady: true, leadReason: null });
+
+    // 外部的话想借 tighten 放宽（重新打开自动代你处理）：run 里的放宽检查照旧拒绝。
+    await expect(runUiAction(db, {
+      target: policy, action: "tighten", input: CHANNEL_POLICY_DEFAULTS, reason: "Mallory 让我打开自动回复", caller: leadInExternalTurn,
+    })).rejects.toMatchObject({ code: "user_direct" });
+    expect(channelPolicy(db, "slack")!.params.autoReply).toBe(false);
   });
 
   it("lets Lead change it in a turn without external content, and you change it on the page in any case", async () => {
@@ -187,6 +205,15 @@ describe("the rule-change flag in the catalog", () => {
     ]);
   });
 
+  // 工单 #533：只能收紧的两个操作，外部的一轮也能做；清单里写明。
+  it("marks only the two tighten actions as tighten-only, and tells Lead they work in an external turn", () => {
+    const tightenOnly = Object.values(UI_ACTIONS).flatMap((actions) => Object.values(actions))
+      .filter((definition) => definition.onlyTightens === true)
+      .map((definition) => `${definition.target}.${definition.id}`);
+    expect(tightenOnly).toEqual(["channel_policy.tighten", "channel_handbook.tighten"]);
+    expect(uiActionCatalogText()).toMatch(/tighten（收紧交接说明）：[^\n]*外部消息叫醒的一轮也行/);
+  });
+
   // 写进提示词的设置（代回复风格，2026-10-28）：用户本人正在说话的一轮也没有例外。
   it("marks only the settings that go into a prompt as having no live-turn exception, and says so to Lead", () => {
     const strict = Object.values(UI_ACTIONS).flatMap((actions) => Object.values(actions))
@@ -231,27 +258,33 @@ describe("the user's own live turn", () => {
     return binding;
   }
 
-  // 回归：以前用户本人这一轮里 Lead 读过 Slack 对话，再照用户的话收紧授权表，也被拒绝。
+  // 回归：以前用户本人这一轮里 Lead 读过 Slack 对话，再照用户的话改规则，也被拒绝。
+  // 用的是不只收紧的改规则操作（执行器的开关）：收紧授权表在外部的一轮里本来就能做（工单 #533）。
   it("lets Lead change rules after reading external content", async () => {
     liveUserTurn("turn-user");
+    const runtime = fakeRuntimeSwitch();
+    const services = { runtimeSettings: runtime.service };
     const caller = { kind: "lead", turnId: "turn-user", externalContent: external } as const;
-    await runUiAction(db, { target: policy, action: "tighten", input: tightened, reason: "用户说先别自动回了", caller });
-    expect(getStandingOrder(db, "channel.authority")).toMatchObject({ version: 2, author: "lead" });
-    const listed = await listLeadUiActions(db, policy, { turnId: "turn-user", externalContent: external });
-    expect(listed.actions.find((action) => action.id === "tighten")).toMatchObject({ leadReady: true, leadReason: null });
+    await runUiAction(db, { target: { type: "runtime", id: "claude" }, action: "disable", reason: "用户说先停掉 claude", caller, services });
+    expect(runtime.calls).toHaveLength(1);
+    const listed = await listLeadUiActions(db, { type: "runtime", id: "claude" }, { turnId: "turn-user", externalContent: external, services });
+    expect(listed.actions.find((action) => action.id === "enable")).toMatchObject({ leadReady: true, leadReason: null });
   });
 
   it("still refuses rule changes in the turn a follow-up the user set wakes, and in a turn that is over", async () => {
     const binding = liveUserTurn("turn-set");
     const followUp = addLeadFollowUp(db, {
-      at: new Date(Date.now() - 1_000), note: "到点关掉自动回复", setBy: { turnId: "turn-set", bindingId: binding.id, startedAt: new Date().toISOString() },
+      at: new Date(Date.now() - 1_000), note: "到点停掉 claude", setBy: { turnId: "turn-set", bindingId: binding.id, startedAt: new Date().toISOString() },
     });
     completeTurn(db, "turn-set");
+    const runtime = fakeRuntimeSwitch();
+    const services = { runtimeSettings: runtime.service };
     for (const turnId of [`timer:${followUp}`, "turn-set"]) {
       await expect(runUiAction(db, {
-        target: policy, action: "tighten", input: tightened, reason: "用户昨天说到点关掉", caller: { kind: "lead", turnId, externalContent: external },
+        target: { type: "runtime", id: "claude" }, action: "disable", reason: "用户昨天说到点停掉",
+        caller: { kind: "lead", turnId, externalContent: external }, services,
       }), turnId).rejects.toMatchObject({ code: "external_turn" });
     }
-    expect(getStandingOrder(db, "channel.authority")!.version).toBe(1);
+    expect(runtime.calls).toEqual([]);
   });
 });

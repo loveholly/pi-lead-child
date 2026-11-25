@@ -27,6 +27,8 @@ export interface ChannelLaneMessage {
   origin?: boolean;
   // 这条消息在来源里的编号（ChannelInbound.messageId）。取历史补进来的消息靠它去重。
   ref?: string;
+  // 对方删了这条消息（工单 #533）：text 换成来源给的删除说明，原文不留。
+  deleted?: true;
 }
 
 export interface ChannelLane {
@@ -101,6 +103,22 @@ export function recordChannelLaneMessage(
   db.prepare("UPDATE channel_lanes SET context = ?, last_seq = COALESCE(?, last_seq), updated_at = ? WHERE id = ?")
     .run(JSON.stringify(context), message.seq, at, existing.id);
   return getChannelLane(db, input.objectKey)!;
+}
+
+/**
+ * 对方删了道里的一条消息（按来源里的编号认，工单 #533）：这一条的文字换成 text（来源给的删除说明），标上 deleted，
+ * 原文不留。不加新的一条。道不存在、或者道里没有这条消息时什么也不做，返回 null；改了时返回改过的那几条的 seq。
+ */
+export function markChannelLaneMessageDeleted(
+  db: Db, objectKey: string, ref: string, text: string, at: Date = new Date(),
+): { lane: ChannelLane; seqs: number[] } | null {
+  const existing = getChannelLane(db, objectKey);
+  if (!existing) return null;
+  const hit = existing.context.filter((message) => message.ref === ref && !message.deleted);
+  if (!hit.length) return null;
+  const context = existing.context.map((message) => (message.ref === ref ? { ...message, text: clip(text, CHANNEL_LANE_TEXT_MAX), deleted: true as const } : message));
+  db.prepare("UPDATE channel_lanes SET context = ?, updated_at = ? WHERE id = ?").run(JSON.stringify(context), at.toISOString(), existing.id);
+  return { lane: getChannelLane(db, objectKey)!, seqs: hit.flatMap((message) => (message.seq === null ? [] : [message.seq])) };
 }
 
 /**
