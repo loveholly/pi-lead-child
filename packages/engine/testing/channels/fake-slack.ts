@@ -63,6 +63,8 @@ export interface FakeSlackMessage {
   files?: FakeSlackFile[];
   // 消息卡片：转发的消息、链接预览、应用的卡片（dm、mention 的 attachments 选项），照原样存。
   attachments?: unknown[];
+  // 应用（机器人）发的消息带它（dm、chatter 的 bot 选项）。
+  bot_id?: string;
   deleted: boolean;
   // chat.update 改过几次。
   edits?: number;
@@ -775,6 +777,7 @@ export class FakeSlack {
     return {
       type: "message", user: message.user, text: message.text, ts: message.ts, team: message.team ?? this.teamId,
       ...(message.thread_ts ? { thread_ts: message.thread_ts } : {}),
+      ...(message.bot_id ? { bot_id: message.bot_id } : {}),
       ...(message.blocks ? { blocks: message.blocks } : {}),
       ...(message.metadata ? { metadata: message.metadata } : {}),
       ...(message.files ? { files: message.files.map((file) => this.wireFile(file)) } : {}),
@@ -1120,11 +1123,12 @@ export class FakeSlack {
     return message;
   }
 
-  /** 发信人改了这条消息（message_changed）。 */
-  edit(delivery: ChannelDelivery, text: string): ChannelDelivery {
+  /** 发信人改了这条消息（message_changed）。blocks：改后的 block（应用常只改 block，text 照旧是空的）。 */
+  edit(delivery: ChannelDelivery, text: string, options: { blocks?: Array<Record<string, unknown>> } = {}): ChannelDelivery {
     const message = this.messageOf(delivery);
     const previous = this.wire(message);
     message.text = text;
+    if (options.blocks) message.blocks = options.blocks;
     const changeTs = this.ts();
     return this.envelope({
       type: "message", subtype: "message_changed", hidden: true, channel: message.channel, channel_type: this.channelType(message.channel),
@@ -1176,6 +1180,8 @@ export class FakeSlack {
       ...(typeof event.thread_ts === "string" ? { thread_ts: event.thread_ts } : {}),
       ...(files ? { files } : {}),
       ...(Array.isArray(event.attachments) ? { attachments: event.attachments } : {}),
+      ...(typeof event.bot_id === "string" ? { bot_id: event.bot_id } : {}),
+      ...(Array.isArray(event.blocks) ? { blocks: event.blocks as Array<Record<string, unknown>> } : {}),
     };
     this.messages.push(message);
     return this.envelope({ type: "message", ...event, ts, user_team: team });

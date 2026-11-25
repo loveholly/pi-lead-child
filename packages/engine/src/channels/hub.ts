@@ -109,7 +109,7 @@ import {
   buildContextPack, contextParts, repackForText, type BuiltContextPack, type ContextPackDeps, type ContextPackInput, type ContextPackOptions,
 } from "./context-pack.js";
 import {
-  editMergeOf, externalMessageEvent, mergeEdit, messageCeiling, placeholderBecameText, REOPEN_MAX_AGE_MS, type EditMerge,
+  answersOwnerAsk, editMergeOf, externalMessageEvent, isPlaceholderText, mergeEdit, messageCeiling, placeholderBecameText, REOPEN_MAX_AGE_MS, type EditMerge,
 } from "./inbound.js";
 import { decideByHandbook, type HandbookDecision } from "./handbook-decision.js";
 import { handbookDecisionFor } from "./handbook-suggestions.js";
@@ -730,7 +730,10 @@ export class ChannelHub {
       // 助手按占位判断过不用回、现在正文变了的编辑（reopenOf）和新消息一样问紧急程度，按原来那条消息的类型定投递。
       const reopen = this.reopenOf(adapter.id, item);
       if (item.amends && reopen === null && !getOpenChannelCard(this.db, item.objectKey)) return true;
-      const payload = { ...item.fields, role: item.role, sender: { ...item.sender }, text: item.text, urgent: true };
+      const payload = {
+        ...item.fields, role: item.role, sender: { ...item.sender }, text: item.text, urgent: true,
+        ...(this.answersAsk(adapter.id, item) ? { answersAsk: true } : {}),
+      };
       return channelDeliveryDecision(channelDeliveryPolicy(this.db, adapter.id), {
         source: adapter.id, kind: reopen?.kind ?? item.kind, entityKey: item.objectKey, payload, rootCause: null,
       }).mode === "record";
@@ -788,6 +791,8 @@ export class ChannelHub {
       ...(urgency ? { urgency: urgency.basis } : {}),
       ...(maybeDuplicateOf !== null ? { maybeDuplicateOf } : {}),
     };
+    // 机器人在回答你或 Lead 刚问它的话（answersOwnerAsk）：投递指令按它开卡，授权表不按「不用回」跳过（answerAction）。
+    if (this.answersAsk(adapter.id, item)) payload.answersAsk = true;
     // 别人发来的消息：先定投递方式，写进事件的 channelDelivery。摘要投递的消息由 06 的「Lead 动态」卡片显示；
     // 会话卡、推送加会话卡的有自己的卡，只记录的不显示：「Lead 动态」不再说一遍（store 的 listLeadActivityEvents）。
     // 助手按占位判断过「不用回」、后来改成了正文：当作新消息再判断一次（reopenOf），投递方式按原来那条消息的类型定。
@@ -805,7 +810,10 @@ export class ChannelHub {
     if (decision && ambient && decision.mode !== "record") decision = { ...decision, mode: "digest" };
     // 合并编辑（统一消息事件 spec D6，inbound.ts）：交给 Lead 时，Lead 拿走以前对方改的消息并进那条消息，不再问一次请求 A，
     // 也不产生新的 Lead 输入：这条编辑只记录，记下以后再并（mergeEditNow）。拿走以后照旧：有卡时更新卡、按新消息再判断。
-    const merge = decision && item.amends === "edited" && this.options.lead ? this.editMergeFor(adapter.id, item) : null;
+    // 重开的编辑（reopenOf）按新消息再判断：机器人只记录过的占位没有判断过，editMergeFor 会把它当成「还在判断」压成只记录。
+    const merge = decision && item.amends === "edited" && this.options.lead
+      ? reopen !== null ? { kind: "rejudge" as const, queued: null } : this.editMergeFor(adapter.id, item)
+      : null;
     if (decision && merge && merge.kind !== "rejudge") decision = { ...decision, mode: "record" };
     if (item.amends) payload.amends = item.amends;
     if (merge) payload.editMerge = merge.kind;
@@ -966,8 +974,10 @@ export class ChannelHub {
       if (this.now().getTime() - Date.parse(item.occurredAt) > REOPEN_MAX_AGE_MS) return null;
       const seq = this.judgedHeadSeq(source, item);
       const head = seq === undefined ? undefined : getEvent(this.db, seq);
-      if (!head || head.disposition !== "no_action" || head.dispositionDetail?.by !== "assistant") return null;
-      if (!placeholderBecameText(typeof head.payload.text === "string" ? head.payload.text : "", item.text)) return null;
+      if (!head) return null;
+      const headText = typeof head.payload.text === "string" ? head.payload.text : "";
+      const skipped = head.disposition === "no_action" && head.dispositionDetail?.by === "assistant" && placeholderBecameText(headText, item.text);
+      if (!skipped && !this.botAnswerArrived(source, head, headText, item)) return null;
       const answered = this.db.prepare(
         `SELECT 1 FROM events WHERE source = ? AND entity_key = ? AND seq > ? AND json_valid(payload)
            AND json_extract(payload, '$.role') IN ('self_reply', 'echo') LIMIT 1`,
@@ -979,6 +989,39 @@ export class ChannelHub {
     } catch (error) {
       this.log(`[channels] ${source}: could not tell whether to judge an edit in ${item.objectKey} again: ${errorText(error)}`);
       return null;
+    }
+  }
+
+  /**
+   * 机器人先发了空的（或者助手格式的）占位、只记录了，现在把回答改了进来，并且是在回答你或 Lead 刚问它的话（2026-11-25）：
+   * 和助手判断过不用回的占位一样，当新消息再判断一次（reopenOf）。占位已经处置过的（例如用户点了忽略）不算。
+   */
+  private botAnswerArrived(source: string, head: EventRecord, headText: string, item: ChannelInbound): boolean {
+    const sender = head.payload.sender as { bot?: unknown } | undefined;
+    if (sender?.bot !== true || head.payload.channelDelivery !== "record" || head.disposition !== null) return false;
+    if (headText.trim() !== "" && !isPlaceholderText(headText)) return false;
+    return this.answersAsk(source, item);
+  }
+
+  /**
+   * 这条机器人消息是不是在回答你或 Lead 刚问它的话（inbound.ts 的 answersOwnerAsk）：找同一个对话里最近你本人的话和系统替你发的话。
+   * 读不了库时按「不是」（照旧只记录）。
+   */
+  private answersAsk(source: string, item: ChannelInbound): boolean {
+    if (item.role !== "message" || item.sender.bot !== true || !item.text.trim()) return false;
+    try {
+      const rows = this.db.prepare(
+        `SELECT occurred_at AS at, json_extract(payload, '$.text') AS text FROM events
+         WHERE source = ? AND entity_key = ? AND json_valid(payload) AND json_extract(payload, '$.role') IN ('self_reply', 'echo')
+         ORDER BY seq DESC LIMIT 20`,
+      ).all(source, item.objectKey) as Array<{ at: string; text: unknown }>;
+      return answersOwnerAsk({
+        bot: true, text: item.text, at: item.occurredAt, audience: item.audience ?? null, senderName: item.sender.name,
+        asks: rows.map((row) => ({ at: row.at, text: typeof row.text === "string" ? row.text : "" })),
+      });
+    } catch (error) {
+      this.log(`[channels] ${source}: could not tell whether a bot answered a question in ${item.objectKey}: ${errorText(error)}`);
+      return false;
     }
   }
 
@@ -4155,6 +4198,7 @@ export class ChannelHub {
     const event = getEvent(db, seq);
     const pending = event ? pendingCardOf(event.payload) : null;
     if (!event || !pending || !event.entityKey) return { card: null, action: null };
+    given = this.answerAction(event, given);
     const objectKey = event.entityKey;
     // 交给 Lead 时不在这里起草：Lead 看了上下文自己写（reply_to_source、notify_user 带的草稿），或者回表情、不回。
     const viaLead = this.leadRoutes(given?.action ?? null);
@@ -4249,10 +4293,21 @@ export class ChannelHub {
    * 只记录的照旧只记录：并进卡，不交给 Lead（2026-11-02：同一条消息改了四次，Lead 跑了四轮）。同事私信里的写成 quietSkip。
    */
   private joinedCardAction(event: EventRecord, decided: AuthorityDecision): AuthorityAction {
-    const action = decided.action;
+    const action = this.answerAction(event, decided)!.action;
     if (action.kind === "work" || action.kind === "tell") return action;
     if (action.kind === "skip") return this.quietDirectCard(event) ? quietSkip(action) : action;
     return { kind: "ask", reason: `这个对话已经有一张卡在等你（${action.reason}）` };
+  }
+
+  /**
+   * 机器人在回答你或 Lead 刚问它的话（payload.answersAsk，2026-11-25）：这是问题的答复，不是要你回的消息。授权表按「不用回」
+   * 跳过、回表情、收尾或者拒绝时，改成告诉你（tell）：开卡，交给 Lead。别的结论（要干活、问你、提醒你）不变。
+   */
+  private answerAction(event: EventRecord, decided: AuthorityDecision | null): AuthorityDecision | null {
+    if (!decided || event.payload.answersAsk !== true) return decided;
+    const action = decided.action;
+    if (action.kind !== "skip" && action.kind !== "react" && action.kind !== "closing_reply" && action.kind !== "refuse") return decided;
+    return { ...decided, action: { kind: "tell", reason: `机器人在回答你或你的助手刚问它的话（${action.reason}）` } };
   }
 
   /**

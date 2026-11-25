@@ -100,7 +100,9 @@ describe("changing the delivery order", () => {
     const conversation = ["slack.mention.received", "slack.thread.message", "slack.message.edited", "slack.message.deleted"];
     // 全频道广播、用户起头的 thread 里不是回用户的话进摘要（种子修订 5，2026-11-20）。
     const ambient = ["slack.broadcast.message", "slack.owner_thread.message"];
-    expect(tier(withParams("channel.slack.delivery", { cardWhen: { kinds: ["slack.dm.received", ...conversation] } }))).toBe("conservative");
+    // 机器人回答你刚问它的话也进会话卡，包括你关注的 thread 里的（种子修订 6，2026-11-25）。
+    expect(tier(withParams("channel.slack.delivery", { cardWhen: { kinds: ["slack.dm.received", "slack.followed.message", ...conversation] } }))).toBe("conservative");
+    expect(tier(withParams("channel.slack.delivery", { cardWhen: { kinds: ["slack.dm.received", ...conversation] } }))).toBe("permissive");
     expect(tier(withParams("channel.slack.delivery", { cardWhen: { kinds: ["slack.dm.received", "slack.mention.received"] } }))).toBe("permissive");
     expect(tier(withParams("channel.slack.delivery", { cardWhen: { kinds: ["slack.dm.received"] } }))).toBe("permissive");
     expect(tier(withParams("channel.slack.delivery", { digestWhen: { kinds: [...conversation, ...ambient, "slack.dm.received"] } }))).toBe("conservative");
@@ -186,7 +188,7 @@ describe("the slack plugin's seeds are pinned to their revision", () => {
       [content.id, `${seedRevision}:${createHash("sha256").update(stable(content)).digest("hex").slice(0, 12)}`]));
     expect(fingerprints).toEqual({
       "channel.slack.delegate": "2:b5b8efd00f1e",
-      "channel.slack.delivery": "5:01900584dbea",
+      "channel.slack.delivery": "6:5b84e7f731d0",
       "channel.slack.lookup": "2:45ea7faf5d0d",
       "channel.slack.reply": "3:8f9efa82d142",
       "slack.amendment": "2:c81122fe5be4",

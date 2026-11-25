@@ -529,10 +529,12 @@ const SEEDS: readonly SystemStandingOrderSeed[] = [
     // 4：机器人和应用发的消息（payload.sender.bot，来自 Slack 的 bot_id）只记录（用户 2026-10-21：日历提醒开了卡）。
     // 5：全频道广播和你起头的 thread 里不是回你的话进摘要（2026-11-20）。用户或 Lead 改过这条指令时不覆盖：
     //    这两种消息在改过的指令里不匹配，按 record 只记录、沉淀进记忆，和以前一样。
-    seedRevision: 5,
+    // 6：机器人回答你或 Lead 刚在同一个私信或 thread 里问它的话（payload.answersAsk，hub 按结构认）进会话卡（2026-11-25）。
+    //    别的机器人消息照旧只记录。
+    seedRevision: 6,
     title: "Slack 消息的投递：打断阈值很高（只有你信任的人发来私信、并且系统判断你需要马上看到时才推送）；"
-      + "私信和同事的提及、你的线程里同事回你的话进会话卡；全频道广播、你起头的 thread 里回别人的话和其余的进摘要；"
-      + "订阅频道的普通消息和机器人发的消息只记录",
+      + "私信和同事的提及、你的线程里同事回你的话、机器人回答你刚问它的话进会话卡；全频道广播、你起头的 thread 里回别人的话和其余的进摘要；"
+      + "订阅频道的普通消息和别的机器人消息只记录",
     priority: 100,
     condition: {},
     action: {
@@ -545,10 +547,10 @@ const SEEDS: readonly SystemStandingOrderSeed[] = [
           fields: { "payload.sender.trust": "trusted", "payload.urgent": true, "payload.sender.bot": { not: true } },
         },
         cardWhen: {
-          fields: { "payload.sender.bot": { not: true } },
           anyOf: [
-            { kinds: [SLACK_EVENT_KINDS.dm] },
-            { kinds: CONVERSATION_KINDS, fields: { "payload.sender.trust": { in: ["trusted", "colleague"] } } },
+            { kinds: [SLACK_EVENT_KINDS.dm], fields: { "payload.sender.bot": { not: true } } },
+            { kinds: CONVERSATION_KINDS, fields: { "payload.sender.trust": { in: ["trusted", "colleague"] }, "payload.sender.bot": { not: true } } },
+            { kinds: [SLACK_EVENT_KINDS.dm, SLACK_EVENT_KINDS.followed, ...CONVERSATION_KINDS], fields: { "payload.answersAsk": true } },
           ],
         },
         digestWhen: { kinds: [...CONVERSATION_KINDS, ...AMBIENT_KINDS], fields: { "payload.sender.bot": { not: true } } },
@@ -560,6 +562,8 @@ const SEEDS: readonly SystemStandingOrderSeed[] = [
       + "并且系统判断你需要马上看到（payload.urgent：通道内核问快模型，阈值很高，不看关键词；问不成时按不紧急）；"
       + "私信、同事在频道里提到你、你的线程里同事的后续消息，进会话卡；外部的人的，进摘要；改和删只更新没结束的卡；其余只记录。"
       + "用户 2026-10-21：机器人和应用发的消息（例如日历提醒）只记录，不开卡、不进摘要。"
+      + "2026-11-25：例外是机器人在回答你或 Lead 刚问它的话：你本人或系统替你在同一个私信或 thread 里问了它（群聊和频道里要提到它），"
+      + "30 分钟以内它发来的、有正文的消息进会话卡，交给 Lead；它先发空的占位、再把回答改进来时，按改进来的回答判断。"
       + "开卡以前系统还会先判断这条消息要不要你回（请求 A 的 needs_reply），不用回的不开卡，只在 Lead 动态里记一笔。"
       + "用户 2026-11-20：你所在频道里的全频道广播（@channel、@here、@everyone）不用你处理也进摘要、沉淀进记忆；"
       + "你本人起头的 thread 里，同事没有 @ 你、但看结构是在回你的话（接在你的话后面，或者引用、链接到你的话）按 thread 进会话卡，"
@@ -726,6 +730,9 @@ function richText(value: unknown): string {
   if (value.type === "text" && isString(value.text)) return value.text;
   if (value.type === "link") return isString(value.text) ? value.text : isString(value.url) ? value.url : "";
   if (value.type === "emoji" && isString(value.name)) return `:${value.name}:`;
+  // 提到的人和频道写回 Slack 的标记，显示时和 text 里的一样换成名字（slackDisplayText）。
+  if (value.type === "user" && isString(value.user_id)) return `<@${value.user_id}>`;
+  if (value.type === "channel" && isString(value.channel_id)) return `<#${value.channel_id}>`;
   if (Array.isArray(value.elements)) {
     const joiner = value.type === "rich_text_list" ? "\n" : "";
     return value.elements.map(richText).filter(Boolean).join(joiner);
@@ -733,9 +740,12 @@ function richText(value: unknown): string {
   return "";
 }
 
-// 一个 block 里的字：header、section（正文和字段）、context、rich_text。别的（图片、按钮）没有要读的字。
+// 一个 block 里的字：header、section（正文和字段）、context、rich_text、markdown。别的（图片、按钮）没有要读的字。
+// markdown block（https://docs.slack.dev/reference/block-kit/blocks/markdown-block）的 text 直接是字符串，AI 应用的回答常用它，
+// 消息的 text 是空的（2026-11-25：机器人在私信 thread 里的回答记成了空字符串）。
 function blockText(block: unknown): string[] {
   if (!isRecord(block)) return [];
+  if (block.type === "markdown") return [block.text].filter(isString);
   if (block.type === "header") return [textObject(block.text)].filter(isString);
   if (block.type === "section") {
     const fields = Array.isArray(block.fields) ? block.fields.map(textObject) : [];
@@ -1533,13 +1543,18 @@ export function createSlackChannelAdapter(options: SlackChannelOptions): Channel
     const ts = edited ? event.message?.ts : event.deleted_ts ?? event.previous_message?.ts;
     if (!message || !isString(ts)) return [];
     if (message.metadata?.event_type === SLACK_REPLY_METADATA_TYPE || (self && message.user === self)) return [];
-    if (edited && (message.text ?? "") === (event.previous_message?.text ?? "")) return [];
+    // 按取出的正文比，不只比 text：应用改消息时常只改 block 或附件，text 一直是空的（2026-11-25：机器人先发一条空的占位，
+    // 再把回答改进 block，以前这次编辑因为 text 没变被丢掉了）。
+    if (edited && slackMessageText(message) === slackMessageText(event.previous_message ?? {})) return [];
     const place = placeOf(channel, channelType, ts, message.thread_ts);
     // 没有道的线程：订阅频道里的才收（只记录，给记忆沉淀用：删掉的消息不能留在笔记里）。私信里的不收。
     // 收过的全频道广播（不论频道订没订阅）改了、删了也要知道：记忆里不能留删掉的话。
     const wasBroadcast = !place.direct && (slackBroadcastOf(message) !== null
       || (event.previous_message !== undefined && slackBroadcastOf(event.previous_message) !== null));
+    // 私信里应用（机器人）改的消息也收：机器人发的消息只记录、不开道，可它常先发空的占位、再把回答改进去。
+    // 收下以后由 hub 决定：回答了你或 Lead 刚问的话时重新判断（reopenOf），别的只记录。
     const known = context.interest?.laneExists(place.objectKey)
+      || (place.direct && edited && isString(message.bot_id))
       || (!place.direct && context.interest?.followed(place.objectKey) && await followable(channel, context))
       || (wasBroadcast && await broadcastAllowed(channel, context));
     if (!known && (place.direct || !await subscribed(channel, context))) return [];

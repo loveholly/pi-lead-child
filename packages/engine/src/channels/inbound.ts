@@ -149,6 +149,35 @@ export function placeholderBecameText(judged: string, latest: string): boolean {
   return isPlaceholderText(judged) && !isPlaceholderText(latest) && materialEdit(judged, latest);
 }
 
+/** 你或 Lead 在同一个对话里问了以后，多久以内机器人发来的话算回答（answersOwnerAsk）。 */
+export const ASK_ANSWER_WINDOW_MS = 30 * 60_000;
+
+/**
+ * 机器人（应用）发来的这条消息是不是在回答你或 Lead 刚问的话（决策边界，纯函数；2026-11-25：Lead 在和一个机器人的私信 thread 里
+ * 问了权限，机器人十秒后回了结论，可机器人的消息按投递指令只记录，Lead 没被叫醒）。只看结构，不看内容：
+ *   - 发信人是机器人，这条消息有正文（空的、助手格式的占位不算：正文还在路上，等它改进来再判断）；
+ *   - 同一个对话（私信或者同一个 thread）里，你本人的话或者系统替你发的话（asks）在这条消息以前 ASK_ANSWER_WINDOW_MS 以内；
+ *   - 私信（audience direct）里你的话就是对它说的；群聊和频道里你的话要提到这个机器人（显示的正文里有「@它的名字」）。
+ * 广播类的机器人（日历提醒、构建通知）没人问它，照旧只记录。
+ */
+export function answersOwnerAsk(input: {
+  bot: boolean;
+  text: string;
+  at: string;
+  audience: "direct" | "group" | "channel" | null;
+  senderName: string;
+  asks: ReadonlyArray<{ at: string; text: string }>;
+}): boolean {
+  if (!input.bot || !input.text.trim() || isPlaceholderText(input.text)) return false;
+  const at = Date.parse(input.at);
+  if (Number.isNaN(at)) return false;
+  return input.asks.some((ask) => {
+    const askedAt = Date.parse(ask.at);
+    if (Number.isNaN(askedAt) || askedAt > at || at - askedAt > ASK_ANSWER_WINDOW_MS) return false;
+    return input.audience === "direct" || (input.senderName.trim() !== "" && ask.text.includes(`@${input.senderName}`));
+  });
+}
+
 /**
  * 对方改了一条消息（spec D6），入站层怎么处理（决策边界，纯函数）：
  *   merge_pending：这条消息还在入站判断里（Jev 还没回答），还没有它的消息事件：只记录，产生消息事件时用改后的话。
