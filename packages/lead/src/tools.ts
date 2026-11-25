@@ -460,6 +460,34 @@ export function deliverQueuedFollowUps(deps: LeadDeps, itemId: number, warmed = 
   }
 }
 
+// continue_ticket_agent 要执行者改文件、工单却不在能跑执行者的 stage 时（工单 #550，2026-11-25）：
+// 以前照样续接最近的会话。done 和 review 的工单最近的会话是核查员的，于是起来的是只读核查员，
+// 它报 `executor run requires stage in {ready, active, blocked}` 就退出，Lead 拿到的却是「已交付」。
+// 现在直接拒绝，告诉 Lead 下一步。能跑执行者的 stage 和 run-gate.ts 的 EXECUTOR_STAGES 一致。
+const CONTINUE_EXECUTOR_STAGES = new Set(["ready", "active", "blocked"]);
+
+export function continueNeedsExecutorRefusal(item: Pick<Item, "id" | "stage">): {
+  mode: "refused"; code: "executor_unavailable"; ticketId: number; stage: string; delivered: false; reason: string; nextStep: string;
+} | null {
+  if (CONTINUE_EXECUTOR_STAGES.has(item.stage)) return null;
+  const nextStep = item.stage === "review"
+    ? `用 ticket_action 对 #${item.id} 做 rework（打回返工），reason 写这条指令：工单回到执行，执行者续接最新的交付去改。`
+    : item.stage === "draft"
+      ? `工单 #${item.id} 还是草稿：先用 ticket_action 的 confirm 确认它，再用 spawn_child 开跑，把这条指令写进 brief 或评论。`
+      : `工单 #${item.id} 已经结束（${item.stage}），不能再派执行者。用 create_task 另开一张工单做这件事，`
+        + `relations 里加 {target_ticket_id: ${item.id}, relation_type: "relates_to"}，brief 写清原工单的分支、PR 和这条指令，再 spawn_child。`;
+  return {
+    mode: "refused",
+    code: "executor_unavailable",
+    ticketId: item.id,
+    stage: item.stage,
+    delivered: false,
+    reason: `指令没有发出：工单 #${item.id} 在 ${item.stage}，起不了能改文件的执行者`
+      + "（执行者只在 ready、active、blocked 时能跑）。续接会话只会起一个只读的对话，它不会改文件。",
+    nextStep,
+  };
+}
+
 // create_task 的 dedupe_key：同一件事只开一张（例如同一个根因的改进工单）。键记在建单时的一条决定里。
 function validDedupeKey(key: string): boolean {
   return /^[a-z0-9][a-z0-9._:-]{2,119}$/.test(key);
@@ -3369,12 +3397,31 @@ export function createLeadTools(deps: LeadDeps): ToolDefinition<any>[] {
       description:
         "围绕某张工单向 agent 交付一条结构化指令。若有正在执行这一轮的 child，指令交给该 child；" +
         "若没有，或者 child 的这一轮已经结束、只在停留，则新开一个 continuation run，并自动 resume 这张工单最新可续接的 agent session；" +
-        "若从未运行过，则启动新的 agent run。不要用自然语言关键字判断，入参必须给 ticket_id 和 instruction。",
+        "若从未运行过，则启动新的 agent run。不要用自然语言关键字判断，入参必须给 ticket_id 和 instruction。" +
+        "needs_changes：这条指令要 agent 改文件、提交、rebase、推 PR 这类动手的活时传 true；只是提问、要它解释时传 false。" +
+        "执行者只在工单 ready、active、blocked 时能跑：needs_changes=true 而工单在 review、done 等其他 stage 时，" +
+        "工具不发指令，返回 mode=refused 和 nextStep（review 的用 ticket_action rework 打回；done 的另开工单，relates_to 原单）。" +
+        "needs_changes=false 而工单不在这三个 stage 时，照样续接会话，但结果里 readOnly=true：那次对话只能回答，不会改文件。",
       parameters: Type.Object({
         ticket_id: Type.Number(),
         instruction: Type.String(),
+        needs_changes: Type.Boolean({
+          description: "指令要 agent 改文件、提交、rebase、推 PR 时为 true；只是提问或要解释时为 false。由你按指令的意思判断。",
+        }),
       }),
-      execute: async (_id, params: { ticket_id: number; instruction: string }) => {
+      execute: async (_id, params: { ticket_id: number; instruction: string; needs_changes?: boolean }) => {
+        const target = getItem(db, params.ticket_id);
+        if (!target) throw new Error(`工单 #${params.ticket_id} 不存在`);
+        if (params.needs_changes === true) {
+          const refusal = continueNeedsExecutorRefusal(target);
+          if (refusal) return text(JSON.stringify(refusal, null, 2));
+        }
+        // 不在能跑执行者的 stage 时，这次对话只能回答：在结果里说清楚，Lead 不会以为活已经派出去了。
+        const readOnly = CONTINUE_EXECUTOR_STAGES.has(target.stage) ? {} : {
+          readOnly: true,
+          note: `工单 #${target.id} 在 ${target.stage}，这次对话只能回答问题，不会改文件、不会提交。`
+            + "要动手的活用 needs_changes=true 再调一次，按返回的 nextStep 做。",
+        };
         await releaseSettledChild(params.ticket_id, "Lead sent a new instruction after the run's turn ended");
         const live = liveChildren().get(params.ticket_id);
         if (live) {
@@ -3389,6 +3436,7 @@ export function createLeadTools(deps: LeadDeps): ToolDefinition<any>[] {
               return text(JSON.stringify({
                 mode: "queued", ticketId: params.ticket_id, runId: live.runId,
                 note: "这个 runtime 执行中不能插话：指令已排上，这一轮结束后系统续接它的会话发过去，不用你再发。",
+                ...("readOnly" in readOnly ? { readOnly: true, readOnlyNote: readOnly.note } : {}),
               }));
             }
           } else if (live.handle?.send) {
@@ -3412,6 +3460,7 @@ export function createLeadTools(deps: LeadDeps): ToolDefinition<any>[] {
             runId: live.runId,
             resumedFromRunId: null,
             resumedSessionId: null,
+            ...readOnly,
           }));
         }
         await warmTicketConversationFacts(deps.db, params.ticket_id);
@@ -3429,6 +3478,7 @@ export function createLeadTools(deps: LeadDeps): ToolDefinition<any>[] {
           resumedSessionId: routed.resumedSessionId,
           role: routed.role,
           runtime: routed.runtime,
+          ...readOnly,
         }));
       },
     }),

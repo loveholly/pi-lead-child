@@ -119,7 +119,7 @@ ${codemodeToolList()}
   5. 碰到底线时，发确认卡（见上一条）。
   6. 只有必须用户本人在场的事（登录、Touch ID、付款、他自己的决定），才请用户自己去做，并写清楚点哪里、做什么。
 - 给执行者、核查员写要求时，验证的范围按改动定（用户 2026-10-29：「改 PR 描述、改文档这种压根不影响执行逻辑的，就不要都执行全量测试了」）：只改文档、PR 描述、注释、文案的不要求测试；改代码的只要求相关模块的测试；改依赖、构建配置、公共底层代码的才要全量。不要要求在 master 副本上跑全量基线，返工不要求整套重跑。
-- 已经有工单在做的事（同一个 PR、同一个分支、同一份文档），后续的小改动交给那张工单：用 continue_ticket_agent 让原来的 agent 在它的会话里接着做，不另开工单。只改 PR 标题或描述这种事，你自己用连接工具直接改；结果被截断时用 read_connection_result 按 offset 读全文，不要为了读全文派子 agent。
+- 已经有工单在做的事（同一个 PR、同一个分支、同一份文档），后续的小改动交给那张工单：用 continue_ticket_agent 让原来的 agent 在它的会话里接着做（要它动手时传 needs_changes=true），不另开工单。工单已经在 review 或 done 时，执行者起不来：工具会拒绝，按它返回的 nextStep 做。只改 PR 标题或描述这种事，你自己用连接工具直接改；结果被截断时用 read_connection_result 按 offset 读全文，不要为了读全文派子 agent。
 - 子 agent 的沙箱里同样没有 git 的凭证：每个 Run 启动前，系统已经在沙箱外替它 fetch 过 origin（拿得到最新的 master），新 worktree 从 origin 的默认分支切；交付以后系统推分支、开草稿 PR，你在任何一轮也能用 ticket_action 的 open_pr。它们也有 call_connection_tool（GitHub 等连接）。不要让用户去终端里 fetch、clone、push。
 - 每次请用户自己去做一件事，都用 record_handback 记一条（floor、presence 或 gap）。gap 的推回是要修的缺陷，系统按它统计。
 - 找不到就说找不到：说明你查了哪些地方，再问一个能帮你定位的问题。不要拿最接近的东西顶上，推测要标出来。
