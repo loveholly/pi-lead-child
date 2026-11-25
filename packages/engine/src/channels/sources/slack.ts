@@ -351,6 +351,10 @@ export interface SlackChannelOptions {
   // 记忆沉淀（spec D12，工单 07）。exclude：不订阅、不沉淀的频道，写频道编号（C0123ABCD）或者频道名（proj-x 或 #proj-x，
   // 不分大小写）。来自 config.json 的 channels.slack.memory.exclude（builtin.ts）。
   memory?: { exclude?: readonly string[] };
+  // 固定订阅（用户 2026-11-25）：不管最近有没有道都算订阅的频道，写法和排除名单一样（频道编号，或者不分大小写的频道名）。
+  // 排除名单优先。函数是 daemon 给的现在的值（设置 → 消息通道 → 固定订阅，Lead 也能改；store 的 channel-connections.ts），
+  // 每次判断时现读。来自 builtin.ts。
+  pinned?: readonly string[] | (() => readonly string[]);
   // 主人名（配置的 channels.ownerName）：建应用的清单里的说明。来自 builtin.ts。
   ownerName?: string | null;
   // 助手名：建应用的清单里的应用名。配置的 channels.assistantName（字符串），没有时是 daemon 给的函数（Lead 的名字，
@@ -373,6 +377,31 @@ export interface SlackMemoryExclusion {
   hasId(channelId: string): boolean;
   // 频道（编号或者名字）在名单里。名单不空、频道名又是 null（问不到）时按排除处理：宁可少记，不把用户不想留的频道记下来。
   has(channelId: string, channelName: string | null): boolean;
+}
+
+export interface SlackChannelList {
+  readonly empty: boolean;
+  // 名单里有频道名的写法（不像频道编号的条目）：要问 conversations.info 才能比。
+  readonly hasNames: boolean;
+  hasId(channelId: string): boolean;
+  // 频道名在名单里（去掉开头的 # 以后不分大小写）。null（问不到）不算。
+  hasName(channelName: string | null): boolean;
+}
+
+const SLACK_CHANNEL_ID = /^[CGD][A-Z0-9]{6,}$/;
+
+/** 频道名单（固定订阅用）：频道编号原样比，频道名去掉开头的 # 以后不分大小写比。不合法的条目不用。 */
+export function slackChannelList(entries: readonly unknown[] | undefined): SlackChannelList {
+  const list = (entries ?? []).filter((entry): entry is string => typeof entry === "string")
+    .map((entry) => entry.trim()).filter((entry) => entry.length > 0 && entry.length <= EXCLUDE_ENTRY_MAX).slice(0, EXCLUDE_MAX);
+  const ids = new Set(list);
+  const names = new Set(list.map((entry) => entry.replace(/^#/, "").toLowerCase()));
+  return {
+    empty: list.length === 0,
+    hasNames: list.some((entry) => !SLACK_CHANNEL_ID.test(entry)),
+    hasId: (channelId) => ids.has(channelId),
+    hasName: (channelName) => channelName !== null && names.has(channelName.replace(/^#/, "").toLowerCase()),
+  };
 }
 
 /** 排除名单：频道编号原样比，频道名去掉开头的 # 以后不分大小写比。不合法的条目（不是字符串、空的、太长的）不用。 */
@@ -1061,6 +1090,17 @@ export function createSlackChannelAdapter(options: SlackChannelOptions): Channel
   const trusted = new Set(options.trust?.trusted ?? []);
   const customers = new Set(options.trust?.customers ?? []);
   const excluded = slackMemoryExclusion(options.memory?.exclude);
+  // 固定订阅的名单：daemon 给的是函数时每次现读（用户随时会改），读不到时当作空的。
+  const pinnedOption = options.pinned;
+  const fixedPins = typeof pinnedOption === "function" ? null : slackChannelList(pinnedOption);
+  const pinnedList = (): SlackChannelList => {
+    if (fixedPins) return fixedPins;
+    try {
+      return slackChannelList((pinnedOption as () => readonly string[])());
+    } catch {
+      return slackChannelList([]);
+    }
+  };
   const names = new Map<string, string>();
   const conversations = new Map<string, ConversationInfo>();
   // 用户本人所在的工作区：auth.test（会话方式是换好的会话）或者投递的 team_id 告诉我们。补拉的消息靠它认出外部的人。
@@ -1445,11 +1485,18 @@ export function createSlackChannelAdapter(options: SlackChannelOptions): Channel
     return !excluded.has(channel, (await conversation(channel, context)).name);
   }
 
+  // 固定订阅的频道（用户 2026-11-25）：没有近期的道也算订阅；排除名单优先。按频道名固定的要问 conversations.info（带缓存）。
+  // 不在固定名单里的频道和以前一样：只看近期的道和排除名单。
   async function subscribed(channel: string, context: ChannelAdapterContext): Promise<boolean> {
-    if (!context.interest?.recentLaneUnder(`${SLACK_SOURCE}:${channel}:`, now().getTime() - subscribeWindowMs)) return false;
+    let name: string | null | undefined;
+    const nameOf = async () => (name !== undefined ? name : (name = (await conversation(channel, context)).name));
+    if (!context.interest?.recentLaneUnder(`${SLACK_SOURCE}:${channel}:`, now().getTime() - subscribeWindowMs)) {
+      const pins = pinnedList();
+      if (!pins.hasId(channel) && !(pins.hasNames && pins.hasName(await nameOf()))) return false;
+    }
     if (excluded.empty) return true;
     if (excluded.hasId(channel)) return false;
-    return !excluded.has(channel, (await conversation(channel, context)).name);
+    return !excluded.has(channel, await nameOf());
   }
 
   // 收不收这个频道里的全频道广播（2026-11-20）：排除名单里的不收；订阅的频道照收；没有订阅的频道只收内部频道的
@@ -2029,6 +2076,11 @@ export function createSlackChannelAdapter(options: SlackChannelOptions): Channel
     ],
     standingOrders: SEEDS,
     memory: memorySpec,
+    subscriptions: {
+      entryHint: "频道编号（例如 C0123ABCD）或者频道名（例如 #proj-x，不分大小写）",
+      excluded: () => (options.memory?.exclude ?? []).filter((entry): entry is string => typeof entry === "string")
+        .map((entry) => entry.trim()).filter((entry) => entry.length > 0 && entry.length <= EXCLUDE_ENTRY_MAX).slice(0, EXCLUDE_MAX),
+    },
     // 每次读时现算（hub 每发一条消息读一次）：设置页改了 emoji 以后，下一条消息就用新的。
     get disclosureMark() {
       return disclosureMarkNow();

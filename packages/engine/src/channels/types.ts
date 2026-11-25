@@ -494,6 +494,14 @@ export interface ChannelConnectionControl {
   writesSwitch(mode: string): boolean;
 }
 
+/** 固定订阅（用户 2026-11-25）：来源怎么认名单里的条目，以及优先于固定订阅的排除名单。 */
+export interface ChannelSubscriptionControl {
+  // 给人和 Lead 看的条目写法，一句话，例如「频道编号（C0123ABCD）或者频道名（#proj-x）」。
+  readonly entryHint: string;
+  // 排除名单（来源的配置里写的，只读）：里面的对话即使固定了也不订阅。
+  excluded(): readonly string[];
+}
+
 /**
  * 记忆沉淀（slack-takeover 工单 07，spec D12）：来源里哪些对话可以整理成事实笔记。内核（channels/memory.ts）按对象键
  * 把下面这些类型的事件分成对话，一个对话一条笔记；它只读事件日志，不再调来源的接口。来源的知识（哪种对话可以沉淀、
@@ -568,6 +576,11 @@ export interface ChannelAdapter {
   writesBlocked?(): string | null;
   /** 记忆沉淀（channels/memory.ts）。没有时这个来源的对话不沉淀。 */
   readonly memory?: ChannelMemorySpec;
+  /**
+   * 能固定订阅对话的来源（用户 2026-11-25，设置 → 消息通道 → 固定订阅）。名单由 daemon 存（store 的 channel-connections.ts），
+   * 来源每次判断订阅时现读。没有时这个来源不能固定订阅。
+   */
+  readonly subscriptions?: ChannelSubscriptionControl;
   /**
    * 署名里放在助手名前面的标记，用这个来源自己的写法（例如来源里的自定义 emoji 的短代码）。没有时不加。
    * 只用在发到这个来源的署名里（hub 的 disclosure.ts）；发到别处的（例如 PR 上的 review）不加。

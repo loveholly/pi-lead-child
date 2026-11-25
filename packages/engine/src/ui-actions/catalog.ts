@@ -41,6 +41,7 @@ import {
 } from "./agenda-feeds.js";
 import { SIGNAL_SOURCE_ACTIONS, SIGNAL_SOURCE_TARGET, SIGNAL_SOURCES_ACTIONS, SIGNAL_SOURCES_TARGET } from "./signal-sources.js";
 import { CHANNEL_CONNECTION_ACTIONS, CHANNEL_CONNECTION_TARGET } from "./channel-connections.js";
+import { CHANNEL_SUBSCRIPTIONS_ACTIONS, CHANNEL_SUBSCRIPTIONS_TARGET } from "./channel-subscriptions.js";
 import { joinProblems } from "./problems.messages.js";
 import { CHANNEL_HANDBOOK_ACTIONS, CHANNEL_HANDBOOK_TARGET } from "./handbook.js";
 import { MODEL_SETTINGS_ACTIONS, MODEL_SETTINGS_TARGET } from "./model-settings.js";
@@ -1256,6 +1257,7 @@ export const UI_ACTION_TARGETS: { readonly [T in UiActionTargetType]: UiActionTa
   widget_board: WIDGET_BOARD_TARGET,
   widget: WIDGET_TARGET,
   channel_connection: CHANNEL_CONNECTION_TARGET,
+  channel_subscriptions: CHANNEL_SUBSCRIPTIONS_TARGET,
   connections: CONNECTIONS_TARGET,
   connection: CONNECTION_TARGET,
   skills: SKILLS_TARGET,
@@ -1311,6 +1313,8 @@ export const UI_ACTIONS: { readonly [T in UiActionTargetType]: Readonly<Record<s
   widget: WIDGET_ACTIONS,
   // 来源的连接方式（2026-11-02）：登录、换方式、「代你往来源里写」开关。定义在 channel-connections.ts。
   channel_connection: CHANNEL_CONNECTION_ACTIONS,
+  // 来源的固定订阅（2026-11-25）：加、删一条。改规则，Lead 可以做。定义在 channel-subscriptions.ts。
+  channel_subscriptions: CHANNEL_SUBSCRIPTIONS_ACTIONS,
   // Lead 自己装 MCP 和 skill（2026-11-02，.scratch/lead-self-install/spec.md）：加远程、本地 MCP，授权、断开连接，装、卸 skill。
   // 定义在 installs.ts。
   connections: CONNECTIONS_ACTIONS,

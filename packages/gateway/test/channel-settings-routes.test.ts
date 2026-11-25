@@ -10,7 +10,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { Value } from "typebox/value";
 import { tempDir } from "@pi-lead-child/core/testing";
 import {
-  CHANNEL_SECRET_MAX_LENGTH, ChannelSecretsTestResultSchema, ChannelSettingsResponseSchema, ChannelSourceSettingsResponseSchema, HttpErrorResponseSchema,
+  CHANNEL_SECRET_MAX_LENGTH, ChannelSecretsTestResultSchema, ChannelSubscriptionsDtoSchema, ChannelSettingsResponseSchema, ChannelSourceSettingsResponseSchema, HttpErrorResponseSchema,
   type ChannelSecretsTestResult,
 } from "@pi-lead-child/protocol";
 import { createCliBinding, createLoopbackBinding, listEvents, openDb, type Db } from "@pi-lead-child/store";
@@ -287,3 +287,24 @@ describe("the channel settings routes", () => {
     expect(preflight.headers.get("access-control-allow-methods")).toContain("DELETE");
   });
 });
+
+// 固定订阅（2026-11-25）：只读的 GET，tickets:view 就能看；不能固定订阅的来源、没有这个方法的服务回 404。
+describe("the pinned subscriptions route", () => {
+  it("returns the pinned and excluded channels for tickets:view, and 404 for a source that cannot pin", async () => {
+    const { call, reader } = await start({
+      service: {
+        ...service,
+        subscriptionsView: (source) => (source === "chat" ? { source, pinned: ["#release-train"], excluded: ["#ops"] } : null),
+      },
+    });
+    const read = await call("GET", "/v1/channels/settings/chat/subscriptions", { origin: null, token: reader.accessToken });
+    expect(read.status).toBe(200);
+    expect(Value.Check(ChannelSubscriptionsDtoSchema, read.body)).toBe(true);
+    expect(read.body).toEqual({ source: "chat", pinned: ["#release-train"], excluded: ["#ops"] });
+    expect((await call("GET", "/v1/channels/settings/mail/subscriptions")).status).toBe(404);
+    expect((await call("PUT", "/v1/channels/settings/chat/subscriptions", { body: {} })).status).toBe(404);
+    const old = await start();
+    expect((await old.call("GET", "/v1/channels/settings/chat/subscriptions")).status).toBe(404);
+  });
+});
+

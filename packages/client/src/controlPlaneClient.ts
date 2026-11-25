@@ -34,7 +34,7 @@ import {
   type StartConnectionResponse,
 } from '@pi-lead-child/protocol';
 import {
-  ChannelConnectionDtoSchema, type ChannelConnectionDto,
+  ChannelConnectionDtoSchema, type ChannelConnectionDto, ChannelSubscriptionsDtoSchema, type ChannelSubscriptionsDto,
   ChannelSecretsRequestSchema,
   ChannelSecretsTestResultSchema,
   ChannelSettingsResponseSchema,
@@ -2134,6 +2134,11 @@ export class ControlPlaneClient {
   // 有几种连接方式的来源现在的连接方式（2026-11-02）。只有一种方式的来源回 404。改动走 performUiAction('channel_connection', …)。
   async getChannelConnection(source: string, signal?: AbortSignal): Promise<ChannelConnectionDto> {
     return this.request(`${channelSourcePath(source)}/connection`, ChannelConnectionDtoSchema, { signal });
+  }
+
+  // 能固定订阅的来源现在的固定订阅（2026-11-25）。不能固定订阅的来源回 404。
+  async getChannelSubscriptions(source: string, signal?: AbortSignal): Promise<ChannelSubscriptionsDto> {
+    return this.request(`${channelSourcePath(source)}/subscriptions`, ChannelSubscriptionsDtoSchema, { signal });
   }
 
   // 用这些密钥试一次，不保存。检查没过也是一个结果（ok 是 false）：

@@ -97,6 +97,8 @@ export interface UiActionServices {
   installs?: InstallServices;
   // 来源的连接方式（daemon 的通道设置，2026-11-02）：登录、换方式、「代你往来源里写」开关。通道接好以后才有。
   channelConnections?: ChannelConnectionService;
+  // 来源的固定订阅（设置 → 消息通道 → 固定订阅，2026-11-25）。daemon 的通道设置；通道没有启动时没有。
+  channelSubscriptions?: ChannelSubscriptionService;
   // 信号源（daemon 的 signal-source-runner，用户 2026-11-12）：试跑一次、马上跑一次。连接中心和 Lead 的沙箱接好以后才有；
   // 没有时（测试、没接沙箱）建、试跑、改命令、马上跑被拒绝，暂停、恢复、删除照常。
   signalSources?: SignalSourceService;
@@ -138,6 +140,26 @@ export interface ChannelConnectionService {
   // 换到一种不用登录的方式，并重连。
   useMode(source: string, mode: string): Promise<ChannelConnectionState>;
   setWrites(source: string, allowed: boolean): ChannelConnectionState;
+}
+
+/** 一个来源的固定订阅现在的样子（2026-11-25）。 */
+export interface ChannelSubscriptionsState {
+  source: string;
+  label: string;
+  // 条目的写法（来源给的，ChannelSubscriptionControl.entryHint）。
+  entryHint: string;
+  // 固定订阅的对话：不管最近有没有对话都算订阅。
+  pinned: string[];
+  // 配置里的排除名单（只读）：优先于固定订阅。
+  excluded: string[];
+}
+
+// 来源的固定订阅（daemon 的 channel-settings.ts）。设置页和 Lead 都经过操作层调它。不对的输入、不认识的来源抛 UiActionError。
+export interface ChannelSubscriptionService {
+  subscriptions(source: string): ChannelSubscriptionsState | null;
+  // 加一条（已经有同一个时不变）、删一条（没有时抛 invalid_input）。马上生效：来源每次判断订阅时现读。
+  pin(source: string, entry: string): ChannelSubscriptionsState;
+  unpin(source: string, entry: string): ChannelSubscriptionsState;
 }
 
 // 加、授权、断开连接（packages/connections 的 ConnectionHub，daemon 包一层：hub 的 ConnectionError 换成 UiActionError）。

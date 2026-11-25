@@ -14,6 +14,8 @@
 //      - 换回不用登录的方式：记下来，热重连。
 //      - 「代你往来源里写」开关：只记下来，马上生效（来源每次写之前读它）。
 //      选的方式和开关存在 store 的 channel-connections.ts。
+//   6. 固定订阅（2026-11-25，能固定订阅的来源，ChannelAdapter.subscriptions）：操作层的 channel_subscriptions 经过这里。
+//      加、删一条，存在 store 的 channel-connections.ts（和连接方式同一行），马上生效：来源每次判断订阅时现读。
 // 密钥的值不进日志、事件、错误和响应：检查结果、状态里的错误都先把这次涉及的密钥原样换掉，再按通用规则脱敏。
 import { createHash } from "node:crypto";
 import { channelSecretVaultName } from "@pi-lead-child/core";
@@ -21,7 +23,7 @@ import type { SecretVault } from "@pi-lead-child/connections";
 import {
   CHANNEL_TOKEN_MAX_LENGTH, ChannelSignInError, UiActionError,
   type ChannelAdapter, type ChannelConnectionControl, type ChannelConnectionService, type ChannelConnectionState, type ChannelSettingsSpec,
-  type ChannelSignInFailure,
+  type ChannelSignInFailure, type ChannelSubscriptionService, type ChannelSubscriptionsState,
 } from "@pi-lead-child/engine";
 import { ChannelSettingsError, type ChannelSettingsService, type ChannelSourceSettingsView } from "@pi-lead-child/gateway";
 import {
@@ -32,8 +34,12 @@ import {
   type ChannelSecretsTestResult,
   type ChannelSourceAccount,
   type ChannelSourceStatus,
+  type ChannelSubscriptionsDto,
 } from "@pi-lead-child/protocol";
-import { getChannelConnection, getLocale, setChannelConnectionMode, setChannelWrites, type Db } from "@pi-lead-child/store";
+import {
+  CHANNEL_PINNED_ENTRY_MAX, CHANNEL_PINNED_MAX, getChannelConnection, getLocale, normalizePinnedEntries, samePinnedEntry,
+  setChannelConnectionMode, setChannelPinned, setChannelWrites, type Db,
+} from "@pi-lead-child/store";
 import { channelSettingsMessages } from "./channel-settings.messages.js";
 import type { ChannelSourceStatusUpdate } from "./channels.js";
 import { SealedSecrets } from "./sealed-secrets.js";
@@ -103,7 +109,7 @@ function withTimeout<T>(work: Promise<T>, ms: number): Promise<T> {
   ]).finally(() => clearTimeout(timer));
 }
 
-export class ChannelSettings implements ChannelSettingsService, ChannelConnectionService {
+export class ChannelSettings implements ChannelSettingsService, ChannelConnectionService, ChannelSubscriptionService {
   private readonly sealed: SealedSecrets;
   private readonly states = new Map<string, SourceState>();
   // 每个来源最近一次登录，和还在等时取消它用的 AbortController。
@@ -537,6 +543,57 @@ export class ChannelSettings implements ChannelSettingsService, ChannelConnectio
     this.options.log(`[channel-settings] ${source}: sending on the user's behalf is ${allowed ? "allowed" : "off"}`);
     this.options.publish?.();
     return this.state(source)!;
+  }
+
+  // ── 固定订阅 ──────────────────────────────────────────────────────────────────────
+
+  subscriptions(source: string): ChannelSubscriptionsState | null {
+    const adapter = this.settingsAdapters().find((candidate) => candidate.id === source);
+    const control = adapter?.subscriptions;
+    if (!adapter || !control) return null;
+    return {
+      source, label: adapter.label.slice(0, 60), entryHint: control.entryHint.slice(0, 200),
+      pinned: getChannelConnection(this.options.db, source).pinned,
+      excluded: normalizePinnedEntries(control.excluded()),
+    };
+  }
+
+  /** 设置页读的固定订阅（GET /v1/channels/settings/:source/subscriptions）。不能固定订阅的来源是 null。 */
+  subscriptionsView(source: string): ChannelSubscriptionsDto | null {
+    const state = this.subscriptions(source);
+    return state ? { source: state.source, pinned: state.pinned, excluded: state.excluded } : null;
+  }
+
+  private subscribable(source: string): ChannelAdapter {
+    const adapter = this.adapter(source);
+    if (!adapter.subscriptions) throw new UiActionError("not_found", this.m().noSubscriptions(adapter.label));
+    return adapter;
+  }
+
+  pin(source: string, entry: string): ChannelSubscriptionsState {
+    this.subscribable(source);
+    const m = this.m();
+    const [clean] = normalizePinnedEntries([entry]);
+    if (!clean) throw new UiActionError("invalid_input", m.pinInvalid(CHANNEL_PINNED_ENTRY_MAX));
+    const pinned = getChannelConnection(this.options.db, source).pinned;
+    if (!pinned.some((item) => samePinnedEntry(item, clean))) {
+      if (pinned.length >= CHANNEL_PINNED_MAX) throw new UiActionError("invalid_input", m.pinFull(CHANNEL_PINNED_MAX));
+      setChannelPinned(this.options.db, source, [...pinned, clean]);
+      this.options.log(`[channel-settings] ${source}: pinned a conversation (${pinned.length + 1} pinned)`);
+      this.options.publish?.();
+    }
+    return this.subscriptions(source)!;
+  }
+
+  unpin(source: string, entry: string): ChannelSubscriptionsState {
+    this.subscribable(source);
+    const pinned = getChannelConnection(this.options.db, source).pinned;
+    const rest = pinned.filter((item) => !samePinnedEntry(item, entry));
+    if (rest.length === pinned.length) throw new UiActionError("invalid_input", this.m().notPinned(entry.trim().slice(0, CHANNEL_PINNED_ENTRY_MAX)));
+    setChannelPinned(this.options.db, source, rest);
+    this.options.log(`[channel-settings] ${source}: unpinned a conversation (${rest.length} pinned)`);
+    this.options.publish?.();
+    return this.subscriptions(source)!;
   }
 }
 

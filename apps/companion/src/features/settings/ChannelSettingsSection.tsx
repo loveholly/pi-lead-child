@@ -12,6 +12,7 @@ import { useChannelSettings, useConnectionPhase, useLeadName } from '@/state/hoo
 import { RESOURCE_KEYS } from '@/state/types';
 
 import { ChannelConnectionBlock, ChannelWritesSwitch, useChannelConnection } from './ChannelConnection';
+import { ChannelSubscriptionsBlock } from './ChannelSubscriptions';
 import { channelsMessages } from './channels.messages';
 import {
   canDisconnect, channelErrorText, channelStatusView, checkRows, emptySecretForm,
@@ -94,6 +95,8 @@ function ChannelSourceCard({ source }: { source: ChannelSourceSettingsDto }) {
           </SessionForm>
         )
         : <SecretsForm source={source} />}
+      {/* 固定订阅（2026-11-25）：能固定订阅的来源才有。 */}
+      <ChannelSubscriptionsBlock source={source} />
     </Card>
   );
 }

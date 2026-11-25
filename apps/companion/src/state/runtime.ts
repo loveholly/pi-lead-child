@@ -25,6 +25,7 @@ import type {
   ChannelPolicyTestRequest,
   ChannelPolicyTestResult,
   ChannelConnectionDto,
+  ChannelSubscriptionsDto,
   ChannelSecretsTestResult,
   ChannelSourceSettingsDto,
   ReplyStyleDto,
@@ -225,7 +226,7 @@ export type CompanionTransport = Pick<
   | 'getBusyPlacement' | 'getLeadShadow'
   | 'getLeadAvatar' | 'getLeadAvatarImage' | 'uploadLeadAvatarSlot' | 'clearLeadAvatarSlot' | 'setLeadAvatarSlackEmoji' | 'previewSlackEmoji'
   | 'getDesignPreferences' | 'updateDesignPreferences'
-  | 'getChannelSettings' | 'testChannelSecrets' | 'saveChannelSecrets' | 'clearChannelSecrets' | 'getChannelConnection'
+  | 'getChannelSettings' | 'testChannelSecrets' | 'saveChannelSecrets' | 'clearChannelSecrets' | 'getChannelConnection' | 'getChannelSubscriptions'
   | 'getChannelPolicy' | 'updateChannelPolicy' | 'testChannelPolicy' | 'replayChannelPolicy'
   | 'getChannelHandbook' | 'updateChannelHandbook' | 'rehearseChannelHandbook' | 'proposeChannelHandbookSituation'
   | 'getChannelHandbookSuggestions' | 'acceptChannelHandbookSuggestion' | 'dismissChannelHandbookSuggestion'
@@ -1666,6 +1667,12 @@ export class CompanionStateRuntime {
     return this.channelSettingsClient('getChannelConnection')(source, signal);
   }
 
+  // 能固定订阅的来源现在的固定订阅（2026-11-25，Slack 的频道）。面板自己保存读到的结果；改动走
+  // performUiAction('channel_subscriptions', …)，结果就是新的样子。不能固定订阅的来源回 404（面板不显示这一块）。
+  async channelSubscriptions(source: string, signal?: AbortSignal): Promise<ChannelSubscriptionsDto> {
+    return this.channelSettingsClient('getChannelSubscriptions')(source, signal);
+  }
+
   // 设置 → 消息通道 → 自动代你处理（2026-10-23）：开关、授权表和信心模型的参数。面板自己保存读到的结果，改完用响应替换。
   // 测一条消息、评估过去 24 小时的消息只读。都是 async：旧客户端没有这些方法时返回失败的 Promise，不在渲染里同步抛错。
   async channelPolicy(source: string): Promise<ChannelPolicyDto> {
@@ -3061,7 +3068,7 @@ type MemoryClientMethod =
   | 'getDesignPreferences' | 'updateDesignPreferences';
 
 type ChannelSettingsClientMethod =
-  | 'getChannelSettings' | 'testChannelSecrets' | 'saveChannelSecrets' | 'clearChannelSecrets' | 'getChannelConnection'
+  | 'getChannelSettings' | 'testChannelSecrets' | 'saveChannelSecrets' | 'clearChannelSecrets' | 'getChannelConnection' | 'getChannelSubscriptions'
   | 'getChannelPolicy' | 'updateChannelPolicy' | 'testChannelPolicy' | 'replayChannelPolicy'
   | 'getChannelHandbook' | 'updateChannelHandbook' | 'rehearseChannelHandbook' | 'proposeChannelHandbookSituation'
   | 'getChannelHandbookSuggestions' | 'acceptChannelHandbookSuggestion' | 'dismissChannelHandbookSuggestion'

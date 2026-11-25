@@ -139,3 +139,16 @@ export const ChannelConnectionDtoSchema = StrictObject({
   })),
 });
 export type ChannelConnectionDto = Static<typeof ChannelConnectionDtoSchema>;
+
+// ── 固定订阅（2026-11-25）──────────────────────────────────────────────────────────
+// GET /v1/channels/settings/:source/subscriptions：能固定订阅的来源（例如 Slack）现在固定了哪些对话、配置里排除了哪些。
+// 不能固定订阅的来源回 404。改动走通用的操作入口（POST /v1/actions/channel_subscriptions/<来源>/pin 或 unpin），
+// 它的 result 也是这个形状。单独一个路由，理由同上。
+export const ChannelSubscriptionsDtoSchema = StrictObject({
+  source: Type.String({ minLength: 1, maxLength: 60 }),
+  // 固定订阅的对话：不管最近有没有对话都算订阅。
+  pinned: Type.Array(Type.String({ minLength: 1, maxLength: 100 }), { maxItems: 200 }),
+  // 配置里的排除名单（只读）：优先于固定订阅。
+  excluded: Type.Array(Type.String({ minLength: 1, maxLength: 100 }), { maxItems: 200 }),
+});
+export type ChannelSubscriptionsDto = Static<typeof ChannelSubscriptionsDtoSchema>;

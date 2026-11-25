@@ -107,6 +107,18 @@ export const channelsMessages = defineMessages({
     signInAgain: 'Sign in again',
     useMode: (name: string) => `Use the ${name}`,
     connectionFailed: (reason: string) => `Could not change the connection: ${reason}`,
+    pinnedTitle: 'Pinned channels',
+    pinnedDescription: (leadName: string) =>
+      `${leadName} follows these channels even when nobody talked with you there in the last 14 days. It only records their messages and keeps them in memory. Excluded channels stay unfollowed.`,
+    pinnedEmpty: 'No pinned channels.',
+    pinnedPlaceholder: 'Channel ID or name, for example #proj-x',
+    pinnedInputLabel: 'Channel to pin',
+    pin: 'Pin',
+    unpin: 'Remove',
+    unpinLabel: (entry: string) => `Remove ${entry}`,
+    excludedNote: (entries: string) => `Excluded in the configuration, never followed: ${entries}`,
+    excludedBadge: 'Excluded',
+    pinFailed: (reason: string) => `Could not change the pinned channels: ${reason}`,
   },
   zh: {
     description: (leadName) => `外部的消息来源。${leadName} 用你本人的账号读这里的消息，替你查资料，有把握时代你回复。`,
@@ -202,5 +214,17 @@ export const channelsMessages = defineMessages({
     // 中文和英文之间空一格：「改用 Slack 应用」「改用浏览器会话」。
     useMode: (name) => `改用${/^[A-Za-z]/.test(name) ? ' ' : ''}${name}`,
     connectionFailed: (reason) => `没有改成连接方式：${reason}`,
+    pinnedTitle: '固定订阅的频道',
+    pinnedDescription: (leadName) =>
+      `${leadName} 一直跟踪这些频道，14 天内没人和你在里面说话也不会掉。消息只记录、沉淀进记忆。排除名单里的频道照样不订阅。`,
+    pinnedEmpty: '还没有固定订阅的频道。',
+    pinnedPlaceholder: '频道编号或频道名，例如 #proj-x',
+    pinnedInputLabel: '要固定订阅的频道',
+    pin: '固定',
+    unpin: '删掉',
+    unpinLabel: (entry) => `删掉 ${entry}`,
+    excludedNote: (entries) => `配置里排除的频道，不会订阅：${entries}`,
+    excludedBadge: '已排除',
+    pinFailed: (reason) => `没有改成固定订阅：${reason}`,
   },
 });

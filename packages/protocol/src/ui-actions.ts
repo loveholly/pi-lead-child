@@ -101,6 +101,8 @@ export const ActionPermissionSchema = Type.Union([
 //   widget  一个自定义控件（视图面板里的一块）：改（包括移到别的视图）、删。编号是控件的编号（GET /v1/widgets 的 id）。
 //   channel_connection  一个来源的连接方式（设置 → 消息通道，2026-11-02，例如 Slack 的 Slack 应用和浏览器会话）：登录、
 //     换回某种方式、「代你往来源里写」开关。编号是来源，例如 slack。
+//   channel_subscriptions  一个来源的固定订阅（设置 → 消息通道 → 固定订阅，2026-11-25）：固定的对话不管最近有没有对话都算订阅，
+//     排除名单优先。加、删一条。编号是来源，例如 slack。
 //   connections  连接的清单（设置 → 连接，2026-11-02，lead-installs.ts）：加远程 MCP、本地 MCP。编号只有 connections。
 //   connection  一个连接：请用户授权、断开。编号是连接的 key（GET /v1/connections 的 key，例如 notion、custom-3）。
 //   skills  PLC 自己的 skill 目录（~/Library/Application Support/Bytezard Lead/skills，2026-11-02）：从 GitHub 装一个。编号只有 skills。
@@ -119,7 +121,7 @@ export const UI_ACTION_TARGET_TYPES = [
   "runtime", "device", "approval", "decision", "channel_card", "channel_conversation", "channel_policy", "channel_handbook", "lead_model", "lead_context",
   "reminder", "workspace", "milestone", "rule_change", "lead_queue", "timer", "timer_request", "follow_up", "reply_style",
   "model_settings", "memory_settings", "core_memory", "core_memory_change", "memory_fact", "setup_hint",
-  "widget_board", "widget", "channel_connection", "connections", "connection", "skills", "skill", "host_bypass",
+  "widget_board", "widget", "channel_connection", "channel_subscriptions", "connections", "connection", "skills", "skill", "host_bypass",
   "busy_placement", "wake_pace", "lead_shadow", "background_model", "signal_sources", "signal_source", "agenda_feeds", "agenda_feed", "agenda_entry",
 ] as const;
 export type UiActionTargetType = typeof UI_ACTION_TARGET_TYPES[number];
@@ -131,6 +133,8 @@ export function isUiActionTargetType(value: string): value is UiActionTargetType
 const Empty = StrictObject({});
 // 来源的连接方式的名字（例如 app、session）。
 const ConnectionMode = Type.String({ pattern: "^[a-z][a-z0-9_-]{0,31}$" });
+// 固定订阅的一条（来源认的写法，例如 Slack 的 C0123ABCD 或 #proj-x）。
+const PinnedEntry = Type.String({ minLength: 1, maxLength: 100 });
 // 外部消息卡的动作都可以带「看到的版本」：卡已经变了时拒绝，免得按旧的样子做决定（页面的按钮带它，Lead 可以不带）。
 const CardVersion = { expectedVersion: Type.Optional(Type.Integer({ minimum: 1 })) };
 const CardOnly = StrictObject(CardVersion);
@@ -394,6 +398,13 @@ export const UI_ACTION_INPUT_SCHEMAS = {
     allow_writes: Empty,
     // 关掉「代你往来源里写」：Lead 只读，草稿留在卡上。
     block_writes: Empty,
+  },
+  // 设置 → 消息通道里一个来源的固定订阅（2026-11-25）。条目的写法由来源定义，例如 Slack 的频道编号或者频道名。
+  channel_subscriptions: {
+    // 固定订阅一个对话：不管最近有没有对话都算订阅（只记录、沉淀进记忆）。排除名单里的照样不订阅。
+    pin: StrictObject({ entry: PinnedEntry }),
+    // 取消一个固定订阅。
+    unpin: StrictObject({ entry: PinnedEntry }),
   },
   connections: {
     // 加一个远程 MCP（https 地址）。要授权时结果里带授权卡，用户授权完叫醒 Lead。

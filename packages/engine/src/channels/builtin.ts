@@ -15,7 +15,7 @@ import type { ChannelAdapter } from "./types.js";
 export {
   compareSlackTs, createSlackChannelAdapter, SLACK_EVENT_KINDS, SLACK_MESSAGE_BLOCKS_MAX, SLACK_REPLY_METADATA_TYPE, SLACK_SECRET_NAMES,
   SLACK_ASSISTANT_EMOJI_DEFAULT, SLACK_EMOJI_SCOPE_MISSING, SLACK_SOURCE, SLACK_TEXT_OBJECT_MAX, slackDisclosureBlocks, slackEmojiCode,
-  slackCatchUpWindow, slackMemoryExclusion, slackMrkdwnFromMarkdown, slackTsOf,
+  slackCatchUpWindow, slackChannelList, slackMemoryExclusion, slackMrkdwnFromMarkdown, slackTsOf,
   slackAttachmentsOnly, slackDisplayText, slackMarkupIds, slackMentionsFromNames, slackMessageText, SLACK_SESSION_SECRET_NAMES, slackSecretNames,
   slackBroadcastOf, slackThreadAddressee,
 } from "./sources/slack.js";
@@ -69,13 +69,13 @@ function storedSlackConnection(mode: string | null): SlackConnection | null {
 // defaults.assistantName：配置里没有助手名时用的名字（daemon 给 Lead 的名字，设置 → 身份与风格；用户 2026-10-22）。
 // defaults.assistantEmoji：署名 emoji 的生效值（daemon 给的：设置 → 身份与风格 → 形象的值 > 配置 > 缺省，2026-10-28），
 // 每发一条消息问一次。它已经算进了配置，所以给了它时不再用配置的 channels.slack.assistantEmoji。
-// defaults.connectionSettings：设置页存的连接方式和「代你往来源里写」开关（daemon 读 store 的 channel-connections.ts，2026-11-02）。
+// defaults.connectionSettings：设置页存的连接方式、「代你往来源里写」开关和固定订阅的名单（daemon 读 store 的 channel-connections.ts，2026-11-02）。
 // 连接方式：设置页选的 > 配置的 channels.slack.connection > 缺省的 Slack 应用。每次用时现读：换了方式以后 daemon 重连这个来源。
 export function builtinChannelAdapters(
   options: BuiltinChannelOptions, config?: PlcChannelsConfig,
   defaults: {
     assistantName?: () => string | null; assistantEmoji?: () => string | null | undefined;
-    connectionSettings?: (source: string) => { mode: string | null; writes: boolean };
+    connectionSettings?: (source: string) => { mode: string | null; writes: boolean; pinned?: readonly string[] };
   } = {},
 ): ChannelAdapter[] {
   const exclude = config?.slack?.memory?.exclude;
@@ -96,6 +96,8 @@ export function builtinChannelAdapters(
     slack = { ...slack, connection: stored ? () => storedSlackConnection(stored(SLACK_SOURCE).mode) ?? configured : configured };
   }
   if (slack && slack.sessionWrites === undefined && stored) slack = { ...slack, sessionWrites: () => stored(SLACK_SOURCE).writes };
+  // 固定订阅（用户 2026-11-25）：设置页和 Lead 改的名单，来源每次判断订阅时现读。
+  if (slack && slack.pinned === undefined && stored) slack = { ...slack, pinned: () => stored(SLACK_SOURCE).pinned ?? [] };
   return [...(slack ? [createSlackChannelAdapter(slack)] : [])];
 }
 

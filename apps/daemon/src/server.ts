@@ -5443,6 +5443,8 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
   channelHub = startedChannels?.hub ?? null;
   // 来源的连接方式（设置 → 消息通道，2026-11-02）：登录、换方式、「代你往来源里写」开关。通道设置在通道接好以后才认得来源。
   if (startedChannels) uiActionServices.channelConnections = channelSettings;
+  // 来源的固定订阅（设置 → 消息通道 → 固定订阅，2026-11-25）：加、删一条。
+  if (startedChannels) uiActionServices.channelSubscriptions = channelSettings;
   // 外部消息卡的动作交给操作层（engine 的 ui-actions/ 的 channel_card）：页面的按钮和 Lead 代用户回复用同一个对象
   // （用户 2026-10-23）。通道在 Lead 会话之后才建好，所以在这里补上。
   if (channelHub) {

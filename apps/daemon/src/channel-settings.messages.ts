@@ -20,6 +20,10 @@ export const channelSettingsMessages = defineMessages({
     noWritesSwitch: "The current connection method has no switch for sending on your behalf.",
     signInChecksFailed: (failed: string) => `You signed in, but the checks did not pass: ${failed}. Nothing was saved.`,
     signedOut: 'The session ended: SSO expired, or you signed out of all devices. Sign in again.',
+    noSubscriptions: (label: string) => `${label} cannot pin conversations.`,
+    pinInvalid: (max: number) => `Write a channel ID or a channel name, at most ${max} characters.`,
+    pinFull: (max: number) => `You can pin at most ${max} conversations. Remove one first.`,
+    notPinned: (entry: string) => `${entry} is not pinned.`,
   },
   zh: {
     cannotConnect: "连不上",
@@ -39,5 +43,9 @@ export const channelSettingsMessages = defineMessages({
     noWritesSwitch: "现在的连接方式没有「代你发消息」的开关。",
     signInChecksFailed: (failed) => `登录了，但检查没有通过：${failed}。什么都没有保存。`,
     signedOut: '会话已失效：SSO 过期，或者你登出了所有设备。请重新登录。',
+    noSubscriptions: (label) => `${label} 不能固定订阅。`,
+    pinInvalid: (max) => `写频道编号或者频道名，最多 ${max} 个字符。`,
+    pinFull: (max) => `最多固定订阅 ${max} 个对话。先删掉一个。`,
+    notPinned: (entry) => `${entry} 不在固定订阅里。`,
   },
 });
