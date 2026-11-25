@@ -979,7 +979,14 @@ export class ChannelHub {
     if (!marked) return null;
     this.refreshLaneSummary(marked.lane);
     const open = getOpenChannelCard(db, item.objectKey);
-    if (!open || !marked.seqs.some((seq) => seq >= open.firstSeq && seq <= open.lastSeq)) return null;
+    if (!open) return null;
+    // 卡里有这条消息：道里记的那一条在卡的范围里，或者卡的范围里有它的事件（机器人停下来以后留下的回答，settleBotAnswers，
+    // 会按新事件再记一次，道里那条还是收到时的编号）。
+    const inCard = marked.seqs.some((seq) => seq >= open.firstSeq && seq <= open.lastSeq) || db.prepare(
+      `SELECT 1 FROM events WHERE entity_key = ? AND seq BETWEEN ? AND ? AND json_valid(payload)
+         AND json_extract(payload, '$.messageId') = ? LIMIT 1`,
+    ).get(item.objectKey, open.firstSeq, open.lastSeq, item.messageId) !== undefined;
+    if (!inCard) return null;
     const last = getEvent(db, open.lastSeq);
     return updateChannelCard(db, open.id, last?.payload.messageId === item.messageId ? { excerpt: oneLine(text, EXCERPT_MAX) } : {}, { at }) ?? open;
   }

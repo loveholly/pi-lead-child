@@ -11,6 +11,8 @@
 //   - Lead can mute a conversation itself for up to 120 minutes (channel_conversation.mute), also in a turn that an outside message
 //     woke, but then only the conversation that woke it;
 //   - a person's message and a bot's real answer are handed to Lead as before.
+// Since #71 (master, 2026-11-25) a bot's answer wakes Lead once the bot has been quiet for BOT_ANSWER_SETTLE_MS: one wake per
+// round of answers. The breaker still counts those wakes: a bot that answers in rounds, each needing no action, gets muted.
 // Real SQLite, the real Slack source, fake Slack, a scripted SmartModel, Lead connected as in the daemon. All names are made up.
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -21,7 +23,7 @@ import {
   proposeStandingOrderChange, type Db, type EventRecord,
 } from "@pi-lead-child/store";
 import {
-  ChannelHub, ChannelRegistry, breakerCheck, createSlackChannelAdapter, leadActivityCardAction, runUiAction,
+  BOT_ANSWER_SETTLE_MS, ChannelHub, ChannelRegistry, breakerCheck, createSlackChannelAdapter, leadActivityCardAction, runUiAction,
 } from "../src/index.js";
 import { channelMuteMessages } from "../src/channels/mute.messages.js";
 import { FakeAgentTaskDispatcher, FakeSlack, scriptedSmartModel } from "../testing/index.js";
@@ -87,6 +89,22 @@ async function botPosts(hub: ChannelHub, thread: string, text: string) {
   return { delivery, item };
 }
 
+// The bot answers in the thread and then stays quiet: after BOT_ANSWER_SETTLE_MS the tick hands the answer to Lead (#71).
+async function botAnswers(hub: ChannelHub, thread: string, text: string) {
+  const posted = await botPosts(hub, thread, text);
+  await settle(hub);
+  return posted;
+}
+
+async function settle(hub: ChannelHub) {
+  later(BOT_ANSWER_SETTLE_MS);
+  await hub.tick();
+  await hub.idle();
+}
+
+// The event that handed the bot's answer to Lead (the settled answer, with answersAsk).
+const settledAnswers = () => listEvents(db, { limit: 1000 }).filter((event) => event.source === "slack" && event.payload.answersAsk === true);
+
 // Lead judges the newest message event "no action", as it did on 11-25.
 async function leadSaysNoAction(hub: ChannelHub) {
   const latest = wakes().at(-1)!;
@@ -99,7 +117,7 @@ describe("a deleted message", () => {
     const { hub, model } = setup();
     const thread = await askBot(hub);
     later(MINUTE);
-    const progress = await botPosts(hub, thread, "50 steps, 4 failed · continued below");
+    const progress = await botAnswers(hub, thread, "50 steps, 4 failed · continued below");
     expect(wakes()).toHaveLength(1);
     await leadSaysNoAction(hub);
     const calls = model.calls.length;
@@ -123,7 +141,7 @@ describe("a deleted message", () => {
     const { hub, model } = setup();
     const thread = await askBot(hub);
     later(MINUTE);
-    const progress = await botPosts(hub, thread, "99 steps, 35 failed · continued below");
+    const progress = await botAnswers(hub, thread, "99 steps, 35 failed · continued below");
     const [card] = openCards(progress.item.objectKey);
     expect(card).toBeDefined();
     expect(wakes()).toHaveLength(1);
@@ -139,7 +157,7 @@ describe("a deleted message", () => {
     expect(wakes()).toHaveLength(1);
     const after = listChannelCardsForObject(db, progress.item.objectKey).find((candidate) => candidate.id === card!.id)!;
     expect(after).toMatchObject({ state: card!.state, messageCount: card!.messageCount, lastSeq: card!.lastSeq });
-    // The deleted line was the newest on the card: the excerpt shows the delete note, not the old text.
+    // The deleted line was the newest on the card (the settled answer): the excerpt shows the delete note, not the old text.
     expect(after.excerpt).toBe(getEvent(db, deleted.seq!)!.payload.text);
   });
 
@@ -178,9 +196,10 @@ describe("the breaker of one conversation", () => {
   it("mutes it after 5 wakes in 10 minutes that all needed no action, records the rest, tells the user once, and comes back", async () => {
     const { hub, model } = setup();
     const thread = await askBot(hub);
+    // Five rounds: each round the bot posts a line and goes quiet, the tick hands it to Lead, Lead says "no action".
     for (let step = 1; step <= 5; step += 1) {
-      later(MINUTE);
-      await botPosts(hub, thread, `Step ${step} of 9 finished`);
+      later(10_000);
+      await botAnswers(hub, thread, `Step ${step} of 9 finished`);
       expect(wakes()).toHaveLength(step);
       await leadSaysNoAction(hub);
     }
@@ -201,10 +220,11 @@ describe("the breaker of one conversation", () => {
     // While muted: recorded with the mute on it, no card, no Lead, no model.
     const calls = model.calls.length;
     later(MINUTE);
-    const quiet = await botPosts(hub, thread, "Step 6 of 9 finished");
+    const quiet = await botAnswers(hub, thread, "Step 6 of 9 finished");
     expect(quiet.item).toMatchObject({ delivery: "record", cardId: null });
     expect(getEvent(db, quiet.item.seq!)!.payload).toMatchObject({ muted: { by: "breaker" }, urgency: { reason: "muted" } });
     expect(getEvent(db, quiet.item.seq!)!.payload).not.toHaveProperty("answersAsk");
+    expect(getEvent(db, quiet.item.seq!)!.payload).not.toHaveProperty("answerPending");
     expect(model.calls.length).toBe(calls);
     expect(wakes()).toHaveLength(5);
     expect(listEvents(db, { kind: CHANNEL_MUTE_STARTED_KIND })).toHaveLength(1);
@@ -215,8 +235,8 @@ describe("the breaker of one conversation", () => {
     expect(leadActivityCardAction(db, started[0]!, clock)).toBeNull();
     await askAgain(hub, thread);
     later(MINUTE);
-    const back = await botPosts(hub, thread, "Summary: 9 of 9 steps finished, report at reports/nightly.html");
-    expect(back.item.delivery).toBe("card");
+    await botAnswers(hub, thread, "Summary: 9 of 9 steps finished, report at reports/nightly.html");
+    expect(settledAnswers().at(-1)!.payload).toMatchObject({ text: "Summary: 9 of 9 steps finished, report at reports/nightly.html", channelDelivery: "card" });
     expect(wakes()).toHaveLength(6);
     // The old wakes are before the mute ended: one more "no action" does not trip the breaker again.
     await leadSaysNoAction(hub);
@@ -227,8 +247,8 @@ describe("the breaker of one conversation", () => {
     const { hub } = setup();
     const thread = await askBot(hub);
     for (let step = 1; step <= 4; step += 1) {
-      later(MINUTE);
-      await botPosts(hub, thread, `Step ${step} of 9 finished`);
+      later(10_000);
+      await botAnswers(hub, thread, `Step ${step} of 9 finished`);
       if (step === 2) {
         await hub.leadDisposed(wakes().at(-1)!.seq, { disposition: "told_user", reason: "the bot asks for a parameter", draft: "Use yesterday." });
         await hub.idle();
@@ -236,12 +256,13 @@ describe("the breaker of one conversation", () => {
         await leadSaysNoAction(hub);
       }
     }
-    later(MINUTE);
-    await botPosts(hub, thread, "Step 5 of 9 finished");
+    later(10_000);
+    await botAnswers(hub, thread, "Step 5 of 9 finished");
     await leadSaysNoAction(hub);
     const objectKey = `slack:D0RUNBOT:${thread}`;
     expect(activeChannelMute(db, objectKey, clock)).toBeNull();
-    // Five "no action" in a row, but the newest is still waiting for Lead when the fifth is judged: no trip yet.
+    // Five wakes in the window, but one of them needed Lead: checking again does not trip either.
+    expect(wakes()).toHaveLength(5);
     expect(breakerCheck(db, objectKey, clock)).toBeNull();
   });
 
@@ -249,8 +270,8 @@ describe("the breaker of one conversation", () => {
     const { hub } = setup();
     const thread = await askBot(hub);
     for (let step = 1; step <= 5; step += 1) {
-      later(MINUTE);
-      await botPosts(hub, thread, `Step ${step} of 9 finished`);
+      later(10_000);
+      await botAnswers(hub, thread, `Step ${step} of 9 finished`);
       await leadSaysNoAction(hub);
     }
     const objectKey = `slack:D0RUNBOT:${thread}`;
@@ -262,8 +283,8 @@ describe("the breaker of one conversation", () => {
     expect(leadActivityCardAction(db, listEvents(db, { kind: CHANNEL_MUTE_ENDED_KIND })[0]!, clock)).toBeNull();
     expect(getEvent(db, started.seq)!.disposition).toBe("seen");
 
-    later(MINUTE);
-    await botPosts(hub, thread, "Step 6 of 9 finished");
+    later(10_000);
+    await botAnswers(hub, thread, "Step 6 of 9 finished");
     expect(wakes()).toHaveLength(6);
     await leadSaysNoAction(hub);
     expect(activeChannelMute(db, objectKey, clock)).toBeNull();
@@ -319,9 +340,12 @@ describe("Lead muting a conversation", () => {
 
     const calls = model.calls.length;
     later(MINUTE);
-    const quiet = await botPosts(hub, flooding.split(":")[2]!, "Step 2 of 9 finished");
+    const wakesBefore = wakes().length;
+    const quiet = await botAnswers(hub, flooding.split(":")[2]!, "Step 2 of 9 finished");
     expect(quiet.item).toMatchObject({ delivery: "record", cardId: null });
+    expect(getEvent(db, quiet.item.seq!)!.payload).toMatchObject({ muted: { by: "lead" } });
     expect(model.calls.length).toBe(calls);
+    expect(wakes()).toHaveLength(wakesBefore);
 
     later(45 * MINUTE);
     expect(activeChannelMute(db, flooding, clock)).toBeNull();
@@ -365,54 +389,65 @@ describe("normal messages are not affected", () => {
     expect(person.delivery).toBe("card");
     const thread = await askBot(hub);
     later(MINUTE);
-    const answer = await botPosts(hub, thread, "Summary: 9 of 9 steps finished, report at reports/nightly.html");
-    expect(answer.item.delivery).toBe("card");
-    expect(getEvent(db, answer.item.seq!)!.payload).toMatchObject({ answersAsk: true });
+    await botAnswers(hub, thread, "Summary: 9 of 9 steps finished, report at reports/nightly.html");
+    expect(settledAnswers()).toMatchObject([{ payload: { text: "Summary: 9 of 9 steps finished, report at reports/nightly.html", channelDelivery: "card" } }]);
     expect(wakes()).toHaveLength(2);
   });
 });
 
-// The sequence of 11-25 13:47–13:53 (local time), with made-up names and texts: the bot answers in the thread with a placeholder,
-// edits and deletes its progress lines, and Lead judges each wake "no action". Before the fix every delete woke Lead too
-// (#740–#743 opened one after another). Now the deletes are only recorded, and the fifth "no action" mutes the thread.
+// The sequence of 11-25 13:47–13:53 (local time), with made-up names and texts: the bot answers in the thread with placeholders and
+// progress lines and deletes each progress line once the next one is out. Before the fixes every post and every delete woke Lead
+// (#740–#743 opened one after another). Now (#71 on master plus this ticket): the deletes never count, the flood wakes Lead at most
+// once after the bot goes quiet. When the bot keeps answering in rounds that each need no action, the fifth wake mutes the thread.
 describe("replay of the 11-25 flood", () => {
-  it("records the deletes, mutes the thread on the fifth no-action wake, and keeps the rest quiet", async () => {
+  it("records the deletes, wakes Lead at most once per quiet round, and mutes the thread on the fifth no-action wake", async () => {
     const { hub, model } = setup();
     const thread = await askBot(hub);
     const objectKey = `slack:D0RUNBOT:${thread}`;
     const lines = ["_Thinking..._", "50 steps, 4 failed · continued below", "_Thinking..._", "99 steps, 35 failed · continued below",
       "_Thinking..._", "118 steps, 54 failed · continued below", "_Thinking..._", "119 steps, 54 failed · continued below"];
-    let deletes = 0;
-    let wakesSeen = 0;
+    let last: Awaited<ReturnType<typeof botPosts>> | null = null;
     for (const line of lines) {
       later(20_000);
       const posted = await botPosts(hub, thread, line);
-      if (wakes().length > wakesSeen) {
-        wakesSeen = wakes().length;
-        await leadSaysNoAction(hub);
-      }
-      if (line.includes("continued below")) {
-        later(2_000);
-        const removed = (await hub.receive("slack", slack.remove(posted.delivery))).items[0]!;
+      // The previous progress line goes away when the next one is out.
+      if (last && last.delivery && line.includes("continued below")) {
+        // A DM thread without a lane yet: the Slack source drops the delete. Once recorded, it is only recorded.
+        const removed = (await hub.receive("slack", slack.remove(last.delivery))).items[0];
         await hub.idle();
-        expect(removed).toMatchObject({ delivery: "record", cardId: null });
-        deletes += 1;
+        if (removed) {
+          expect(removed).toMatchObject({ delivery: "record", cardId: null });
+          expect(getEvent(db, removed.seq!)!.payload).not.toHaveProperty("answerPending");
+        }
       }
+      if (line.includes("continued below")) last = posted;
     }
-    expect(deletes).toBe(4);
-    // No delete reached Lead.
-    expect(wakes().map((event) => event.payload.text)).not.toContainEqual(expect.stringMatching(/删除了一条消息|deleted a message/u));
+    // While the bot writes, nothing reaches Lead.
+    expect(wakes()).toEqual([]);
+    await settle(hub);
+    // One wake for the whole flood: the last progress line that is still there. No delete reached Lead.
+    expect(wakes().map((event) => event.payload.text)).toEqual(["119 steps, 54 failed · continued below"]);
+    await leadSaysNoAction(hub);
+
+    // The bot goes on in rounds, each round one progress line and a quiet minute; Lead says "no action" each time.
+    for (const step of [150, 180, 206, 230]) {
+      later(10_000);
+      await botAnswers(hub, thread, `${step} steps, 54 failed · continued below`);
+      await leadSaysNoAction(hub);
+    }
     expect(wakes()).toHaveLength(5);
     expect(activeChannelMute(db, objectKey, clock)).toMatchObject({ by: "breaker" });
 
+    // Muted: more posts and deletes are only recorded. No model, no Lead.
     const calls = model.calls.length;
-    for (const line of ["_Thinking..._", "206 steps, 54 failed · continued below"]) {
+    for (const line of ["_Thinking..._", "260 steps, 54 failed · continued below"]) {
       later(20_000);
       const posted = await botPosts(hub, thread, line);
       expect(posted.item).toMatchObject({ delivery: "record", cardId: null });
       await hub.receive("slack", slack.remove(posted.delivery));
       await hub.idle();
     }
+    await settle(hub);
     expect(model.calls.length).toBe(calls);
     expect(wakes()).toHaveLength(5);
     expect(listEvents(db, { kind: CHANNEL_MUTE_STARTED_KIND })).toHaveLength(1);
