@@ -53,6 +53,20 @@ describe("checking a quote against its source", () => {
     expect(chatQuoteAppearsIn("链接文字", ["看 [链接文字](https://example.com)"])).toBe(true);
   });
 
+  // 选区跨过链接：会话里只显示链接文字，地址（plc:ticket/12、https://…）不显示，原文里的地址不能挡住核对。
+  it("matches a selection that runs across a link, an image or a link definition", () => {
+    const markdown = "三张单的核查都通过了：\n- **[#12](plc:ticket/12)**（收不到机器人回复）：新加的 27 条全部通过。\n"
+      + "- 详情见 [PR #11](https://github.com/acme/x/pull/11 \"标题\") 和 ![截图](https://example.com/a(1).png)。\n"
+      + "看 [这份说明][doc] 就行。\n\n[doc]: https://example.com/doc";
+    expect(chatQuoteAppearsIn("三张单的核查都通过了：\n•\n#12（收不到机器人回复）", [markdown])).toBe(true);
+    expect(chatQuoteAppearsIn("新加的 27 条全部通过。\n•\n详情见 PR #11 和 截图。", [markdown])).toBe(true);
+    expect(chatQuoteAppearsIn("看 这份说明 就行", [markdown])).toBe(true);
+    // 地址本身不显示，选不到，也不算在原文里。
+    expect(chatQuoteAppearsIn("#12 plc ticket 12", [markdown])).toBe(false);
+    // 没有说明的图片显示的是地址：地址留着。
+    expect(chatQuoteAppearsIn("见 https://example.com/b.png", ["见 ![](https://example.com/b.png)"])).toBe(true);
+  });
+
   it("refuses words that are not in the source, and a selection of punctuation only", () => {
     expect(chatQuoteAppearsIn("空闲时到 0.5 倍就会提前压缩", ["空闲时到 0.7 倍就会提前压缩"])).toBe(false);
     expect(chatQuoteAppearsIn("。，！", ["好的。，！"])).toBe(false);

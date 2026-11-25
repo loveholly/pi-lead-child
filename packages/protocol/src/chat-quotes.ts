@@ -71,10 +71,27 @@ export function chatQuoteMatchKey(text: string): string {
   return text.normalize("NFKC").toLowerCase().replace(/[^\p{L}\p{N}]+/gu, "");
 }
 
-// 引用的原文是不是出现在来源的文字里。sources 是来源的几段文字（一轮的回答，或者一张卡里对方的几条消息）。
+// Markdown 链接和图片的地址：`[文字](地址)`、`![说明](地址)`，地址可以带标题。
+const MARKDOWN_LINK_DESTINATION =
+  /(!?\[[^\]\n]*\])\((?:<[^>\n]*>|[^()\s]*(?:\([^()\s]*\)[^()\s]*)*)(?:\s+(?:"[^"\n]*"|'[^'\n]*'|\([^()\n]*\)))?\s*\)/gu;
+// 引用式链接：`[文字][名字]` 只显示文字；定义行（`[名字]: https://…`）整行不显示。
+const MARKDOWN_LINK_REFERENCE = /(\[[^\]\n]*\])\[[^\]\n]*\]/gu;
+const MARKDOWN_LINK_DEFINITION = /^ {0,3}\[[^\]\n]+\]:[^\n]*$/gmu;
+
+// 来源的 Markdown 原文换成会话里看得到的字：链接只显示文字，地址不显示（plc:ticket/12、https://…）。
+// 只去掉符号还不够：地址里的字母和数字留在原文里，选区一跨过链接（「三张单都通过了：#12（收不到…」），
+// 选中的字在原文里就连不上，「回复」不出现，daemon 也会拒收。没有说明的图片显示的是地址，留着它。
+export function chatQuoteSourceText(markdown: string): string {
+  return markdown
+    .replace(MARKDOWN_LINK_DESTINATION, (whole, label: string) => (label === "![]" ? whole : label))
+    .replace(MARKDOWN_LINK_DEFINITION, "")
+    .replace(MARKDOWN_LINK_REFERENCE, "$1");
+}
+
+// 引用的原文是不是出现在来源的文字里。sources 是来源的几段 Markdown 原文（一轮的回答，或者一张卡里对方的几条消息）。
 // 原文里没有字母和数字（只选中了标点）时算对不上。
 export function chatQuoteAppearsIn(quote: string, sources: readonly string[]): boolean {
   const key = chatQuoteMatchKey(quote);
   if (!key) return false;
-  return sources.some((source) => chatQuoteMatchKey(source).includes(key));
+  return sources.some((source) => chatQuoteMatchKey(chatQuoteSourceText(source)).includes(key));
 }

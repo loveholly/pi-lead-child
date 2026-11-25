@@ -130,6 +130,37 @@ describe('replying to selected text on the desktop', () => {
     ]);
   });
 
+  // 回答里有链接（Lead 常写的工单链接「[#12](plc:ticket/12)」）：会话里只显示「#12」，原文里还有地址。
+  // 选区从链接前面跨到链接后面时，以前核对对不上，「回复」不出现（引用浮层也就打不开）。
+  it('offers Reply on a selection that runs across a link in the answer, and sends the quote as shown', async () => {
+    const linked = '两张单都核查通过了：[#12](plc:ticket/12) 收不到机器人回复，[说明](https://example.com/doc) 里写了原因。';
+    const { sendChat } = setup({ turns: [turn({ assistantText: linked })] });
+    const container = document.querySelector('[data-quote-key="turn:turn-a:assistant"]')!;
+    const texts: Text[] = [];
+    const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT);
+    for (let node = walker.nextNode() as Text | null; node; node = walker.nextNode() as Text | null) texts.push(node);
+    const start = texts.find((node) => node.data.includes('都核查通过了'))!;
+    const end = texts.find((node) => node.data.includes('里写了原因'))!;
+    const range = document.createRange();
+    range.setStart(start, start.data.indexOf('都核查通过了'));
+    range.setEnd(end, end.data.indexOf('里写了原因') + '里写了原因'.length);
+    window.getSelection()!.removeAllRanges();
+    window.getSelection()!.addRange(range);
+    expect(range.toString()).toContain('#12');
+    expect(range.toString()).not.toContain('plc:ticket');
+
+    await act(async () => {
+      fireEvent.mouseUp(document);
+      await vi.advanceTimersByTimeAsync(200);
+    });
+    fireEvent.click(await screen.findByTestId('quote-reply-button'));
+    const note = await screen.findByTestId('quote-note');
+    fireEvent.keyDown(note, { key: 'Enter', code: 'Enter', metaKey: true });
+    expect(sendChat).toHaveBeenCalledWith('', undefined, undefined, undefined, undefined, [
+      expect.objectContaining({ source: leadSource, text: range.toString().trim() }),
+    ]);
+  });
+
   // 三击（macOS 上双击后再点一下也一样）选中一整段：浏览器把选区的终点放在这一段后面那个块的开头。
   // 这一段是回答的最后一段时，终点落在回答外面，这时也要出「回复」，引用的是回答里的那一段。
   it('offers Reply when a triple click selects the last paragraph and the selection ends after the answer', async () => {
