@@ -9,5 +9,7 @@ The screenshots show the real `ChannelMessageCard`, rendered with made-up data: 
 | `phone-light-thumbnails.png` | 390 px | The same cards at phone width: three thumbnails fit in a row, so the third has "+3" |
 | `phone-light-preview.png` | 390 px | Preview open on picture 1 of 2 |
 | `desktop-light-time-hover.png` | 1280 px | A message time on hover: a link with an external-link icon |
+| `phone-action-bar-before.png` | 390 px | The action bar before the fix (code before #529): "Do not reply" drops alone to a second line, on the left |
+| `phone-action-bar-after.png` | 390 px | After the fix: "Later" and "Do not reply" wrap together and stay on the right |
 
 There are no dark screenshots: the app has only the light theme (`packages/components/src/theme/config.ts`). Decision #48 recorded that the dark item does not apply.

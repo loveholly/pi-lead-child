@@ -150,6 +150,19 @@ describe('images in a channel card', () => {
 });
 
 describe('text, time and files in a channel card', () => {
+  // 手机宽度上操作栏折行时，「稍后」「不回」整组换行、靠右，不只掉下去一个（#529 返工，2026-11-25）。
+  it('keeps Later and Do not reply together in one right-aligned group', async () => {
+    renderUI(<ChannelMessageCard card={released} onAction={vi.fn()} loadImage={loader()} />);
+    await openCard();
+    const side = screen.getByTestId('channel-card-7-side-p');
+    expect(within(side).getByTestId('channel-card-7-snooze-p')).toBeTruthy();
+    expect(within(side).getByTestId('channel-card-7-dismiss-p')).toBeTruthy();
+    expect(getComputedStyle(side).justifyContent).toBe('flex-end');
+    expect(getComputedStyle(side).flexGrow).toBe('1');
+    expect(within(side).queryByTestId('channel-card-7-reply_myself-p')).toBeNull();
+  });
+
+
   it('sets the message text in the size of a normal conversation message', async () => {
     renderUI(<ChannelMessageCard card={released} onAction={vi.fn()} loadImage={loader()} />);
     await openCard();

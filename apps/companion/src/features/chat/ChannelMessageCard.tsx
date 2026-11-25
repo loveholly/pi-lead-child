@@ -361,11 +361,14 @@ export function ChannelMessageCard({ card, onAction, onOpenTicket, now, leadStuc
           suffix={expanded ? '-p' : ''}
         />
       ))}
-      <Box flex={1} />
-      {expanded ? sideButtons.map((button) => (
-        <CardButton key={button.action} card={card} action={button.action} label={button.label} primary={false} busy={busy} onPress={press} suffix="-p" />
-      )) : null}
-      {score && !expanded ? <ConfidencePill score={score} m={m} testID={`channel-card-${card.id}-confidence`} /> : null}
+      {/* 右边一组（「稍后」「不回」或信心胶囊）：占满这一行剩下的宽度、靠右排。手机上放不下时整组换到下一行，仍然靠右，
+          不会只掉下去一个按钮（#529，2026-11-25）。 */}
+      <Row grow={1} justify="flex-end" items="center" gap="actions" testID={`channel-card-${card.id}-side${expanded ? '-p' : ''}`}>
+        {expanded ? sideButtons.map((button) => (
+          <CardButton key={button.action} card={card} action={button.action} label={button.label} primary={false} busy={busy} onPress={press} suffix="-p" />
+        )) : null}
+        {score && !expanded ? <ConfidencePill score={score} m={m} testID={`channel-card-${card.id}-confidence`} /> : null}
+      </Row>
     </Row>
   ) : null);
 
