@@ -823,9 +823,9 @@ describe('channel cards that follow each other', () => {
       { channelCards: [slack(1, '2026-10-17T00:30:00.000Z'), slack(2, '2026-10-17T02:00:00.000Z'), slack(3, '2026-10-17T02:10:00.000Z')] },
     );
     expect(groupChannelCardRuns(timeline)).toEqual([
-      { kind: 'channel-cards', key: 'channel-card:1', cardIds: [1] },
+      { kind: 'channel-cards', key: 'channel-card:1', cardIds: [1], slots: [{ cardId: 1 }] },
       { kind: 'message', key: 'message:a', messageId: 'a', cardIds: [] },
-      { kind: 'channel-cards', key: 'channel-card:2', cardIds: [2, 3] },
+      { kind: 'channel-cards', key: 'channel-card:2', cardIds: [2, 3], slots: [{ cardId: 2 }, { cardId: 3 }] },
       { kind: 'message', key: 'message:b', messageId: 'b', cardIds: [] },
     ]);
   });

@@ -198,6 +198,12 @@ export const channelCardMessages = defineMessages({
       newMessage: 'sent a new message',
       // SystemLine 把它放进「Show …」：英文写小写的名词。
       newMessageDetails: 'message',
+      // 同一个对话叠起来的一行（工单 #537）：最新的卡还在进来、Lead 还没看时写它；徽标里是其余的条数。
+      replying: 'Replying',
+      stackMore: (n: number) => `+${n}`,
+      stackShow: (name: string, n: number) => `Show ${n} messages from ${name}`,
+      stackHide: (name: string) => `Hide the messages from ${name}`,
+      stackPanel: (name: string, n: number) => `${n} messages from ${name}`,
     },
   },
   zh: {
@@ -387,6 +393,11 @@ export const channelCardMessages = defineMessages({
       undoLeft: (left) => `撤回 还剩 ${left}`,
       newMessage: '来了新消息',
       newMessageDetails: '消息',
+      replying: '回答中',
+      stackMore: (n) => `+${n}`,
+      stackShow: (name, n) => `看${name}的 ${n} 条消息`,
+      stackHide: (name) => `收起${name}的消息`,
+      stackPanel: (name, n) => `${name}的 ${n} 条消息`,
     },
   },
 });

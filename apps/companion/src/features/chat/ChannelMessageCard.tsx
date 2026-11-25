@@ -373,18 +373,14 @@ export function ChannelMessageCard({ card, onAction, onOpenTicket, now, leadStuc
   ) : null);
 
   const summary = view.folded ? (
-    // 结束行（P9.4）：状态图标、人名、对方的话、结果和时间、展开箭头。
-    // 会话里一行的格子（主题 11.10「一行的对齐」，2026-11-15）：左边 18 宽的图标列贴着内容区的左边，右边的箭头贴着右边，
-    // 不另加左右留白。人名太长时也截断：结果和时间不被挤出去。
-    <Row items="center" gap="icon-label" py="card-row" minW={0}>
-      <Box w={18} shrink={0} items="center">
-        <Icon name={status.tone === 'success' ? 'check' : 'chat'} size={13} color={status.tone === 'success' ? 'success' : 'text-muted'} />
-      </Box>
-      <Text size="label" weight="bold" shrink={1} minW={0} numberOfLines={1}>{card.sender.name}</Text>
-      <Text testID={`channel-card-${card.id}-line`} flex={1} minW={0} size="secondary" tone="strong" numberOfLines={1}>{messageLine(card, latest, failed, m)}</Text>
-      <Text size="meta" tone="secondary" shrink={0} testID={`channel-card-${card.id}-outcome`}>{view.folded.outcome}</Text>
-      <Icon name="chevron-down" size={12} color="text-muted" />
-    </Row>
+    // 结束行（P9.4）：状态图标、人名、对方的话、结果和时间、展开箭头（格子见 ChannelEndRow）。
+    <ChannelEndRow
+      lead={<Icon name={status.tone === 'success' ? 'check' : 'chat'} size={13} color={status.tone === 'success' ? 'success' : 'text-muted'} />}
+      name={card.sender.name}
+      line={messageLine(card, latest, failed, m)}
+      lineTestID={`channel-card-${card.id}-line`}
+      trailing={<Text size="meta" tone="secondary" shrink={0} testID={`channel-card-${card.id}-outcome`}>{view.folded.outcome}</Text>}
+    />
   ) : (
     <Column p="card" gap="card-row">
       {header}
@@ -528,6 +524,41 @@ export function ChannelMessageCard({ card, onAction, onOpenTicket, now, leadStuc
       {imagePreview}
     </Card>
   );
+}
+
+// 结束行（P9.4）的格子：图标列、人名、一行字、（可选的徽标）、结果、箭头。一张卡结束后收成的一行和同一个对话叠起来的一行
+// （ChannelStackRow，工单 #537）都画它，两种行一模一样，只多一个徽标。
+// 会话里一行的格子（主题 11.10「一行的对齐」，2026-11-15）：左边 18 宽的图标列贴着内容区的左边，右边的箭头贴着右边，
+// 不另加左右留白。人名太长时也截断：徽标、结果和时间不被挤出去。
+export function ChannelEndRow({ lead, name, line, lineTestID, badge, trailing, open = false }: {
+  lead: ReactNode;
+  name: string;
+  line: string;
+  lineTestID?: string;
+  badge?: ReactNode;
+  trailing: ReactNode;
+  open?: boolean;
+}) {
+  return (
+    <Row items="center" gap="icon-label" py="card-row" minW={0}>
+      <Box w={18} shrink={0} items="center">{lead}</Box>
+      <Text size="label" weight="bold" shrink={1} minW={0} numberOfLines={1}>{name}</Text>
+      <Text {...(lineTestID ? { testID: lineTestID } : {})} flex={1} minW={0} size="secondary" tone="strong" numberOfLines={1}>{line}</Text>
+      {badge}
+      {trailing}
+      <Icon name={open ? 'chevron-up' : 'chevron-down'} size={12} color="text-muted" />
+    </Row>
+  );
+}
+
+/** 卡上最新的一条，一行字（结束行显示的那一句；图片写成「[N 张图]」，和 messageLine 一样）。 */
+export function channelLatestLine(card: ChannelCardDto, m: CardMessages): string {
+  return messageLine(card, shownMessages(card).at(-1)!, new Set(), m);
+}
+
+/** 对方的一句原文，按来源转成一行字（Slack 的 mrkdwn 去掉格式，图片和文件同 messageLine）。 */
+export function channelPlainLine(card: ChannelCardDto, text: string, m: CardMessages): string {
+  return messageLine(card, { at: '', text, url: null, parts: channelMessageParts(text) }, new Set(), m);
 }
 
 // 「稍后」「不回」只在撑开的浮层里，放在操作栏右边（画布 B）。

@@ -100,6 +100,8 @@ import { ReminderFireCard } from './ReminderFireCard';
 import { SetupChecklistCardItem, SetupHintCardItem } from './SetupCards';
 import { OwnerActionCard, OwnerActionGroupCard, OwnOwnerActionGroup, OwnOwnerActionNote } from './OwnerActionCard';
 import { ChannelCardSlot, ChannelNewsLine } from './ChannelMessageCard';
+import { ChannelStackSlot } from './ChannelStackRow';
+import { stackChannelConversations, type ChannelStackItem } from './channelStack';
 import { useOpenTicket } from './useOpenTicket';
 
 type LeadConversationProps = {
@@ -611,7 +613,9 @@ function ConversationRowView({ item, context }: { item: LeadConversationRow; con
     // 连着的几张外部消息卡是一张列表，卡和卡之间是 list-row（2026-10-21）。
     return (
       <Column testID="channel-card-run" w="100%" gap="list-row">
-        {item.cardIds.map((cardId) => <ChannelCardSlot key={cardId} cardId={cardId} />)}
+        {item.slots.map((slot) => ('kind' in slot
+          ? <ChannelStackSlot key={slot.key} cardIds={slot.cardIds} entries={slot.entries} />
+          : <ChannelCardSlot key={slot.cardId} cardId={slot.cardId} />))}
       </Column>
     );
   }
@@ -1484,6 +1488,8 @@ export type LeadTimelineItem =
   // 卡开出来以后，对方隔着别的内容又发来的消息（2026-10-30 用户）：卡固定在开出来的位置，这里在后来的位置写一行
   // 「张三 来了新消息」。中间没有别的内容的几条合成一行，at 是最后一条的时间，count 是条数。
   | { kind: 'channel-news'; key: string; cardId: number; at: number; count: number }
+  // 同一个外部对话里连续的几行（结束行、「回答中」的卡、「来了新消息」）合成一行（工单 #537，见 ./channelStack）。
+  | ChannelStackItem
   // 一次提醒到点（工单 07）：一张到点卡，位置是到点的时间。reminderKey 是提醒卡的 key。
   | { kind: 'reminder'; key: string; reminderKey: string; at: number }
   // 首次启动引导（.scratch/onboarding）：准备清单卡（Lead 第一次上线时）和建议卡（用户自己的一轮结束时）。
@@ -1674,7 +1680,8 @@ export function buildLeadTimeline(
   }
   const itemTime = (item: LeadTimelineItem) => timelineItemTime(item, messagesById, turnsById, cardsById, messageTimes);
   for (const card of options.channelCards ?? []) placeChannelNews(result, card, itemTime);
-  const coalesced = coalesceLeadActivity(result);
+  const stacked = stackChannelConversations(result, options.channelCards ?? [], options.now ?? new Date());
+  const coalesced = coalesceLeadActivity(stacked);
   const grouped = options.failureGroupKey ? groupRepeatedFailures(coalesced, messagesById, options.failureGroupKey) : coalesced;
   const owned = groupOwnerActions(grouped, messagesById, (message) => (options.isOnBehalfOwnerAction?.(message) ? 'on_behalf'
     : options.isOwnOwnerAction?.(message) ? 'own' : null));
@@ -1826,20 +1833,29 @@ function coalesceLeadActivity(items: readonly LeadTimelineItem[]): LeadTimelineI
 }
 
 // 会话里画的一行。连着的外部消息卡（中间没有别的东西）合成一组，画成一张列表（2026-10-21）。
+// 同一个对话叠起来的一行（channel-stack）也是列表里的一项。cardIds 是这一组里所有的卡（引用跳回原文时按它找），
+// slots 是列表里的每一项：一张卡，或者叠起来的一行。
+export type ChannelCardSlotItem = { cardId: number } | ChannelStackItem;
 export type LeadConversationRow =
-  | Exclude<LeadTimelineItem, { kind: 'channel-card' }>
-  | { kind: 'channel-cards'; key: string; cardIds: number[] };
+  | Exclude<LeadTimelineItem, { kind: 'channel-card' } | ChannelStackItem>
+  | { kind: 'channel-cards'; key: string; cardIds: number[]; slots: ChannelCardSlotItem[] };
 
 export function groupChannelCardRuns(items: readonly LeadTimelineItem[]): LeadConversationRow[] {
   const rows: LeadConversationRow[] = [];
   for (const item of items) {
-    if (item.kind !== 'channel-card') {
+    if (item.kind !== 'channel-card' && item.kind !== 'channel-stack') {
       rows.push(item);
       continue;
     }
+    const slot: ChannelCardSlotItem = item.kind === 'channel-card' ? { cardId: item.cardId } : item;
+    const cardIds = item.kind === 'channel-card' ? [item.cardId] : item.cardIds;
     const previous = rows.at(-1);
-    if (previous?.kind === 'channel-cards') previous.cardIds.push(item.cardId);
-    else rows.push({ kind: 'channel-cards', key: item.key, cardIds: [item.cardId] });
+    if (previous?.kind === 'channel-cards') {
+      previous.cardIds.push(...cardIds);
+      previous.slots.push(slot);
+    } else {
+      rows.push({ kind: 'channel-cards', key: item.key, cardIds: [...cardIds], slots: [slot] });
+    }
   }
   return rows;
 }
@@ -2004,7 +2020,7 @@ function timelineItemTime(
       .map((id) => Date.parse(messagesById.get(id)?.updatedAt ?? '')).filter(Number.isFinite));
   }
   if (item.kind === 'card') return Date.parse(cardsById?.get(item.cardId)?.createdAt ?? '');
-  if (item.kind === 'lead-activity' || item.kind === 'channel-card' || item.kind === 'channel-news') return item.at;
+  if (item.kind === 'lead-activity' || item.kind === 'channel-card' || item.kind === 'channel-news' || item.kind === 'channel-stack') return item.at;
   if (item.kind === 'reminder' || item.kind === 'setup-checklist' || item.kind === 'setup-hint') return item.at;
   if (item.kind === 'topic-opened' || item.kind === 'topic-concluded') return item.at;
   return Number.NaN;
