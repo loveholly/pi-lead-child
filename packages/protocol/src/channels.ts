@@ -731,7 +731,7 @@ export const ChannelCardDtoSchema = StrictObject({
   messageCount: Type.Integer({ minimum: 1 }),
   // 这张卡里对方连发的最近几条（最多 5 条，旧的在前），卡片撑开以后叠在同一个名字下（画布外部消息状态 7，2026-10-27）。
   // 对话只留最近 20 条，被挤掉时只剩摘录。外部的原文，只用来显示。
-  // url：这条消息在来源里的链接（Slack 的 permalink，thread 里的带 thread_ts），卡上点时间打开（工单 #529）。拿不到时没有。
+  // url：这条消息在来源里给人点开的链接（来源适配器的 messageLink，thread 里的回复定位到 thread），卡上点时间打开（工单 #529）。拿不到时没有。
   recent: Type.Optional(Type.Array(StrictObject({
     at: Type.String(), text: Type.String(), url: Type.Optional(Type.String({ minLength: 1 })),
   }), { maxItems: 5 })),

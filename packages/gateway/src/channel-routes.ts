@@ -71,12 +71,12 @@ async function serveImage(context: ChannelRouteContext, raw: string): Promise<vo
   try {
     fileId = decodeURIComponent(raw);
   } catch {
-    fileNotFound(context, "invalid_id", "not a Slack file id");
+    fileNotFound(context, "invalid_id", "not a valid channel file id");
     return;
   }
   // 不是 slack:F… 的一律不认：网址、本地路径、别的来源都到不了 readFile。
   if (!CHANNEL_FILE_ID_PATTERN.test(fileId)) {
-    fileNotFound(context, "invalid_id", "not a Slack file id");
+    fileNotFound(context, "invalid_id", "not a valid channel file id");
     return;
   }
   const service = context.service;
