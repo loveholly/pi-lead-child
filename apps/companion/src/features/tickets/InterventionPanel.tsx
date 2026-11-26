@@ -13,11 +13,13 @@ type InterventionPanelProps = {
   onResolve?: (interventionId: string, actionId: InterventionActionId, customResponse?: string) => void;
 };
 
-type PanelTone = 'pending' | 'success' | 'danger' | 'muted' | 'neutral';
+type PanelTone = 'pending' | 'info' | 'success' | 'danger' | 'muted' | 'neutral';
 
 const PANEL: Record<PanelTone, { bg: ColorToken; border: ColorToken; iconBg: ColorToken; text: TextTone }> = {
   pending: { bg: 'danger-cream', border: 'danger-line', iconBg: 'danger-soft', text: 'danger-dark' },
   danger: { bg: 'danger-cream', border: 'danger-line', iconBg: 'danger-soft', text: 'danger-dark' },
+  // 先交给 Lead、还没摆给你的决定（#561）：和外面的「Lead 处理中」一样，是「进行中」的颜色（主题 C-12）。
+  info: { bg: 'surface', border: 'border', iconBg: 'accent-soft', text: 'accent' },
   success: { bg: 'success-wash', border: 'success-line', iconBg: 'success-soft', text: 'success-dark' },
   muted: { bg: 'surface-subtle', border: 'border', iconBg: 'surface-muted', text: 'secondary' },
   neutral: { bg: 'surface', border: 'border', iconBg: 'surface-muted', text: 'default' },
@@ -30,11 +32,12 @@ export function InterventionPanel({ intervention, commandState, onResolve }: Int
   const [customOpen, setCustomOpen] = useState(false);
   const [customResponse, setCustomResponse] = useState('');
   const pending = intervention.state === 'pending';
+  const info = intervention.tone === 'info';
   const success = intervention.tone === 'success';
   const danger = intervention.tone === 'danger';
   const submitting = commandState?.state === 'pending';
   const commandLocked = submitting || commandState?.state === 'succeeded';
-  const tone: PanelTone = pending ? 'pending' : success ? 'success' : danger ? 'danger' : intervention.tone === 'muted' ? 'muted' : 'neutral';
+  const tone: PanelTone = info ? 'info' : pending ? 'pending' : success ? 'success' : danger ? 'danger' : intervention.tone === 'muted' ? 'muted' : 'neutral';
   const colors = PANEL[tone];
   const closeCustom = () => {
     setCustomOpen(false);
@@ -45,8 +48,8 @@ export function InterventionPanel({ intervention, commandState, onResolve }: Int
       <Row items="center" gap="side-item">
         <Box w={22} h={22} rounded="full" items="center" justify="center" bg={colors.iconBg}>
           <Icon
-            name={pending || danger ? 'exclamation' : success ? 'check' : 'clock'}
-            color={pending || danger ? 'danger-dark' : success ? 'success-dark' : 'text-secondary'}
+            name={info ? 'clock' : pending || danger ? 'exclamation' : success ? 'check' : 'clock'}
+            color={info ? 'accent-strong' : pending || danger ? 'danger-dark' : success ? 'success-dark' : 'text-secondary'}
             size={12}
             weight="bold"
           />
@@ -82,6 +85,7 @@ export function InterventionPanel({ intervention, commandState, onResolve }: Int
           ))}
         </Row>
       ) : null}
+      {intervention.note ? <Text mt="card-row" size="secondary" tone="secondary">{intervention.note}</Text> : null}
       {customOpen ? (
         <Column gap="card-row" mt="card-row">
           <TextField

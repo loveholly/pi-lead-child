@@ -16,6 +16,7 @@ import { useLeadName } from '@/state/hooks';
 import type { ArtifactDownloadState, InterventionCommandState, ResourceLoadState } from '@/state/types';
 import {
   buildInterventionPresentation,
+  pendingDecisionsHeldByLead,
   latestBlockedCheckpoint,
   type ArtifactCapability,
   type CheckpointFeedResource,
@@ -657,6 +658,8 @@ export function TicketThread({
   // 等你回答的决定直接放在最上面：收件箱「查看」打开的就是这里（2026-10-16）。
   const pendingDecisions = Object.values(interventions)
     .filter((intervention) => intervention.kind === 'decision' && intervention.state === 'pending');
+  // 先交给 Lead、还没摆给你的决定（#561）：和会话卡片、列表一样写「Lead 处理中」，不写「待你决定」。
+  const decisionsHeldByLead = pendingDecisionsHeldByLead(ticket);
 
   // ── 底部操作栏 ──
   // 清单读取中、读不到时说出来：不能只是没有按钮（审查 2026-10-22）。读不到时次要按钮的位置给「重试」。
@@ -798,7 +801,7 @@ export function TicketThread({
               {pendingDecisions.map((intervention) => (
                 <InterventionPanel
                   key={intervention.id}
-                  intervention={buildInterventionPresentation(intervention, locale)}
+                  intervention={buildInterventionPresentation(intervention, locale, { heldByLead: decisionsHeldByLead })}
                   commandState={interventionCommandStates[intervention.id]}
                   onResolve={onResolveIntervention}
                 />

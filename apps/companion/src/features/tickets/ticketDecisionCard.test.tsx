@@ -153,4 +153,38 @@ describe('a decision waiting for you', () => {
     fireEvent.click(within(pending).getByTestId('intervention-action-option:merge'));
     expect(resolve).toHaveBeenCalledWith('decision:12', { authority: 'decision_request', decision: 'select', optionId: 'merge' });
   });
+
+  // #561：先交给 Lead、还没摆给你的决定。外面（会话卡片、列表）写「Lead 处理中」，详情也要这样写，不写「待你决定」。
+  it('says Lead is handling a decision that is still with Lead, like the list and the chat card', () => {
+    // #541 那样：child 停在决定上（阻塞），决定先交给了 Lead。外面算「Lead 处理中」（ticketNeedsUser 是 null）。
+    const held = ticket66({
+      stage: 'blocked', status: 'blocked',
+      attention: { pendingApprovalCount: 0, blockerCount: 0, leadHandling: true },
+    });
+    const runtime = renderWorkbenchWithTicket(held, { interventions: [pendingDecision], actions: reviewActions() });
+    const resolve = vi.spyOn(runtime, 'resolveIntervention').mockResolvedValue();
+    const pending = within(screen.getByTestId('ticket-thread')).getByTestId('ticket-pending-decision');
+
+    expect(pending.textContent).toMatch(/is handling it/);
+    expect(pending.textContent).not.toContain('Needs your decision');
+    expect(pending.textContent).toContain('You can still answer it yourself.');
+    fireEvent.click(within(pending).getByTestId('intervention-action-option:merge'));
+    expect(resolve).toHaveBeenCalledWith('decision:12', { authority: 'decision_request', decision: 'select', optionId: 'merge' });
+  });
+
+  // #561：Lead 已经答了的决定（#541 的决定请求 #55）。详情里不再有待决定的卡。
+  it('shows no pending decision once Lead answered it', () => {
+    const answered = {
+      ...pendingDecision, state: 'resolved', actions: [], resolvedBy: 'lead', resolvedAt: '2026-10-15T10:20:00.000Z',
+      resolution: { kind: 'option', optionId: 'merge', text: null },
+    } as KernelIntervention;
+    renderWorkbenchWithTicket(
+      ticket66({ reviewState: waitingForReview().reviewState, attention: { pendingApprovalCount: 0, blockerCount: 0 } }),
+      { interventions: [answered], actions: reviewActions() },
+    );
+    const thread = screen.getByTestId('ticket-thread');
+    expect(within(thread).queryByTestId('ticket-pending-decision')).toBeNull();
+    expect(thread.textContent).not.toContain('Needs your decision');
+  });
 });
+

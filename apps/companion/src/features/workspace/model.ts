@@ -265,9 +265,12 @@ export type InterventionPresentation = {
   kind: InterventionKind;
   state: InterventionState;
   stateLabel: string;
-  tone: 'attention' | 'success' | 'danger' | 'muted';
+  // info：先交给 Lead、还没摆给你的决定（#561），和外面的「Lead 处理中」同一个状态。
+  tone: 'attention' | 'info' | 'success' | 'danger' | 'muted';
   prompt?: string;
   resolutionText?: string;
+  // 卡片下面的一句说明，例如「你仍然可以自己答」。
+  note?: string;
   actions: InterventionActionPresentation[];
 };
 
@@ -795,9 +798,24 @@ export function projectTicketSecondaryMeta(ticket: Ticket): string[] {
   return [ticket.agentLabel, ticket.runtimeName, ticket.runtimeLabel, elapsed].filter((value): value is string => Boolean(value));
 }
 
-export function buildInterventionPresentation(authority: InterventionAuthority, locale: Locale = DEFAULT_LOCALE): InterventionPresentation {
+/**
+ * 这张工单上待处理的决定是不是还在 Lead 手里（#561）：先交给了 Lead、还没摆给你。
+ * 和外面（会话卡片、列表）读同一个 TicketSummary：Lead 处理中，而且没有等你回答的决定。
+ * daemon 的 attention 不计这类决定（gateway 的 control-plane.ts 的 heldByLeadSql），所以 pendingDecisionCount 是 0。
+ */
+export function pendingDecisionsHeldByLead(ticket: Pick<Ticket, 'leadHandling' | 'pendingDecisionCount'>): boolean {
+  return ticket.leadHandling === true && (ticket.pendingDecisionCount ?? 0) === 0;
+}
+
+export function buildInterventionPresentation(
+  authority: InterventionAuthority,
+  locale: Locale = DEFAULT_LOCALE,
+  context: { heldByLead?: boolean } = {},
+): InterventionPresentation {
   const messages = workspaceModelMessages(locale);
   const m = messages.intervention;
+  // 先交给 Lead 的决定：不写「待你决定」，写「Lead 处理中」；按钮保留，都是次要样式，你仍然可以自己答。
+  const heldByLead = context.heldByLead === true && authority.kind === 'decision' && authority.state === 'pending';
   const actions: InterventionActionPresentation[] = [];
   if (authority.state === 'pending' && authority.canRespond) {
     if (authority.kind === 'approval') {
@@ -808,7 +826,7 @@ export function buildInterventionPresentation(authority: InterventionAuthority, 
       if (authority.allowSessionApproval) actions.push({ id: 'approve_session', label: m.approveSession, tone: 'secondary' });
     } else {
       for (const option of authority.options ?? []) {
-        actions.push({ id: `option:${option.id}`, label: option.label, tone: actions.length === 0 ? 'primary' : 'secondary' });
+        actions.push({ id: `option:${option.id}`, label: option.label, tone: actions.length === 0 && !heldByLead ? 'primary' : 'secondary' });
       }
       if (authority.allowCustom) actions.push({ id: 'custom', label: m.custom, tone: 'secondary' });
     }
@@ -828,10 +846,14 @@ export function buildInterventionPresentation(authority: InterventionAuthority, 
     kind: authority.kind,
     state: authority.state,
     // 等你处理的介入和收件箱、状态标签同一种说法：「待你决定」「待审批」（2026-10-16）。
-    stateLabel: authority.state === 'pending'
-      ? ticketNeedsUserLabel(authority.kind === 'approval' ? 'approval' : 'decision', locale)
-      : messages.interventionState[authority.state],
-    tone: authority.state === 'pending'
+    stateLabel: heldByLead
+      ? leadHandlingLabel(locale)
+      : authority.state === 'pending'
+        ? ticketNeedsUserLabel(authority.kind === 'approval' ? 'approval' : 'decision', locale)
+        : messages.interventionState[authority.state],
+    tone: heldByLead
+      ? 'info'
+      : authority.state === 'pending'
       ? 'attention'
       : authority.state === 'resolved'
         ? 'success'
@@ -840,6 +862,7 @@ export function buildInterventionPresentation(authority: InterventionAuthority, 
           : 'muted',
     ...(authority.prompt ? { prompt: authority.prompt } : {}),
     ...(resolutionText ? { resolutionText } : {}),
+    ...(heldByLead && actions.length > 0 ? { note: m.canStillAnswer } : {}),
     actions,
   };
 }
