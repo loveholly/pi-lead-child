@@ -110,13 +110,16 @@ function AutoBudgetForm({ saved }: { saved: AutoBudgetDto }) {
         </Field>
       ))}
       <Divider />
+      {/* 换行的行里文字不写 flex（nativeFlexWrap.test.ts：Android 上会被挤成一个字宽）。按钮用 ml="auto" 推到行尾。 */}
       <Row items="center" gap="actions" flexWrap="wrap">
-        <Text testID="auto-budget-status" flex={1} minW={160} size="note" tone={status.tone}>{status.text}</Text>
-        {atDefaults ? null : (
-          <Button testID="auto-budget-defaults" label={m.restoreDefaults} variant="ghost" tone="neutral" size="sm" disabled={saving}
-            onPress={() => { setForm(formOf(saved.defaults)); setOutcome(null); }} />
-        )}
-        <Button testID="auto-budget-save" label={saving ? m.saving : m.save} size="sm" disabled={saving || Boolean(firstBad) || !changed} onPress={save} />
+        <Text testID="auto-budget-status" size="note" tone={status.tone}>{status.text}</Text>
+        <Row ml="auto" items="center" gap="actions">
+          {atDefaults ? null : (
+            <Button testID="auto-budget-defaults" label={m.restoreDefaults} variant="ghost" tone="neutral" size="sm" disabled={saving}
+              onPress={() => { setForm(formOf(saved.defaults)); setOutcome(null); }} />
+          )}
+          <Button testID="auto-budget-save" label={saving ? m.saving : m.save} size="sm" disabled={saving || Boolean(firstBad) || !changed} onPress={save} />
+        </Row>
       </Row>
     </Card>
   );
