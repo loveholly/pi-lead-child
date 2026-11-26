@@ -34,6 +34,7 @@ import { HOST_BYPASS_ACTIONS, HOST_BYPASS_TARGET } from "./host-bypass.js";
 import { BUSY_PLACEMENT_ACTIONS, BUSY_PLACEMENT_TARGET } from "./busy-placement.js";
 import { WAKE_PACE_ACTIONS, WAKE_PACE_TARGET } from "./wake-pace.js";
 import { CHANNEL_CONVERSATION_MUTE_ACTIONS } from "./channel-mutes.js";
+import { AUTO_BUDGET_ACTIONS, AUTO_BUDGET_TARGET } from "./auto-budget.js";
 import { LEAD_SHADOW_ACTIONS, LEAD_SHADOW_TARGET } from "./lead-shadow.js";
 import { BACKGROUND_MODEL_ACTIONS, BACKGROUND_MODEL_TARGET } from "./background-model.js";
 import { LEAD_CONTEXT_ACTIONS, LEAD_CONTEXT_TARGET } from "./lead-context.js";
@@ -1272,6 +1273,7 @@ export const UI_ACTION_TARGETS: { readonly [T in UiActionTargetType]: UiActionTa
   host_bypass: HOST_BYPASS_TARGET,
   busy_placement: BUSY_PLACEMENT_TARGET,
   wake_pace: WAKE_PACE_TARGET,
+  auto_budget: AUTO_BUDGET_TARGET,
   lead_shadow: LEAD_SHADOW_TARGET,
   background_model: BACKGROUND_MODEL_TARGET,
   signal_sources: SIGNAL_SOURCES_TARGET,
@@ -1337,6 +1339,7 @@ export const UI_ACTIONS: { readonly [T in UiActionTargetType]: Readonly<Record<s
   busy_placement: BUSY_PLACEMENT_ACTIONS,
   // How soon Lead wakes for ordinary system events when its cache is cold (user 2026-11-16). Changes rules; Lead can set it. wake-pace.ts.
   wake_pace: WAKE_PACE_ACTIONS,
+  auto_budget: AUTO_BUDGET_ACTIONS,
   // The background shadow (user 2026-11-19): mode, model, sources, gather window. Changes rules; Lead can set it. lead-shadow.ts.
   lead_shadow: LEAD_SHADOW_ACTIONS,
   // The model that background work uses (user 2026-11-20): set (Lead: cheap models only) and read. background-model.ts.

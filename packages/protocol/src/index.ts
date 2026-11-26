@@ -1342,6 +1342,7 @@ export * from "./signal-sources.ts";
 export * from "./agenda-feeds.ts";
 export * from "./busy-placement.ts";
 export * from "./wake-pace.ts";
+export * from "./auto-budget.ts";
 export * from "./lead-shadow.ts";
 export * from "./topics.ts";
 export * from "./background-model.ts";

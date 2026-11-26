@@ -56,6 +56,19 @@ describe("AutoCallBudget", () => {
     expect(calls).toBe(200);
   });
 
+  it("takes new limits at once and keeps the calls it counted (ticket #553: the settings page changes them)", () => {
+    const { made } = budget({ ...DEFAULT_AUTO_CALL_BUDGET, callsPerHour: 3 });
+    made.record(0);
+    made.record(0);
+    expect(made.record(0)).toMatchObject({ limit: "callsPerHour" });
+    made.setLimits({ ...DEFAULT_AUTO_CALL_BUDGET, callsPerHour: 10 });
+    expect(made.limits.callsPerHour).toBe(10);
+    expect(made.exceeded()).toBeNull();
+    expect(made.usage().callsLastHour).toBe(3);
+    made.setLimits({ ...DEFAULT_AUTO_CALL_BUDGET, callsPerHour: 2 });
+    expect(made.exceeded()).toMatchObject({ limit: "callsPerHour", detail: "3 automatic model calls in the last hour (limit 2)" });
+  });
+
   it("reads the limits from config, keeps the default for a wrong value, and 0 means no limit", () => {
     expect(autoCallBudgetLimits(undefined)).toEqual(DEFAULT_AUTO_CALL_BUDGET);
     expect(autoCallBudgetLimits({ callsPerHour: 30, callsPerDay: "many", uncachedTokensPerDay: 0 }))

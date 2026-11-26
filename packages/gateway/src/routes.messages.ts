@@ -34,6 +34,7 @@ export const routeMessages = defineMessages({
     modelSettingsFailed: (cause: unknown) => `Cannot read the model settings: ${error(cause)}`,
     hindsightUnavailable: "This daemon does not host the memory service (Hindsight)",
     hindsightFailed: (cause: unknown) => `Cannot read the status of the memory service: ${error(cause)}`,
+    autoBudgetUnavailable: "The limits on automatic model calls are not ready yet (Lead did not start)",
 
     // ── Lead 的形象 ──
     avatarImageId: "The image id is not valid",
@@ -97,6 +98,7 @@ export const routeMessages = defineMessages({
     modelSettingsFailed: (cause) => `读不到模型设置：${error(cause)}`,
     hindsightUnavailable: "这台 daemon 不托管记忆服务（Hindsight）",
     hindsightFailed: (cause) => `读不到记忆服务的状态：${error(cause)}`,
+    autoBudgetUnavailable: "自动调用模型的上限还读不到（Lead 还没有启动）",
 
     avatarImageId: "图的 id 不对",
     avatarImageNotFound: "没有这张图",

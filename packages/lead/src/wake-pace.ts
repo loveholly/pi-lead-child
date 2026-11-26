@@ -66,5 +66,5 @@ export function autoCallUsageLine(input: {
     ? `${tokens(input.uncachedTokensLastDay)}/${tokens(input.limits.uncachedTokensPerDay)}` : tokens(input.uncachedTokensLastDay);
   const pace = input.coldBatchMinutes > 0 ? `缓存冷了以后攒 ${input.coldBatchMinutes} 分钟` : "不攒";
   return `系统自己叫醒你调的模型：最近一小时 ${of(input.callsLastHour, input.limits.callsPerHour)} 次，最近一天 ${of(input.callsLastDay, input.limits.callsPerDay)} 次，`
-    + `没命中缓存的输入 ${uncached} token（斜杠后面是用户定的上限，到了系统就暂停自己调模型）。普通系统事件的节奏：${pace}（perform_action 的 wake_pace.set 可以调）。`;
+    + `没命中缓存的输入 ${uncached} token（斜杠后面是用户定的上限，到了系统就暂停自己调模型；只在用户这一轮要你改时用 auto_budget.set 改）。普通系统事件的节奏：${pace}（perform_action 的 wake_pace.set 可以调）。`;
 }

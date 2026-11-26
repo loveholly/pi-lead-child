@@ -29,6 +29,7 @@ import {
   CHAT_FOLLOW_UP_ACTIONS_CAPABILITY,
   CHAT_PLACEMENT_PREFERENCE_CAPABILITY,
   LEAD_SHADOW_SETTINGS_CAPABILITY,
+  AUTO_BUDGET_SETTINGS_CAPABILITY,
   LEAD_TOPICS_CAPABILITY,
   SendTopicMessageRequestSchema,
   type SendTopicMessageResponse,
@@ -1650,6 +1651,16 @@ export async function startPairedServer(
       if (req.method === "GET" && url.pathname === "/v1/lead/busy-placement") {
         requireAuth(req, "tickets:view");
         json(req, res, 200, { busyPlacement: getBusyPlacement(bridge.db) });
+        return;
+      }
+
+      // 自动调用模型的上限（设置 → Lead，protocol 的 auto-budget.ts，工单 #553）。daemon 内存里正在用的值。
+      // 改走通用的操作入口（POST /v1/actions/auto_budget/lead/set）。
+      if (req.method === "GET" && url.pathname === "/v1/lead/auto-budget") {
+        requireAuth(req, "tickets:view");
+        const service = bridge.uiActionServices?.autoBudget;
+        if (!service) throw new HttpError(503, "internal_error", routeMessages(getLocale(bridge.db)).autoBudgetUnavailable);
+        json(req, res, 200, { autoBudget: service.get() });
         return;
       }
 
@@ -3671,6 +3682,8 @@ export async function startPairedServer(
           CHAT_PLACEMENT_CAPABILITY,
           // 设置页读 shadow 的设置（GET /v1/lead/shadow）。
           LEAD_SHADOW_SETTINGS_CAPABILITY,
+          // 设置页读、改自动调用模型的上限（GET /v1/lead/auto-budget，daemon 交来了这个服务时）。
+          ...(bridge.uiActionServices?.autoBudget ? [AUTO_BUDGET_SETTINGS_CAPABILITY] : []),
           // Topics (protocol's topics.ts): the daemon gave its topic runtime.
           ...(bridge.topicMessage ? [LEAD_TOPICS_CAPABILITY] : []),
           // 排着的追问能插进这一轮、能取消（daemon 交来了这个服务时）。

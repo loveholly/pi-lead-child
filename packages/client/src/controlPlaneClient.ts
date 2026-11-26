@@ -87,6 +87,7 @@ import {
   LeadAvatarResponseSchema,
   HostBypassResponseSchema,
   BusyPlacementResponseSchema,
+  AutoBudgetResponseSchema,
   LeadShadowResponseSchema,
   SlackEmojiPreviewSchema,
   DesignPreferencesResponseSchema,
@@ -104,6 +105,7 @@ import {
   type LeadAvatarDto,
   type HostBypassDto,
   type BusyPlacementDto,
+  type AutoBudgetDto,
   type LeadShadowDto,
   type LeadAvatarImage,
   type LeadAvatarSlackEmojiRequest,
@@ -2143,6 +2145,12 @@ export class ControlPlaneClient {
   // 改走 performUiAction('lead_shadow', 'lead', 'set', { input })，只写要改的字段。
   async getLeadShadow(signal?: AbortSignal): Promise<LeadShadowDto> {
     return (await this.request<{ shadow: LeadShadowDto }>('/v1/lead/shadow', LeadShadowResponseSchema, { signal })).shadow;
+  }
+
+  // 自动调用模型的上限（设置 → Lead，契约在 protocol 的 auto-budget.ts，工单 #553）。读要 tickets:view；
+  // 改走 performUiAction('auto_budget', 'lead', 'set', { input })，只写要改的字段。daemon 报了 AUTO_BUDGET_SETTINGS_CAPABILITY 才调。
+  async getAutoBudget(signal?: AbortSignal): Promise<AutoBudgetDto> {
+    return (await this.request<{ autoBudget: AutoBudgetDto }>('/v1/lead/auto-budget', AutoBudgetResponseSchema, { signal })).autoBudget;
   }
 
   // Topics (protocol's topics.ts, user 2026-11-25): a second Lead conversation with a clean context. Reads need chat.

@@ -196,6 +196,8 @@ describe("the rule-change flag in the catalog", () => {
       "busy_placement.set",
       // How soon Lead wakes for ordinary system events when its cache is cold (user 2026-11-16): a settings option.
       "wake_pace.set",
+      // The limits on automatic model calls (ticket #553): a settings option.
+      "auto_budget.set",
       // The background shadow (user 2026-11-19): it decides who handles background events, a settings option.
       "lead_shadow.set",
       // 信号源（2026-11-12）：开、改、停、删一个订阅，以及能不能代用户处理。试跑和马上跑一次不改规则。

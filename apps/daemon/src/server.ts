@@ -23,6 +23,7 @@ import {
 import {
   BrokenBackgroundModels, createLeadCatalogSource, resolveBackgroundModel, selectedLeadModelSpec,
 } from "@pi-lead-child/lead";
+import { createAutoBudgetService } from "./auto-budget-settings.js";
 import { overflowLimits, overflowReminder, queueNotice, queueNoticeMs, waitingText } from "@pi-lead-child/lead";
 import {
   durationText, firstLine, overflowSecondReminder, RED_LINE_HANDOFF_TOOLS, redLineLimits, redLineMessage, writeCall,
@@ -1071,6 +1072,14 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
 
   // 操作层（engine 的 ui-actions/）用的服务。只建这一个对象：网关的页面入口和 Lead 的工具都拿它，两个入口调的是同一个实例。
   const uiActionServices: UiActionServices = { runtimeSettings, dataDir: opts.dataDir };
+  // 自动调用的上限（工单 #553）：设置页和 Lead 经操作层的 auto_budget.set 改，写回 config.json，马上换到 autoBudget 上。
+  // 上限调高以后，预算的暂停按新上限再判断一次：不再超了就解除。
+  uiActionServices.autoBudget = createAutoBudgetService({
+    dataDir: opts.dataDir,
+    budget: autoBudget,
+    hold: modelHold,
+    log,
+  });
 
   // Lead's model catalog with prices (lead's model-config.ts leadModelCatalog). The provider is asked at most every 30 s:
   // the message box's model picker, the background model (background-model.ts) and Hindsight's automatic slot share it.

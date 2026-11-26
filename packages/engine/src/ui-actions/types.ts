@@ -4,7 +4,7 @@
 // perform_action）都经过 index.ts 的 runUiAction，所以两个入口做同样的检查，记同样的账本，只是 actor 不同。
 import type { RuntimeDisabledBy, RuntimeId, RuntimeSwitchBy } from "@pi-lead-child/core";
 import type {
-  ActionPermission, ChannelCardAction, ConnectionDto, LocalMcpLaunch, StartConnectionResponse, ChannelCardDto, ChannelPolicyParams, ChannelPolicyReplayResult, ChannelPolicyTestRequest, ChannelPolicyTestResult,
+  ActionPermission, AutoBudgetDto, AutoBudgetLimits, ChannelCardAction, ConnectionDto, LocalMcpLaunch, StartConnectionResponse, ChannelCardDto, ChannelPolicyParams, ChannelPolicyReplayResult, ChannelPolicyTestRequest, ChannelPolicyTestResult,
   BackgroundJobState, BackgroundModelState, CompactLeadContextRequest, CompactLeadContextResult, FollowUpActionResult, LeadModelCatalog, LeadQueue, LeadModelChoice, LeadModelSwitchResult, MemoryHindsightDto, MemoryTestResponse,
   HandbookRehearsal, HandbookRehearsalRequest, ModelSettingsDto, SetSummaryModelRequest, SummaryModelSlot,
   RuntimeSettingsDto, RuntimeSettingsRequest, SaveFastModelRequest, SaveModelProviderRequest, Scope, SetBrainChainRequest,
@@ -107,6 +107,15 @@ export interface UiActionServices {
   // Topics (daemon's topics.ts, user 2026-11-25): the live sessions of the topics. Only after Lead's session is built.
   // Without it (tests) a topic that was opened without an opening has none, and nothing answers in it.
   topics?: TopicsService;
+  // The budget for automatic model calls (daemon's server.ts, ticket #553): read the limits, write them to config.json and
+  // apply them at once. Only after Lead's session is built.
+  autoBudget?: AutoBudgetService;
+}
+
+export interface AutoBudgetService {
+  get(): AutoBudgetDto;
+  // Writes config.json (lead.autoBudget) and applies the limits to the running budget. Returns the new state.
+  set(limits: AutoBudgetLimits): AutoBudgetDto;
 }
 
 export interface TopicsService {

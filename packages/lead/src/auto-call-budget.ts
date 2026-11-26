@@ -8,7 +8,8 @@
 //   · 每小时 120 次：比正常的最高值多三分之一；
 //   · 每天 1,500 次：约是最忙一天的 3 倍；
 //   · 每天没命中缓存的输入 5,000 万 token：比最忙一天多一半。
-// config.json 的 lead.autoBudget 可以改（callsPerHour、callsPerDay、uncachedTokensPerDay；0 是不限）。
+// config.json 的 lead.autoBudget 存这三个上限（callsPerHour、callsPerDay、uncachedTokensPerDay；0 是不限）。
+// 设置页「Lead」和 Lead（在用户本人的一轮里）经操作层的 auto_budget.set 改它（工单 #553）：写回 config.json，再调 setLimits，不用重启。
 // 记录只在 daemon 的内存里：重启以后从零开始数。风暴要几个小时才成形，重启不会让它躲过去。
 
 export interface AutoCallBudgetLimits {
@@ -72,7 +73,7 @@ function savedCalls(saved: unknown, now: number): Array<{ at: number; uncached: 
 }
 
 export class AutoCallBudget {
-  readonly #limits: AutoCallBudgetLimits;
+  #limits: AutoCallBudgetLimits;
   readonly #now: () => number;
   // 最近 24 小时里的自动调用，按时间排。
   #calls: Array<{ at: number; uncached: number }> = [];
@@ -109,6 +110,11 @@ export class AutoCallBudget {
   /** 用户定的上限（0 是不限）。 */
   get limits(): AutoCallBudgetLimits {
     return { ...this.#limits };
+  }
+
+  /** 换上新的上限（设置页改了以后，工单 #553）。记过的调用不动：下一次 record、exceeded 按新上限算。 */
+  setLimits(limits: AutoCallBudgetLimits): void {
+    this.#limits = { ...limits };
   }
 
   usage(): { callsLastHour: number; callsLastDay: number; uncachedTokensLastDay: number } {

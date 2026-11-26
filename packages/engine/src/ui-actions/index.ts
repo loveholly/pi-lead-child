@@ -42,6 +42,7 @@ export * from "./widgets.js";
 export * from "./signal-sources.js";
 export { BUSY_PLACEMENT_WHERE, type BusyPlacementChange } from "./busy-placement.js";
 export { WAKE_PACE_WHERE, type WakePaceChange } from "./wake-pace.js";
+export { AUTO_BUDGET_WHERE, type AutoBudgetChange } from "./auto-budget.js";
 export { LEAD_SHADOW_WHERE, type LeadShadowChange } from "./lead-shadow.js";
 export { TOPICS_WHERE } from "./topics.js";
 export {

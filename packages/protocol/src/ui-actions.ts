@@ -38,6 +38,7 @@ import {
 } from "./topics.ts";
 import { SetBusyPlacementRequestSchema } from "./busy-placement.ts";
 import { SetWakePaceRequestSchema } from "./wake-pace.ts";
+import { SetAutoBudgetRequestSchema } from "./auto-budget.ts";
 import { SetLeadShadowRequestSchema } from "./lead-shadow.ts";
 import { SetBackgroundModelRequestSchema } from "./background-model.ts";
 import { AttachReviewEvidenceRequestSchema } from "./review-evidence.ts";
@@ -114,6 +115,8 @@ export const ActionPermissionSchema = Type.Union([
 //   host_bypass  「用户本人发话时免沙箱」开关（设置 → 免沙箱，工单 #246，host-bypass.ts）。编号只有 lead。
 //   busy_placement  Lead 忙时你发的消息怎么放：排队或插话（设置 → Lead → 身份与风格，2026-11-09，busy-placement.ts）。编号只有 lead。
 //   wake_pace  How soon Lead wakes for ordinary system events when its prompt cache is cold (user 2026-11-16, wake-pace.ts). The id is always "lead".
+//   auto_budget  The limits on automatic model calls: per hour, per day, uncached input tokens per day (ticket #553,
+//     auto-budget.ts). Written to config.json, applied at once. The id is always "lead".
 //   lead_shadow  The background shadow: mode, model, sources and gather window (user 2026-11-19, lead-shadow.ts). The id is always "lead".
 //   background_model  The model that background work uses (user 2026-11-20, background-model.ts). The id is always "lead".
 //   signal_sources  信号源的清单（用户 2026-11-12，signal-sources.ts）：通过对话把一个连接接进事件体系。建、试跑。编号只有 signals。
@@ -130,7 +133,7 @@ export const UI_ACTION_TARGET_TYPES = [
   "reminder", "workspace", "milestone", "rule_change", "lead_queue", "timer", "timer_request", "follow_up", "reply_style",
   "model_settings", "memory_settings", "core_memory", "core_memory_change", "memory_fact", "setup_hint",
   "widget_board", "widget", "channel_connection", "channel_subscriptions", "connections", "connection", "skills", "skill", "host_bypass",
-  "busy_placement", "wake_pace", "lead_shadow", "background_model", "signal_sources", "signal_source", "agenda_feeds", "agenda_feed", "agenda_entry",
+  "busy_placement", "wake_pace", "auto_budget", "lead_shadow", "background_model", "signal_sources", "signal_source", "agenda_feeds", "agenda_feed", "agenda_entry",
   "topics", "topic",
   "review_attempt",
 ] as const;
@@ -454,6 +457,10 @@ export const UI_ACTION_INPUT_SCHEMAS = {
     // How many minutes ordinary system events wait for each other when Lead's prompt cache is cold. 0: no waiting.
     // Changes rules: not in a turn that read external content.
     set: SetWakePaceRequestSchema,
+  },
+  auto_budget: {
+    // The limits on automatic model calls; only the fields to change. 0 is no limit. Changes rules, only in the user's own turn.
+    set: SetAutoBudgetRequestSchema,
   },
   lead_shadow: {
     // The background shadow: mode (off, shadow, on), model (null: the main session's), sources, gather window in seconds.
