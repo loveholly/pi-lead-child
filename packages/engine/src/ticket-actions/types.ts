@@ -96,6 +96,11 @@ export interface TicketActionDefinition<K extends TicketActionId = TicketActionI
   available(item: Item, env: TicketActionEnv): Availability | Promise<Availability>;
   // 只对 delegated：工单托管给 Lead，而且这一次在托管范围内（例如核查员对最新交付给了 PASS）。
   delegatedScope?(item: Item, env: TicketActionEnv): boolean;
+  // Only for an action that still needs the user's own turn (authority.ts): Lead may still do some inputs on its own in any turn
+  // (ticket #562: raise the token budget by at most 50%). Null when Lead may do this input on its own; otherwise one sentence
+  // (no full stop) that says why this input needs the user. leadOnOwnNote tells Lead in list_ticket_actions what it can do alone.
+  leadOnOwn?(item: Item, input: unknown): string | null;
+  leadOnOwnNote?: string;
   run(run: TicketActionRun<TicketActionInputs[K]>): unknown;
   effects?(run: TicketActionRun<TicketActionInputs[K]>, result: unknown): TicketActionEffects;
   // 操作成功以后要记的主人操作。没有变化时返回 null。

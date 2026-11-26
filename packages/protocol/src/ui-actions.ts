@@ -125,6 +125,8 @@ export const ActionPermissionSchema = Type.Union([
 //   topic  One topic: rename, close (with a conclusion for the main conversation), reopen, set its model. The id is the topic id.
 //   review_attempt  一次已经结束的核查（工单 #503，review-evidence.ts）：把那次核查工作区里的截图补挂成核查证据。
 //     编号是核查员的执行记录编号（attemptId）。
+//   budget_raise  One token budget raise that Lead made on its own (ticket #562, ticket-budget.ts): undo it.
+//     The id is the ledger row of the raise (the activityId of ticket_budget.changed).
 export const UI_ACTION_TARGET_TYPES = [
   "runtime", "device", "approval", "decision", "channel_card", "channel_conversation", "channel_policy", "channel_handbook", "lead_model", "lead_context",
   "reminder", "workspace", "milestone", "rule_change", "lead_queue", "timer", "timer_request", "follow_up", "reply_style",
@@ -133,6 +135,7 @@ export const UI_ACTION_TARGET_TYPES = [
   "busy_placement", "wake_pace", "lead_shadow", "background_model", "signal_sources", "signal_source", "agenda_feeds", "agenda_feed", "agenda_entry",
   "topics", "topic",
   "review_attempt",
+  "budget_raise",
 ] as const;
 export type UiActionTargetType = typeof UI_ACTION_TARGET_TYPES[number];
 
@@ -517,6 +520,10 @@ export const UI_ACTION_INPUT_SCHEMAS = {
   review_attempt: {
     // 把这次核查工作区里的截图补挂成核查证据：不重跑核查，不改交付和核查的结论。
     attach_evidence: AttachReviewEvidenceRequestSchema,
+  },
+  budget_raise: {
+    // Put the token budget back to the value before Lead's raise. Refused when the budget changed again after the raise.
+    undo: Empty,
   },
 } as const satisfies Record<UiActionTargetType, Record<string, TSchema>>;
 

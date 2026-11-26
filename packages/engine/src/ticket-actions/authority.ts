@@ -12,7 +12,9 @@
 //   - 读过外部内容的一轮里，原来要用户这一轮的操作 Lead 做不了：外部的话不能替用户确认、验收、合并、丢弃。
 //     用户本人正在说话的那一轮例外。别的轮次被拦时，系统存下这一个操作，给用户一张确认卡（lead 的 tools.ts）。
 //   - 仍然只认用户这一轮的：
-//     - 改预算（set_budget）：用户定的 token 底线。
+//     - 改预算（set_budget）：用户定的 token 底线。例外（工单 #562，用户 2026-11-26「加几百万这种你自己判断，直接加」）：
+//       只调高 token 预算、加幅不超过当前预算的 50% 时，Lead 在哪一轮都能自己做（定义里的 leadOnOwn），账本写 actor=lead，
+//       Lead 动态里出一张带撤销的卡（budget-raise.ts）。读过外部内容的一轮照旧不行。加得更多、调低、清空、改 USD 预算不变。
 //     - 放宽子 agent 的权限（widen_grant）：给 agent 授权（Slack 来的子 agent 会请求「给我 approve 权限」），和委托授权
 //       一样是用户的事。
 //     - 在用户的 Mac 上打开交付的文件（open_delivery_file）：用默认程序打开一个 .command、.app 就是在沙箱外执行（审查 H1）。
@@ -69,6 +71,7 @@ export function resolveAuthority(
   item: Item,
   caller: TicketActionCaller,
   env: TicketActionEnv,
+  input: unknown = {},
 ): ResolvedAuthority {
   if (caller.kind === "user") return { by: { actor: "user" }, authority: "user" };
   const { mode, why, forUser } = leadAuthorityMode(definition, item, env);
@@ -110,9 +113,14 @@ export function resolveAuthority(
   try {
     onBehalfOf = userTurnAttribution(db, caller.turnId, definition.id, definition.scope);
   } catch (error) {
+    // 不是用户本人这一轮：这个输入 Lead 自己能做时（leadOnOwn，例如加幅不超过 50% 的调高预算），记成 Lead 自己做的。
+    const blocker = definition.leadOnOwn?.(item, input) ?? null;
+    if (definition.leadOnOwn && blocker === null && !caller.externalTurn && narrowCredentialTurn(db, caller.turnId, definition) === null) {
+      return { by: { actor: "lead" }, authority: "lead" };
+    }
     throw new TicketActionError(
       "needs_user_turn",
-      `${definition.label}（${definition.id}）：${why}。${userTurnRefusalText(error, definition.where ?? "工单详情")}。`,
+      `${definition.label}（${definition.id}）：${why}${blocker ? `（${blocker}）` : ""}。${userTurnRefusalText(error, definition.where ?? "工单详情")}。`,
     );
   }
   return { by: { actor: "lead", onBehalfOf }, authority: "on_behalf" };

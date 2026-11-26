@@ -41,6 +41,7 @@ import {
   AGENDA_ENTRY_ACTIONS, AGENDA_ENTRY_TARGET, AGENDA_FEED_ACTIONS, AGENDA_FEED_TARGET, AGENDA_FEEDS_ACTIONS, AGENDA_FEEDS_TARGET,
 } from "./agenda-feeds.js";
 import { REVIEW_ATTEMPT_ACTIONS, REVIEW_ATTEMPT_TARGET } from "./review-evidence.js";
+import { BUDGET_RAISE_ACTIONS, BUDGET_RAISE_TARGET } from "./budget-raise.js";
 import { SIGNAL_SOURCE_ACTIONS, SIGNAL_SOURCE_TARGET, SIGNAL_SOURCES_ACTIONS, SIGNAL_SOURCES_TARGET } from "./signal-sources.js";
 import { TOPIC_ACTIONS, TOPIC_TARGET, TOPICS_ACTIONS, TOPICS_TARGET } from "./topics.js";
 import { CHANNEL_CONNECTION_ACTIONS, CHANNEL_CONNECTION_TARGET } from "./channel-connections.js";
@@ -1282,6 +1283,7 @@ export const UI_ACTION_TARGETS: { readonly [T in UiActionTargetType]: UiActionTa
   topic: TOPIC_TARGET,
   agenda_entry: AGENDA_ENTRY_TARGET,
   review_attempt: REVIEW_ATTEMPT_TARGET,
+  budget_raise: BUDGET_RAISE_TARGET,
 };
 
 export const UI_ACTIONS: { readonly [T in UiActionTargetType]: Readonly<Record<string, UiActionDefinition>> } = {
@@ -1351,4 +1353,5 @@ export const UI_ACTIONS: { readonly [T in UiActionTargetType]: Readonly<Record<s
   topic: TOPIC_ACTIONS,
   agenda_entry: AGENDA_ENTRY_ACTIONS,
   review_attempt: REVIEW_ATTEMPT_ACTIONS,
+  budget_raise: BUDGET_RAISE_ACTIONS,
 };

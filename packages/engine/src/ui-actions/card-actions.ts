@@ -2,10 +2,12 @@
 // 哪种事件带哪个操作写在这里；现在能不能做由操作层的 available 判断（和页面、Lead 的 list_actions 是同一个函数）。
 // 做不了时卡上没有按钮。网关算卡时调它（gateway 的 lead-activity.ts）。
 import {
-  CHANNEL_MUTE_STARTED_KIND, CORE_MEMORY_CHANGED_KIND, LEAD_INSTALL_CHANGED_KIND, MEMORY_FACT_CHANGED_KIND, type LeadActivityCardAction,
+  CHANNEL_MUTE_STARTED_KIND, CORE_MEMORY_CHANGED_KIND, LEAD_INSTALL_CHANGED_KIND, MEMORY_FACT_CHANGED_KIND, TICKET_BUDGET_CHANGED_KIND,
+  type LeadActivityCardAction,
 } from "@pi-lead-child/protocol";
 import { getLocale, type Db, type EventRecord } from "@pi-lead-child/store";
 import { channelMuteMessages } from "../channels/mute.messages.js";
+import { budgetMessages } from "../ticket-actions/budget.messages.js";
 import { UI_ACTIONS, UI_ACTION_TARGETS } from "./catalog.js";
 import type { UiActionEnv } from "./types.js";
 
@@ -28,6 +30,12 @@ function undoFor(db: Db, event: Pick<EventRecord, "kind" | "payload">): LeadActi
     // Lead 让一条事实失效：撤销就是恢复它。
     if (payload.actor !== "lead" || payload.action !== "invalidated" || typeof payload.memoryId !== "string") return null;
     return { target: { type: "memory_fact", id: payload.memoryId }, action: "restore", label: "撤销" };
+  }
+  if (event.kind === TICKET_BUDGET_CHANGED_KIND) {
+    // Lead 自己调高了工单的 token 预算（工单 #562）：撤销就是改回原来的预算。撤销以后最新一条是撤销，按钮消失。
+    const activityId = idOf(payload.activityId);
+    if (payload.actor !== "lead" || payload.action !== "raised" || activityId === null) return null;
+    return { target: { type: "budget_raise", id: String(activityId) }, action: "undo", label: budgetMessages(getLocale(db)).undo };
   }
   if (event.kind === LEAD_INSTALL_CHANGED_KIND) {
     // Lead 装了一个能力（2026-11-02）：撤销就是断开这个连接，或者卸载这个 skill。

@@ -160,10 +160,10 @@ describe("Lead acting for the user", () => {
     expect(outcome).toMatchObject({ authority: "on_behalf", by: { actor: "lead", onBehalfOf: { sourceTurnId: turn.id } } });
     expect(getItem(db, itemId)!.token_budget).toBe(30_000_000);
 
-    // 和别的消息一起答过以后（用户的消息有了结局），这一轮不再算。
+    // 和别的消息一起答过以后（用户的消息有了结局），这一轮不再算。加幅超过 50%，Lead 自己也不能做（工单 #562）。
     settleTurnAnsweredWith(db, turn.id, { answeredWith: null, note: "答过了" });
     expect((await refusal(runTicketAction(db, {
-      itemId, action: "set_budget", input: { tokenBudget: 40_000_000 }, caller: lead(turn.id), reason: "再加",
+      itemId, action: "set_budget", input: { tokenBudget: 60_000_000 }, caller: lead(turn.id), reason: "再加",
     }))).message).toMatch(/is no longer active/);
     expect(getItem(db, itemId)!.token_budget).toBe(30_000_000);
   });

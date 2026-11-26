@@ -38,6 +38,32 @@ describe("a ticket action Lead cannot do in this turn", () => {
   });
 });
 
+// Ticket #562: in a turn that the system woke (a budget stop), Lead raises the token budget by up to 50% on its own.
+// A larger raise comes back with the same confirm card as before, and the budget stays.
+describe("set_budget in a turn that the system woke", () => {
+  const systemTurn: LeadTurnOrigin = { external: false, timer: null };
+  const budgetTool = () => createLeadTools({ ...deps, turnOrigin: () => systemTurn })
+    .find((candidate: any) => candidate.name === "ticket_action") as any;
+
+  it("raises by up to 50% at once, and gives a confirm card for more", async () => {
+    const itemId = createItem(db, { title: "写周报", brief: "b", createdBy: "lead", tokenBudget: 10_000_000 });
+    const small = await budgetTool().execute("t", { ticket_id: itemId, action: "set_budget", input: { tokenBudget: 15_000_000 }, reason: "用户说加几百万你自己判断" });
+    expect(small.isError).not.toBe(true);
+    expect(JSON.parse(small.content[0].text)).toMatchObject({ action: "set_budget", authority: "lead" });
+    expect(getItem(db, itemId)!.token_budget).toBe(15_000_000);
+
+    const large = await budgetTool().execute("t", { ticket_id: itemId, action: "set_budget", input: { tokenBudget: 30_000_000 }, reason: "还要很多" });
+    expect(large.isError).toBe(true);
+    expect(large.details.userAction).toMatchObject({ kind: "confirm_rule_change", target: expect.stringMatching(/^rule_change:/) });
+    const id = String(large.details.userAction.target).slice("rule_change:".length);
+    expect(getRuleChangeConfirmation(db, id)).toMatchObject({
+      state: "pending", operation: { kind: "lead_tool", tool: "ticket_action" },
+      params: expect.arrayContaining([{ name: "action", value: "set_budget" }]),
+    });
+    expect(getItem(db, itemId)!.token_budget).toBe(15_000_000);
+  });
+});
+
 describe("run_on_host", () => {
   it("only asks: nothing runs until the user confirms the card", async () => {
     const marker = join(dir, "ran.txt");

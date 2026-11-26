@@ -72,7 +72,8 @@ export function leadActivityObjectKey(event: Pick<EventRecord, "entityKey" | "pa
 }
 
 function ticketIdOfKey(key: string): number | null {
-  const match = /^(?:ticket|reminder):(\d+)$/u.exec(key);
+  // ticket_budget:<id>：Lead 自己调高的预算（工单 #562）。卡单独成一张（不和工单的阶段变化合在一起），但仍然属于这张工单。
+  const match = /^(?:ticket|reminder|ticket_budget):(\d+)$/u.exec(key);
   return match ? Number(match[1]) : null;
 }
 

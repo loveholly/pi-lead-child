@@ -135,7 +135,7 @@ export async function listLeadTicketActions(
       leadReady: ready,
       leadReason: !action.available ? action.reason
         : mode === "user_direct" ? `${why}。请用户${definition.where ? `在${definition.where}` : "在工单详情里"}自己点。`
-        : mode === "user_turn" && turnBlocker !== null ? `${why}（${turnBlocker}）`
+        : mode === "user_turn" && turnBlocker !== null ? `${why}（${turnBlocker}）${definition.leadOnOwnNote ? `。${definition.leadOnOwnNote}` : ""}`
         : narrow ? `${userTurnRefusalText(narrow, definition.where ?? "工单详情")}。` : null,
     };
   });
@@ -207,7 +207,7 @@ export async function runTicketAction(db: Db, request: TicketActionRequest): Pro
   const local = request.caller.kind === "lead" || request.caller.source?.loopback === true;
   const env = createEnv(db, item, { ...request, local });
   // 先认人，再查状态、再动手：对外的操作在认人之前不碰任何东西（delivery.ts 的同一条规则）。
-  const { by, authority } = resolveAuthority(db, definition, item, request.caller, env);
+  const { by, authority } = resolveAuthority(db, definition, item, request.caller, env, input);
   const availability = await definition.available(item, env);
   if (!availability.available) {
     throw new TicketActionError("unavailable", availability.reason ?? `${definition.label}现在不能做。`);

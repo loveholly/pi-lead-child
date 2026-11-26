@@ -14,6 +14,7 @@ import {
   type Db, type LinkTicketResult, type RevokeTicketRelationResult, type TicketRelationInputType,
 } from "@pi-lead-child/store";
 import { engineOwnerActionMessages } from "../owner-actions.messages.js";
+import { leadBudgetRaiseBlocker, reportLeadBudgetRaise } from "./budget-raise.js";
 import { changeReviewer, reviewerInfo, suspendedReviewRuntime } from "../coordinator/change-reviewer.js";
 import { applyReviewAutomation } from "../coordinator/delegated-review.js";
 import { deliveryFileOpenBlocker, openDeliveryFile } from "../coordinator/delivery-open.js";
@@ -496,12 +497,18 @@ export const TICKET_ACTIONS: TicketActionCatalog = {
 
   set_budget: {
     id: "set_budget", label: "设置预算", area: "ticket", scope: "tickets:create",
-    // 预算管着 child 能花多少 token 和钱，属于用户（Lead 不能自己给自己加预算）。
+    // 预算管着 child 能花多少 token 和钱，属于用户。例外（工单 #562）：只调高 token 预算、加幅不超过当前预算的 50% 时，
+    // Lead 在哪一轮都能自己做（authority.ts、budget-raise.ts）。
     permission: "user_only", external: false, irreversible: false, ownerAction: null,
-    hint: "设置工单的 token 预算和成本预算（美元），null 清掉那一项。",
+    hint: "设置工单的 token 预算和成本预算（美元），null 清掉那一项。"
+      + "只调高 token 预算、而且加幅不超过当前预算的 50%（例如 1000 万最多调到 1500 万）时，你在哪一轮都能自己判断着做，不用问用户："
+      + "账本记成你做的，Lead 动态里告诉用户，卡上有「撤销」。加得更多、调低、清空、第一次设预算、改 USD 预算仍然要用户本人这一轮"
+      + "（别的轮次里系统给你一张确认卡）。reason 写依据，例如「用户说加几百万你自己判断」「这一轮已经用掉 90%，交付还差一步」。",
     defaultReason: "budget changed by user",
     available: (item) => (item.kind === "task" ? AVAILABLE : unavailable("提醒没有执行预算。")),
-    run: ({ db, item, input, by, reason }) => {
+    leadOnOwn: (item, input) => leadBudgetRaiseBlocker(item, input),
+    leadOnOwnNote: "只调高 token 预算、加幅不超过当前预算的 50% 时，你在哪一轮都能自己做",
+    run: ({ db, env, item, input, by, authority, reason }) => {
       if (input.tokenBudget === undefined && input.costBudgetUsd === undefined) {
         throw new TicketActionError("invalid_input", "至少给 tokenBudget 或 costBudgetUsd 中的一项。");
       }
@@ -510,15 +517,21 @@ export const TICKET_ACTIONS: TicketActionCatalog = {
         tokenBudget: input.tokenBudget === undefined ? from.tokenBudget : input.tokenBudget,
         costBudgetUsd: input.costBudgetUsd === undefined ? from.costBudgetUsd : input.costBudgetUsd,
       };
-      db.transaction(() => {
+      // Lead 自己调高的（不是代用户做的）：账本里标出来，Lead 动态里出一张带撤销的卡。
+      const leadOwnRaise = authority === "lead";
+      return db.transaction(() => {
         db.prepare("UPDATE items SET token_budget=?, cost_budget_usd=?, updated_at=datetime('now') WHERE id=?")
           .run(to.tokenBudget, to.costBudgetUsd, item.id);
-        addActivity(db, {
+        const activityId = addActivity(db, {
           itemId: item.id, actor: by.actor, kind: "decision", ...behalfCursor(by),
-          payload: { decision: "budget_changed", from, to, reason, ...behalfFields(by) },
+          payload: { decision: "budget_changed", from, to, reason, ...behalfFields(by), ...(leadOwnRaise ? { leadOwnRaise: true } : {}) },
         });
+        if (!leadOwnRaise) return to;
+        reportLeadBudgetRaise(db, {
+          ticketId: item.id, activityId, from: from.tokenBudget!, to: to.tokenBudget!, reason,
+        }, env.now);
+        return { ...to, undo: { target: { type: "budget_raise", id: String(activityId) }, action: "undo" } };
       })();
-      return to;
     },
   },
 
