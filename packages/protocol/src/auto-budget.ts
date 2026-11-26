@@ -4,7 +4,7 @@
 // - Stored in config.json (lead.autoBudget), as before. The daemon reads it at startup; the operation writes it back and
 //   applies it to the running budget at once, so a change needs no restart.
 // - The operation is auto_budget.set (engine's ui-actions/auto-budget.ts): the settings page and Lead call the same
-//   definition. lead_allowed, changes rules, only in the user's own turn: Lead can change it when the user asks, never
+//   definition. user_only with userTurnOnly, changes rules: Lead can change it when the user asks, never
 //   in a turn that an event, a timer or an external message woke (a runaway must not raise its own limit).
 // - Read: GET /v1/lead/auto-budget (tickets:view). After a change the gateway sends snapshot.required with the payload
 //   {resource: AUTO_BUDGET_RESOURCE}, and the client reads it again.
