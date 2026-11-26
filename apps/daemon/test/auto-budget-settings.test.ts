@@ -79,7 +79,7 @@ describe("changing the limits on automatic calls from the settings page", () => 
     await vi.waitFor(() => expect(logs.some((line) => line.startsWith("[sched] model.hold action=paused kind=budget"))).toBe(true), { timeout: 10_000 });
     const read = await http("/v1/lead/auto-budget");
     expect(read.status).toBe(200);
-    expect(read.body.autoBudget).toEqual({ limits: { ...DEFAULT_AUTO_CALL_BUDGET, callsPerHour: 4 }, defaults: DEFAULT_AUTO_CALL_BUDGET });
+    expect(read.body.autoBudget).toMatchObject({ limits: { ...DEFAULT_AUTO_CALL_BUDGET, callsPerHour: 4 }, defaults: DEFAULT_AUTO_CALL_BUDGET, usage: { callsLastHour: 4 } });
     await sleep(300);
     const paused = lead.calls.length;
 
@@ -138,7 +138,7 @@ describe("the service behind auto_budget.set", () => {
       caller: { kind: "user", credential: createLoopbackBinding(db, { name: "Mac 网页" }).binding, source: { client: "web", deviceName: "Mac 网页", loopback: true, fromThisMachine: true } } as never,
       services: { autoBudget: service },
     });
-    expect(outcome.result).toMatchObject({ changed: true, autoBudget: { limits: { callsPerHour: 100 } } });
+    expect(outcome.result).toMatchObject({ changed: true, autoBudget: { limits: { callsPerHour: 100 }, usage: { callsLastHour: 4, callsLastDay: 4, uncachedTokensLastDay: 4_000 } } });
     expect(budget.limits).toEqual({ ...DEFAULT_AUTO_CALL_BUDGET, callsPerHour: 100 });
     expect(hold.held).toBe(false);
     expect(lines.some((line) => line.includes("model.hold action=resumed kind=budget by=limits_changed"))).toBe(true);

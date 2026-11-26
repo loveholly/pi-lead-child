@@ -14,7 +14,9 @@ export function createAutoBudgetService(options: {
   hold?: Pick<ModelHold, "state" | "resume">;
   log?: (line: string) => void;
 }): AutoBudgetService {
-  const state = (): AutoBudgetDto => ({ limits: options.budget.limits, defaults: { ...DEFAULT_AUTO_CALL_BUDGET } });
+  const state = (): AutoBudgetDto => ({
+    limits: options.budget.limits, defaults: { ...DEFAULT_AUTO_CALL_BUDGET }, usage: options.budget.usage(),
+  });
   return {
     get: state,
     set(limits) {

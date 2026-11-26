@@ -37,6 +37,12 @@ export const AutoBudgetDtoSchema = StrictObject({
   limits: AutoBudgetLimitsSchema,
   // The built-in defaults (what an empty field means).
   defaults: AutoBudgetLimitsSchema,
+  // What automatic calls used in the windows the limits count (the settings page shows it next to each limit).
+  usage: StrictObject({
+    callsLastHour: Type.Integer({ minimum: 0 }),
+    callsLastDay: Type.Integer({ minimum: 0 }),
+    uncachedTokensLastDay: Type.Integer({ minimum: 0 }),
+  }),
 });
 export type AutoBudgetDto = Static<typeof AutoBudgetDtoSchema>;
 
