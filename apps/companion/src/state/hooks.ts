@@ -243,6 +243,15 @@ export function useHostBypass() {
   return { hostBypass, resource };
 }
 
+// 自动调用模型的上限（GET /v1/lead/auto-budget，工单 #553）。设置 → Lead → 身份与风格在屏幕上时才取；
+// snapshot.required（resource 是 auto-budget）时重取。
+export function useAutoBudget() {
+  useObservedResource(RESOURCE_KEYS.autoBudget);
+  const autoBudget = useControlPlaneStore((state) => state.autoBudget);
+  const resource = useControlPlaneStore((state) => state.resourceState[RESOURCE_KEYS.autoBudget]);
+  return { autoBudget, resource };
+}
+
 // Lead 忙时你发的消息怎么放（GET /v1/lead/busy-placement，2026-11-09）。设置 → Lead → 身份与风格在屏幕上时才取；
 // snapshot.required（resource 是 busy-placement）时重取。
 export function useBusyPlacement() {

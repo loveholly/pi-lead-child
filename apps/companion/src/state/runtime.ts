@@ -61,6 +61,8 @@ import type {
   LeadProfileRequest,
   HostBypassDto,
   BusyPlacement,
+  AutoBudgetDto,
+  SetAutoBudgetRequest,
   LeadShadowDto,
   SetLeadShadowRequest,
   BackgroundModelReadResult,
@@ -105,7 +107,7 @@ import type {
   UiActionView,
   TicketSummary,
 } from '@pi-lead-child/protocol';
-import { CHAT_PLACEMENT_PREFERENCE_CAPABILITY, LEAD_SHADOW_SETTINGS_CAPABILITY, LEAD_TOPICS_CAPABILITY, compareConversationTurns, isBusyPlacement, LEAD_AVATAR_CAPABILITY, leadActivityCardFromItem, leadModelSpec, redactSecretText, TicketSummarySchema } from '@pi-lead-child/protocol';
+import { AUTO_BUDGET_SETTINGS_CAPABILITY, CHAT_PLACEMENT_PREFERENCE_CAPABILITY, LEAD_SHADOW_SETTINGS_CAPABILITY, LEAD_TOPICS_CAPABILITY, compareConversationTurns, isBusyPlacement, LEAD_AVATAR_CAPABILITY, leadActivityCardFromItem, leadModelSpec, redactSecretText, TicketSummarySchema } from '@pi-lead-child/protocol';
 import { Value } from 'typebox/value';
 
 import {
@@ -228,7 +230,7 @@ export type CompanionTransport = Pick<
   | 'getRuntimeSettings' | 'updateRuntimeSettings'
   | 'getLeadProfile' | 'updateLeadProfile'
   | 'getHostBypass' | 'enableHostBypass' | 'disableHostBypass'
-  | 'getBusyPlacement' | 'getLeadShadow'
+  | 'getBusyPlacement' | 'getAutoBudget' | 'getLeadShadow'
   | 'getTopics' | 'getTopic' | 'sendTopicMessage' | 'stopTopic'
   | 'getLeadAvatar' | 'getLeadAvatarImage' | 'uploadLeadAvatarSlot' | 'clearLeadAvatarSlot' | 'setLeadAvatarSlackEmoji' | 'previewSlackEmoji'
   | 'getDesignPreferences' | 'updateDesignPreferences'
@@ -1626,6 +1628,17 @@ export class CompanionStateRuntime {
     else await this.ensureResource(RESOURCE_KEYS.busyPlacement, true);
   }
 
+  // 自动调用模型的上限（设置 → Lead → 身份与风格，工单 #553）：操作层的 auto_budget.set，和 Lead 的 perform_action 同一个函数，
+  // actor 是你本人。只交改了的字段。做完马上换成操作回的值（回答里没有时重取）。失败时抛出，原因是 daemon 写的那句话。
+  async setAutoBudget(input: SetAutoBudgetRequest): Promise<void> {
+    const { client } = this.dependencies;
+    if (typeof client.performUiAction !== 'function') throw new Error(this.messages().noAction);
+    const outcome = await client.performUiAction('auto_budget', 'lead', 'set', { input });
+    const saved = (outcome.result as { autoBudget?: AutoBudgetDto } | null)?.autoBudget;
+    if (saved && typeof saved === 'object' && saved.limits && saved.defaults && saved.usage) this.control.setState({ autoBudget: saved });
+    else await this.ensureResource(RESOURCE_KEYS.autoBudget, true);
+  }
+
   // ── Topics (protocol's topics.ts, user 2026-11-25) ─────────────────────────────────────────────
   // Opening, renaming, closing and reopening are operations (topics.open, topic.rename/close/reopen): the same
   // functions as Lead's tools, here with you as the actor. Each one puts the returned topic into the store at once;
@@ -2730,6 +2743,10 @@ export class CompanionStateRuntime {
         const value = await this.memoryClient('getBusyPlacement')(signal);
         if (!canCommit()) return;
         this.control.setState({ busyPlacement: value });
+      } else if (key === RESOURCE_KEYS.autoBudget) {
+        const value = await this.memoryClient('getAutoBudget')(signal);
+        if (!canCommit()) return;
+        this.control.setState({ autoBudget: value });
       } else if (key === RESOURCE_KEYS.leadShadow) {
         const value = await this.memoryClient('getLeadShadow')(signal);
         if (!canCommit()) return;
@@ -2970,6 +2987,10 @@ export class CompanionStateRuntime {
     if (key === RESOURCE_KEYS.busyPlacement) {
       return this.scopes.has('tickets:view') && this.capabilities.has(CHAT_PLACEMENT_PREFERENCE_CAPABILITY)
         && typeof this.dependencies.client.getBusyPlacement === 'function';
+    }
+    if (key === RESOURCE_KEYS.autoBudget) {
+      return this.scopes.has('tickets:view') && this.capabilities.has(AUTO_BUDGET_SETTINGS_CAPABILITY)
+        && typeof this.dependencies.client.getAutoBudget === 'function';
     }
     if (key === RESOURCE_KEYS.leadShadow) {
       return this.scopes.has('tickets:view') && this.capabilities.has(LEAD_SHADOW_SETTINGS_CAPABILITY)
@@ -3235,7 +3256,7 @@ type MemoryClientMethod =
   | 'getRuntimeSettings' | 'updateRuntimeSettings'
   | 'getLeadProfile' | 'updateLeadProfile'
   | 'getHostBypass' | 'enableHostBypass' | 'disableHostBypass'
-  | 'getBusyPlacement' | 'getLeadShadow'
+  | 'getBusyPlacement' | 'getAutoBudget' | 'getLeadShadow'
   | 'getTopics' | 'getTopic' | 'sendTopicMessage' | 'stopTopic'
   | 'getLeadAvatar' | 'getLeadAvatarImage' | 'uploadLeadAvatarSlot' | 'clearLeadAvatarSlot' | 'setLeadAvatarSlackEmoji' | 'previewSlackEmoji'
   | 'getDesignPreferences' | 'updateDesignPreferences';

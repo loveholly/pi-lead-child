@@ -11,6 +11,7 @@ import type {
   LeadAvatarDto,
   HostBypassDto,
   BusyPlacementDto,
+  AutoBudgetDto,
   LeadShadowDto,
   TopicDto,
   LeadProfileDto,
@@ -78,6 +79,7 @@ export type ResourceKey =
   | 'lead-avatar'
   | 'host-bypass'
   | 'busy-placement'
+  | 'auto-budget'
   | 'lead-shadow'
   | 'topics'
   | `topic:${number}`
@@ -125,6 +127,8 @@ export const RESOURCE_KEYS = {
   hostBypass: 'host-bypass' as const,
   // Lead 忙时你发的消息怎么放（GET /v1/lead/busy-placement，2026-11-09）。设置 → Lead → 身份与风格在屏幕上时才取。
   busyPlacement: 'busy-placement' as const,
+  // 自动调用模型的上限（GET /v1/lead/auto-budget，工单 #553）。设置 → Lead → 身份与风格在屏幕上时才取。
+  autoBudget: 'auto-budget' as const,
   // shadow 的设置（GET /v1/lead/shadow，2026-11-19）。设置 → Shadow 在屏幕上时才取。
   leadShadow: 'lead-shadow' as const,
   // Topics (GET /v1/topics, protocol's topics.ts). The conversation reads the list while it is on screen.
@@ -380,6 +384,8 @@ export interface ControlPlaneData {
   hostBypass: HostBypassDto | null;
   /** Lead 忙时你发的消息怎么放（GET /v1/lead/busy-placement）：排队或插话。设置页在屏幕上时才取；没取到时为 null。 */
   busyPlacement: BusyPlacementDto | null;
+  /** 自动调用模型的上限、缺省值和最近的用量（GET /v1/lead/auto-budget）。设置页在屏幕上时才取；没取到时为 null。 */
+  autoBudget: AutoBudgetDto | null;
   /** shadow 的设置（GET /v1/lead/shadow）：模式、比例、模型、合批等待。设置页在屏幕上时才取；没取到时为 null。 */
   leadShadow: LeadShadowDto | null;
   /** Topics (GET /v1/topics): open ones first. null: not read yet, or the daemon has none. */
