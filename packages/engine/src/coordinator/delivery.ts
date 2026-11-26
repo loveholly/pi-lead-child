@@ -842,7 +842,7 @@ export async function openDeliveryPullRequest(
     const push = await gitRun(["push", "origin", `refs/heads/${branch}:refs/heads/${branch}`], repo, {
       timeout: NETWORK_TIMEOUT_MS, env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
     });
-    if (!push.ok) throw new DeliveryError("failed", `推送分支失败：${redact(firstLine(push.stderr))}`);
+    if (!push.ok) throw new DeliveryError("failed", `推送分支失败：${pushFailureLine(push.stderr)}`);
     const runner = input.runner ?? defaultRunner;
     const pushedHead = delivery.workspace?.head ?? null;
     // 系统开 PR 之前先看这条分支是不是已经有 PR（例如以前由 child 自己开的 #107）：有就记下它，不开第二个。
@@ -914,9 +914,73 @@ async function openPullRequestFor(runner: PullRequestRunner, repo: string, branc
   return /^https:\/\//.test(url) ? url : null;
 }
 
+// 系统上一次推到这条 PR 分支上的提交（开 PR 或更新 PR 时记下的）。
+function lastPushedHead(db: Db, itemId: number, workspaceId: number): string | null {
+  const row = db.prepare(
+    `SELECT json_extract(payload, '$.head') AS head FROM activities
+     WHERE item_id=? AND kind='decision' AND json_valid(payload)
+       AND json_extract(payload, '$.decision') IN ('workspace_pr_opened', 'workspace_pr_updated')
+       AND json_extract(payload, '$.workspaceId')=? AND json_extract(payload, '$.head') IS NOT NULL
+     ORDER BY id DESC LIMIT 1`,
+  ).get(itemId, workspaceId) as { head: string } | undefined;
+  return row?.head ?? null;
+}
+
+// git push 的报错里有用的那一行（第一行常常只是「To <远端地址>」）。
+function pushFailureLine(stderr: string): string {
+  const line = stderr.split("\n").map((text) => text.trim()).find((text) => /^(!|error:|fatal:|remote:)/.test(text));
+  return redact(line ?? firstLine(stderr));
+}
+
+const short = (sha: string | null): string => (sha ? sha.slice(0, 7) : "没有记录");
+
+export interface ReworkPush {
+  // 推之前 origin 上这条分支的提交；分支不在时为 null。
+  previousHead: string | null;
+  // 返工改写了历史（例如 rebase），用 --force-with-lease 盖掉了旧的提交。
+  forced: boolean;
+  // origin 上已经是这个提交（例如有人手动推过），没有推。
+  alreadyThere: boolean;
+}
+
+/**
+ * 把返工后的分支推到已经开着的 PR 上（#552）。先读 origin 上这条分支现在的提交：
+ *   - 已经是新的提交：不用推；
+ *   - 是新提交的祖先：快进推送；
+ *   - 是系统上一次推的提交，但不在新的历史里（返工 rebase 改写了历史）：用 --force-with-lease 推，期望值就是这个旧提交，
+ *     读和推之间有人改了远端，git 也会拒绝；
+ *   - 别的情况：有人在 origin 上改过这条分支，不覆盖，报错。报错由调用方记在工单上，告诉 Lead。
+ */
+async function pushReworkBranch(
+  db: Db, itemId: number, workspaceId: number, repo: string, branch: string, head: string,
+): Promise<ReworkPush> {
+  const options = { timeout: NETWORK_TIMEOUT_MS, env: { ...process.env, GIT_TERMINAL_PROMPT: "0" } };
+  const listed = await gitRun(["ls-remote", "--heads", "origin", `refs/heads/${branch}`], repo, options);
+  if (!listed.ok) throw new DeliveryError("failed", `读不到 origin 上的分支：${pushFailureLine(listed.stderr)}`);
+  const remote = listed.stdout.trim().split(/\s+/)[0] || null;
+  if (remote === head) return { previousHead: remote, forced: false, alreadyThere: true };
+  const lastPushed = lastPushedHead(db, itemId, workspaceId);
+  const changedByOthers = `origin 上的分支 ${branch} 被别人改过（现在是 ${short(remote)}，系统上次推的是 ${short(lastPushed)}），`
+    + "没有覆盖。先看远端多出来的提交，再决定合进分支还是覆盖。";
+  let forced = false;
+  if (remote !== null && !(await gitRun(["merge-base", "--is-ancestor", remote, head], repo)).ok) {
+    if (remote !== lastPushed) throw new DeliveryError("failed", changedByOthers);
+    forced = true;
+  }
+  // 远端分支不在时期望值为空：推的时候它还不能在。
+  const lease = `--force-with-lease=refs/heads/${branch}:${remote ?? ""}`;
+  const push = await gitRun(["push", lease, "origin", `refs/heads/${branch}:refs/heads/${branch}`], repo, options);
+  if (!push.ok) {
+    if (/stale info|fetch first|non-fast-forward/.test(push.stderr)) throw new DeliveryError("failed", changedByOthers);
+    throw new DeliveryError("failed", `推送分支失败：${pushFailureLine(push.stderr)}`);
+  }
+  return { previousHead: remote, forced, alreadyThere: false };
+}
+
 /**
  * 返工以后更新已经开着的 PR（用户 2026-10-26）：把分支上新的提交推到同一条远程分支，刷新 PR 描述。
- * 只做快进推送，不强推：远程分支上有本地没有的提交时报错，交给人处理。只由系统调用（auto-pull-request.ts）。
+ * 怎么推见 pushReworkBranch：快进，或者返工改写了历史时 --force-with-lease；远端被别人改过时不推，报错。
+ * 只由系统调用（auto-pull-request.ts）。
  * 描述只在还是系统写的那份时刷新；维护者手改过就不动，bodyUpdated 是 false（2026-11-24）。
  */
 export async function updateDeliveryPullRequest(
@@ -933,11 +997,10 @@ export async function updateDeliveryPullRequest(
     const repo = workspace.repo_root!;
     const branch = workspace.branch!;
     recheckBeforeActing(db, itemId, workspace.id, ["review", "done"], "交付以后才能更新 PR。");
-    await guardPush(db, itemId, workspace.id, repo, branch, delivery.workspace!.head, "update", "system");
-    const push = await gitRun(["push", "origin", `refs/heads/${branch}:refs/heads/${branch}`], repo, {
-      timeout: NETWORK_TIMEOUT_MS, env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
-    });
-    if (!push.ok) throw new DeliveryError("failed", `推送分支失败：${redact(firstLine(push.stderr))}`);
+    const head = delivery.workspace!.head;
+    if (!head) throw new DeliveryError("unavailable", "找不到分支现在的提交。");
+    await guardPush(db, itemId, workspace.id, repo, branch, head, "update", "system");
+    const pushed = await pushReworkBranch(db, itemId, workspace.id, repo, branch, head);
     const runner = input.runner ?? defaultRunner;
     const viewed = await runner.gh(["pr", "view", url, "--json", "body", "--jq", ".body"], repo);
     if (!viewed.ok) {
@@ -956,7 +1019,8 @@ export async function updateDeliveryPullRequest(
     addActivity(db, {
       itemId, actor: "system", kind: "decision",
       payload: {
-        decision: "workspace_pr_updated", workspaceId: workspace.id, branch, url, head: delivery.workspace!.head, reason: input.reason,
+        decision: "workspace_pr_updated", workspaceId: workspace.id, branch, url, head, reason: input.reason,
+        previousHead: pushed.previousHead, forced: pushed.forced, ...(pushed.alreadyThere ? { alreadyThere: true } : {}),
         ...(body !== null ? { bodySha256: bodyFingerprint(body) } : { bodyKept: true }),
       },
     });

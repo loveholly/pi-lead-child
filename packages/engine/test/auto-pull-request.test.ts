@@ -315,6 +315,110 @@ describe("the draft PR follows the ticket from delivery through rework", () => {
   });
 });
 
+// 回归（2026-11-25，#552）：返工交付以后，PR 分支没有更新，三次都是 Lead 手动推的。
+// 两个原因：要独立核查的工单返工后回到 review，系统要等核查员再给 PASS 才更新已经开着的 PR；
+// 返工里 rebase 改写了历史，系统只做快进推送，推送被拒。PR 是草稿还是已经转正式，系统都不看。
+// 每条测试要 clone 远程、rebase、推好几次，机器忙时超过缺省的 15 秒。
+describe("rework reaches the PR that is already open", { timeout: 40_000 }, () => {
+  // 改写历史：把分支 rebase 到 origin 上新的 main，像执行者返工时做的那样。
+  function rebaseOntoNewMain(worktree: string): void {
+    const other = join(dir, `main-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    execFileSync("git", ["clone", "-q", "-b", "main", remote, other]);
+    commitIn(other, `upstream-${Math.random().toString(36).slice(2)}.md`, "upstream\n");
+    git(other, "push", "-q", "origin", "main");
+    git(worktree, "fetch", "-q", "origin");
+    git(worktree, "-c", "user.email=a@b.test", "-c", "user.name=agent", "rebase", "-q", "origin/main");
+  }
+
+  function openWithPass(): { itemId: number; worktree: string; branch: string } {
+    const ticket = codingTicket({ verification: "independent_reviewer" });
+    const reviewer = createRun(db, { itemId: ticket.itemId, runtime: "codex", role: "reviewer" });
+    db.prepare("INSERT INTO review_verdicts (run_id, item_id, verdict, evidence) VALUES (?, ?, 'pass', 'ok')").run(reviewer, ticket.itemId);
+    return ticket;
+  }
+
+  it("pushes rework of an independently reviewed ticket without waiting for the next PASS", async () => {
+    const { itemId, worktree, branch } = openWithPass();
+    const gh = fakeGh();
+    expect(await syncAutoPullRequests(db, { runner: gh })).toMatchObject({ opened: [itemId] });
+
+    rework(itemId, worktree, "fix.md", "2026-10-26T09:00:00.000Z");
+    // 核查员已经开始核查这次返工：它不提交，也不挡推送。
+    const reviewer = createRun(db, { itemId, runtime: "codex", role: "reviewer" });
+    updateRun(db, reviewer, { state: "running" });
+    expect(await autoPullRequestPlan(db, itemId)).toEqual({ action: "update", url: "https://github.com/acme/repo/pull/12" });
+    expect(await syncAutoPullRequests(db, { runner: gh })).toMatchObject({ updated: [itemId], failed: [] });
+    expect(git(remote, "rev-parse", branch)).toBe(git(worktree, "rev-parse", "HEAD"));
+  });
+
+  it("pushes a rebased branch with --force-with-lease on the head it pushed last", async () => {
+    const { itemId, worktree, branch } = codingTicket();
+    const gh = fakeGh();
+    expect(await syncAutoPullRequests(db, { runner: gh })).toMatchObject({ opened: [itemId] });
+    const before = git(remote, "rev-parse", branch);
+
+    db.prepare("UPDATE items SET stage='active' WHERE id=?").run(itemId);
+    rebaseOntoNewMain(worktree);
+    commitIn(worktree, "fix.md", "fix\n");
+    deliver(itemId, "2026-10-26T09:00:00.000Z");
+    const head = git(worktree, "rev-parse", "HEAD");
+    // 历史改写了：远程上的旧提交不在新的分支上，快进推送会被拒。
+    expect(() => git(worktree, "merge-base", "--is-ancestor", before, head)).toThrow();
+
+    expect(await syncAutoPullRequests(db, { runner: gh })).toMatchObject({ updated: [itemId], failed: [] });
+    expect(git(remote, "rev-parse", branch)).toBe(head);
+    expect(decisions(itemId, "workspace_pr_updated")[0]).toMatchObject({ head, previousHead: before, forced: true });
+  });
+
+  it("does not overwrite a branch someone else changed on origin, records it, and tells Lead", async () => {
+    const { itemId, worktree, branch } = codingTicket();
+    const gh = fakeGh();
+    expect(await syncAutoPullRequests(db, { runner: gh })).toMatchObject({ opened: [itemId] });
+
+    // 维护者在 PR 分支上加了一个提交。
+    const other = join(dir, "maintainer");
+    execFileSync("git", ["clone", "-q", "-b", branch, remote, other]);
+    commitIn(other, "theirs.md", "theirs\n");
+    git(other, "push", "-q", "origin", branch);
+    const theirs = git(remote, "rev-parse", branch);
+
+    db.prepare("UPDATE items SET stage='active' WHERE id=?").run(itemId);
+    rebaseOntoNewMain(worktree);
+    deliver(itemId, "2026-10-26T09:00:00.000Z");
+    gh.calls.length = 0;
+
+    expect(await syncAutoPullRequests(db, { runner: gh })).toMatchObject({ updated: [], failed: [itemId] });
+    expect(git(remote, "rev-parse", branch)).toBe(theirs);
+    expect(gh.calls).toEqual([]);
+    const [failed] = decisions(itemId, "workspace_pr_auto_failed");
+    expect(failed).toMatchObject({ step: "update", head: git(worktree, "rev-parse", "HEAD") });
+    expect(String(failed!.error)).toContain("被别人改过");
+    const told = listInbox(db).filter((row) => row.item_id === itemId).at(-1)!;
+    expect(told.summary).toContain("没能更新 PR");
+    expect(told.summary).toContain("被别人改过");
+    expect(JSON.parse(told.payload)).toMatchObject({ wakeLead: true });
+
+    // 同一个提交不再试，也不再告诉 Lead。
+    const count = listInbox(db).filter((row) => row.item_id === itemId).length;
+    expect(await syncAutoPullRequests(db, { runner: gh })).toMatchObject({ updated: [], failed: [] });
+    expect(listInbox(db).filter((row) => row.item_id === itemId)).toHaveLength(count);
+  });
+
+  it("records the update when someone already pushed the new head by hand", async () => {
+    const { itemId, worktree, branch } = codingTicket();
+    const gh = fakeGh();
+    expect(await syncAutoPullRequests(db, { runner: gh })).toMatchObject({ opened: [itemId] });
+
+    db.prepare("UPDATE items SET stage='active' WHERE id=?").run(itemId);
+    rebaseOntoNewMain(worktree);
+    deliver(itemId, "2026-10-26T09:00:00.000Z");
+    git(worktree, "push", "-q", "--force", "origin", `HEAD:refs/heads/${branch}`);
+
+    expect(await syncAutoPullRequests(db, { runner: gh })).toMatchObject({ updated: [itemId], failed: [] });
+    expect(decisions(itemId, "workspace_pr_updated")[0]).toMatchObject({ head: git(worktree, "rev-parse", "HEAD") });
+  });
+});
+
 // 回归（2026-11-06，#288）：用户给主 checkout 加了 origin（公开仓库）。一张工单的分支建在旧的、没公开过的本地历史上，
 // 和 origin 的 master 没有共同历史。系统自动开 PR 时先推送成功，开 PR 才失败，整段本地历史被推到了公开仓库。
 // 现在推送之前先查共同历史和 origin 上没有的提交数，不通过就不推、不开 PR，在工单上写原因，告诉 Lead。

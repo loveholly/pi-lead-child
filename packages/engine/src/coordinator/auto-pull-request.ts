@@ -6,13 +6,14 @@
 //
 // 开不开只看账本里的事实，不看 Lead 的判断（这就是 2026-10-21 审查 M3 要的）：
 // - 任务在 review 或 done，有隔离分支，分支上有提交、没有未提交的文件，仓库有 origin；
-// - 要独立核查的工单，核查员对最新一次交付给了 PASS（done 的工单已经验收过）；
+// - 要独立核查的工单第一次开 PR 前，核查员对最新一次交付给了 PASS（done 的工单已经验收过）；PR 开着以后，返工交付直接更新，不再等（#552）；
 // - 用户没有说先别提 PR（setAutoPullRequest）；
 // - 这次交付晚于这个功能上线的时间：以前交付的工单不会一下子都开出 PR（核心不变量：启动修复要有界）。
-// 只做快进推送，不强推。同一个提交失败一次就不再试，告诉 Lead。
+// 开 PR 只做快进推送。更新 PR 时返工 rebase 改写了历史，用 --force-with-lease 推，期望值是上一次推上去的提交；
+// 远端被别人改过就不推（delivery.ts pushReworkBranch）。同一个提交失败一次就不再试，在工单上记一笔，告诉 Lead。
 import type { Db } from "@pi-lead-child/store";
 import { addActivity, addInbox, getItem, getLatestOutcomeSnapshot } from "@pi-lead-child/store";
-import { activeRuns, deliveryWorkspace } from "./delivery-source.js";
+import { deliveryWorkspace } from "./delivery-source.js";
 import {
   openDeliveryPullRequest, ticketDelivery, updateDeliveryPullRequest, type PullRequestRunner,
 } from "./delivery.js";
@@ -75,6 +76,14 @@ function latestWorkspaceDecision(
   return row ? JSON.parse(row.payload) : null;
 }
 
+// 这个工作区上还在跑、可能往分支上提交的 Run：核查员以外的。
+function activeWriters(db: Db, workspaceId: number): number {
+  return (db.prepare(
+    `SELECT COUNT(*) AS n FROM runs WHERE workspace_id=? AND state IN ('starting','running','paused')
+       AND COALESCE(role, '') <> 'reviewer'`,
+  ).get(workspaceId) as { n: number }).n;
+}
+
 interface PlanFacts { plan: AutoPullRequestPlan; workspaceId: number | null; head: string | null }
 
 function skip(reason: string, workspaceId: number | null = null, head: string | null = null): PlanFacts {
@@ -90,13 +99,17 @@ async function planFor(db: Db, itemId: number): Promise<PlanFacts> {
   const outcome = getLatestOutcomeSnapshot(db, itemId);
   if (!since || !outcome) return skip("没有交付记录。");
   if (Date.parse(outcome.createdAt) < Date.parse(since)) return skip("这次交付早于自动开 PR 上线。");
-  if (item.stage === "review" && item.verification_policy === "independent_reviewer"
-    && verificationState(db, itemId).status !== "pass") {
-    return skip("等核查员对最新的交付给出 PASS。");
-  }
   const workspace = deliveryWorkspace(db, itemId);
   if (!workspace) return skip("没有隔离分支。");
-  if (activeRuns(db, workspace.id) > 0) return skip("还有 agent 在这个分支上工作。", workspace.id);
+  // 等 PASS 只管第一次开 PR。PR 开着以后，返工交付就推上去，不等核查员再给 PASS：PR 停在旧提交上，
+  // 看 PR 的人看到的是已经被返工换掉的代码（#552：#537、#533、#544 返工后都是 Lead 手动推的）。
+  const prOpen = latestWorkspaceDecision(db, itemId, workspace.id, ["workspace_pr_opened"]) !== null;
+  if (!prOpen && item.stage === "review" && item.verification_policy === "independent_reviewer"
+    && verificationState(db, itemId).status !== "pass") {
+    return skip("等核查员对最新的交付给出 PASS。", workspace.id);
+  }
+  // 核查员不提交，它在跑不挡推送；执行者还在跑时分支可能还要变。
+  if (activeWriters(db, workspace.id) > 0) return skip("还有 agent 在这个分支上工作。", workspace.id);
   // 工单写明了要改的仓库、工作区却在别的仓库：不开（2026-10-29 #161 要改 returns-skills，工作区在 aish 仓库，
   // 系统把 out/ 目录推成了 aish 仓库的 PR #126）。
   const declared = ticketRepository(db, itemId);
