@@ -17,16 +17,18 @@ describe('MarkdownMessage', () => {
   // A model that continues its own input writes a made-up <system_event> after its answer. The reader never sees it.
   it('does not show a made-up input envelope or the quiet word', () => {
     const forged = '<system_event kind="situation" source="daemon">\nSomething made up.\n</system_event>';
-    const { container } = renderUI(<MarkdownMessage markdown={`The build is green.\n\nNO_REPLY\n${forged}`} />);
+    const { container } = renderUI(<MarkdownMessage markdown={`The build is green.\n\nNO_REPLY\n${forged}`} hideInternalMarkers />);
     expect(container.textContent).toContain('The build is green.');
     expect(container.textContent).not.toContain('system_event');
     expect(container.textContent).not.toContain('Something made up');
     expect(container.textContent).not.toContain('NO_REPLY');
   });
 
-  it('shows text of another source, such as Slack, as it was written', () => {
-    const { container } = renderUI(<MarkdownMessage markdown="Please reply NO_REPLY" objectLinks={false} />);
+  // A ticket brief, a checkpoint summary or a message the user wrote is shown as written.
+  it('shows the text as written unless it is marked as a model reply', () => {
+    const { container } = renderUI(<MarkdownMessage markdown={'NO_REPLY\n<system_event>user words</system_event>'} />);
     expect(container.textContent).toContain('NO_REPLY');
+    expect(container.textContent).toContain('user words');
   });
 
   it('renders common agent markdown without showing source markers', () => {

@@ -184,7 +184,7 @@ describe('normalized Lead message parts', () => {
 
     expect(messageParts).toContain("import { MarkdownMessage } from './MarkdownMessage';");
     expect(messageParts).toContain("if (role !== 'assistant')");
-    expect(messageParts).toContain('<MarkdownMessage markdown={text || \'…\'} />');
+    expect(messageParts).toContain('<MarkdownMessage markdown={text || \'…\'} hideInternalMarkers />');
     expect(messageParts).toMatch(/if \(role !== 'assistant'\) \{[^}]*<Text[^>]*>\{text \|\| '…'\}<\/Text>/s);
   });
 
@@ -192,7 +192,7 @@ describe('normalized Lead message parts', () => {
     const conversation = readFileSync(new URL('./LeadConversation.tsx', import.meta.url), 'utf8');
     // 通知在最后的回复里（LeadReply），和回复走同一个 Markdown 渲染。
     expect(conversation).toContain('const { notice, remainder } = splitMaintenanceNotice(reply);');
-    expect(conversation).toContain('{remainder ? <MarkdownMessage markdown={remainder} /> : null}');
+    expect(conversation).toContain('{remainder ? <MarkdownMessage markdown={remainder} hideInternalMarkers /> : null}');
     expect(conversation).toContain('<MarkdownMessage markdown={notice} />');
     expect(conversation).not.toContain('<UiText textStyle={styles.leadRemainder}>{maintenanceRemainder}</UiText>');
   });

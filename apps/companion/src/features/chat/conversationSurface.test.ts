@@ -74,6 +74,6 @@ describe('conversation surface', () => {
     expect(source('./MessagePartView.tsx')).not.toMatch(/<Text\b[^>]*\btone="inverse"/);
     // 工单对话的长回复可以折起来（工单详情复核 P2-5），折起来的里面还是同一个 MarkdownMessage。
     expect(ticket).toMatch(/renderReply=\{\(reply\) => reply\s*\? <FoldableReply markdown=\{reply\}/);
-    expect(ticket).toContain('<MarkdownMessage markdown={markdown} />');
+    expect(ticket).toContain('<MarkdownMessage markdown={markdown} hideInternalMarkers />');
   });
 });

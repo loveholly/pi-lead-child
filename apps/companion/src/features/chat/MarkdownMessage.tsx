@@ -22,7 +22,7 @@ import { QuotableBlock } from './QuotableBlock';
 //   · 代码块浅灰底、细边、圆角，右上角是复制按钮；行内代码是浅灰的小圆角块；分隔线是一条细线。
 // 卡片里来自 Lead 或 child 的自由文本（介入卡的回答、说明）也用它（2026-10-26）：传卡片正文的 size 和 tone，
 // 结论句只加粗、不加大。
-export function MarkdownMessage({ markdown, size = 'message-body', tone = 'default', breaks = false, objectLinks = true }: {
+export function MarkdownMessage({ markdown, size = 'message-body', tone = 'default', breaks = false, objectLinks = true, hideInternalMarkers = false }: {
   markdown: string;
   /** 认不认指向 App 里对象的链接（plc:ticket/N、plc:card/N，P14.7）。外来的原文（Slack）传 false。 */
   objectLinks?: boolean;
@@ -31,11 +31,12 @@ export function MarkdownMessage({ markdown, size = 'message-body', tone = 'defau
   /** 正文的语义字号。会话回复是 message-body，卡片里用卡片正文的字号。 */
   size?: FontSizeToken;
   tone?: Tone;
+  /** The text is a reply that a model wrote: hide the quiet word and made-up input envelopes (also in stored replies). */
+  hideInternalMarkers?: boolean;
 }) {
-  // A source that does not take object links is someone else's original text (Slack): show it as written.
   const blocks = useMemo(
-    () => parseMarkdownMessage(markdown, { breaks, hideInternalMarkers: objectLinks }),
-    [breaks, markdown, objectLinks],
+    () => parseMarkdownMessage(markdown, { breaks, hideInternalMarkers }),
+    [breaks, hideInternalMarkers, markdown],
   );
 
   return (

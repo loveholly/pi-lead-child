@@ -1115,10 +1115,10 @@ function useChatImageUris(images: readonly ImagePart[]): readonly { uri: string 
 // Lead 的最后回复。切换模型的系统提示（【系统】…）单独居中显示。
 function LeadReply({ reply }: { reply: string }) {
   const { notice, remainder } = splitMaintenanceNotice(reply);
-  if (!notice) return reply ? <MarkdownMessage markdown={reply} /> : null;
+  if (!notice) return reply ? <MarkdownMessage markdown={reply} hideInternalMarkers /> : null;
   return (
     <>
-      {remainder ? <MarkdownMessage markdown={remainder} /> : null}
+      {remainder ? <MarkdownMessage markdown={remainder} hideInternalMarkers /> : null}
       <Box items="center" py="banner-y">
         <MarkdownMessage markdown={notice} />
       </Box>

@@ -137,6 +137,19 @@ describe("a user round", () => {
     expect(storedEvents()).not.toContain("Something made up");
   });
 
+  it("does not let the quiet word out when a made-up envelope follows it and the stream stops inside the tag", async () => {
+    // The quiet word on its own line, then an envelope: a delta that ends between "<" and the tag name must not release the quiet word.
+    const text = "All three checks are green.\nNO_REPLY\n\n<user_message>next</user_message>";
+    const lead = stubLead(() => [{ text, pieces: [...text] }]);
+    const { chat, streamed } = await start(lead);
+
+    chat("cmd-1", "How is the build?");
+    await vi.waitFor(() => expect(turns("paired:%")).toEqual([{ assistant_text: "All three checks are green.", state: "completed" }]));
+    expect(streamed()).not.toContain("NO_REPLY");
+    expect(storedEvents()).not.toContain("NO_REPLY");
+    expect(storedEvents()).not.toContain("user_message");
+  });
+
   it("does not turn a reply of only NO_REPLY into a message", async () => {
     const lead = stubLead(() => [{ text: "NO_REPLY" }]);
     const { chat, streamed } = await start(lead);

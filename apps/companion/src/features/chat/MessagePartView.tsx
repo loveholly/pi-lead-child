@@ -100,7 +100,7 @@ function TextMessagePart({ canonicalText, messageId, messageState, role }: {
       ? <Text size="message-body">{text || '…'}</Text>
       : <Text size="body" tone="secondary">{text || '…'}</Text>;
   }
-  return <MarkdownMessage markdown={text || '…'} />;
+  return <MarkdownMessage markdown={text || '…'} hideInternalMarkers />;
 }
 
 // 工单列表只装 task：不在列表里的事项（提醒、刚建好的工单）按编号取它的 TicketDetail。提醒画成提醒卡。

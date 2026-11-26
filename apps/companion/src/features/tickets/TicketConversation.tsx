@@ -173,12 +173,12 @@ export const LONG_REPLY_CHARS = 600;
 function FoldableReply({ markdown, foldable }: { markdown: string; foldable: boolean }) {
   const m = useMessages(ticketChatMessages);
   const [open, setOpen] = useState(false);
-  if (!foldable || markdown.length <= LONG_REPLY_CHARS) return <MarkdownMessage markdown={markdown} />;
+  if (!foldable || markdown.length <= LONG_REPLY_CHARS) return <MarkdownMessage markdown={markdown} hideInternalMarkers />;
   const size = (Math.round(markdown.length / 100) * 100).toLocaleString('en-US');
   return (
     <Column gap="reply-block">
       <Box testID="ticket-reply-body" {...(open ? {} : { maxH: 200, overflow: 'hidden' as const })}>
-        <MarkdownMessage markdown={markdown} />
+        <MarkdownMessage markdown={markdown} hideInternalMarkers />
       </Box>
       <Box self="flex-start">
         <Button

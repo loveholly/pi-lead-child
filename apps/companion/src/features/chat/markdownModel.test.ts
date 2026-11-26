@@ -116,17 +116,12 @@ describe('internal markers', () => {
     ]);
   });
 
-  it('shows the quiet word as written when the source is not Lead', () => {
+  it('shows the quiet word as written when the text is not marked as a model reply', () => {
     expect(textOf('NO_REPLY', false)).toContain('NO_REPLY');
   });
 
   it('keeps a message that only talks about the tag', () => {
     const blocks = parseMarkdownMessage('The envelope is `<system_event>` and ends with `</system_event>`.', { hideInternalMarkers: true });
     expect(JSON.stringify(blocks)).toContain('<system_event>');
-  });
-
-  it('drops the content of an envelope block even when the source is not filtered first', () => {
-    expect(textOf(`Result.\n\n${forged}`, false)).not.toContain('Something made up');
-    expect(textOf(`Result.\n\n${forged}`, false)).toContain('Result.');
   });
 });

@@ -102,12 +102,8 @@ function inlineTokens(tokens: Token[], style: InlineStyle = {}): MarkdownInline[
   return result;
 }
 
-// The input envelopes of the daemon. A model that continues its own input writes them; what they hold is not for the reader.
-const INTERNAL_TAGS = /<(system_event|user_message|untrusted_external_text)\b[^>]*>[\s\S]*?(?:<\/\1\s*>|$)/giu;
-
 function safeHtmlText(html: string) {
   return html
-    .replace(INTERNAL_TAGS, '')
     .replace(/<(script|style)\b[^>]*>[\s\S]*?<\/\1\s*>/giu, '')
     .replace(/<!--[\s\S]*?-->/gu, '')
     .replace(/<[^>]+>/gu, '');

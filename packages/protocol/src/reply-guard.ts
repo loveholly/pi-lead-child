@@ -9,8 +9,9 @@
 // ticket agent's stream, the client) cuts the same way. The rules look at position and structure, never at wording:
 //   · A made-up envelope is a line that starts with an envelope tag (after optional quiet words) and sits outside a code
 //     fence. That line and everything after it is dropped.
-//   · NO_REPLY (also several in a row, like NO_REPLYNO_REPLY) is dropped at the start or at the end of the text. In the
-//     middle of a sentence, in code, or inside bold or quotes, it is the model talking about the word, so it stays.
+//   · NO_REPLY (also several in a row, like NO_REPLYNO_REPLY) is dropped at the end of the text, and at the start when it
+//     stands alone on its line. In the middle of a sentence, in code, inside bold or quotes, or at the start of a
+//     sentence ("NO_REPLY is the word ..."), it is the model talking about the word, so it stays.
 // White space is kept as the model wrote it, except the white space next to what is dropped: messages of one round are
 // joined as they always were.
 
@@ -22,7 +23,9 @@ const QUIET_PUNCTUATION = "[。．.!！]";
 // One quiet word, then the end of the word: not a letter, digit or underscore, or the next quiet word straight away.
 const QUIET_RUN = `(?:${QUIET_WORD}${QUIET_PUNCTUATION}?(?:(?=${QUIET_WORD})|(?![${WORD}]))\\s*)+`;
 
-const LEADING_QUIET = new RegExp(`^\\s*${QUIET_RUN}`, "iu");
+// A leading run counts only when the last word ends its line: "NO_REPLY\n..." is the quiet word, "NO_REPLY is ..." is a sentence.
+const QUIET_WORD_ONE = `${QUIET_WORD}${QUIET_PUNCTUATION}?(?:(?=${QUIET_WORD})|(?![${WORD}]))`;
+const LEADING_QUIET = new RegExp(`^\\s*(?:${QUIET_WORD_ONE}\\s*)*${QUIET_WORD_ONE}[ \\t]*(?:\\n\\s*|$)`, "iu");
 // A trailing run must not start right after a letter, a digit, a code mark, a bold mark or a quote mark.
 const TRAILING_QUIET = new RegExp(`\\s*(?<![${WORD}\`*"'“‘「])${QUIET_RUN}$`, "iu");
 
@@ -104,6 +107,9 @@ function heldFrom(text: string): number {
     const fragment = partial[1]!.toLowerCase();
     if (ENVELOPE_TAGS.some((tag) => `<${tag}`.startsWith(fragment) || `</${tag}`.startsWith(fragment))) {
       from = Math.min(from, lineStart);
+      // If the envelope is confirmed, the quiet words before it are the end of the kept text and are dropped too.
+      const before = TRAILING_QUIET.exec(text.slice(0, from));
+      if (before) from = before.index;
     }
   }
   // White space right before what is held goes with it: it is dropped when the held text turns out to be a quiet word.
