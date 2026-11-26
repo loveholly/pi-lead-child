@@ -29,7 +29,7 @@ function setup(options: { bypass: boolean }) {
   updateRun(db, runId, { state: "running" });
   const service = createControlPlaneService(db, { runtime: () => runtime([itemId]) });
   const summary = () => service.listItems().find((item) => item.id === itemId)!;
-  return { coordinator, itemId, runId, summary };
+  return { coordinator, itemId, runId, summary, service };
 }
 
 function askDecision(coordinator: ReturnType<typeof createCoordinator>, itemId: number, runId: number) {
@@ -98,6 +98,24 @@ describe("ticket attention for child interventions", () => {
     const requestId = askDecision(coordinator, itemId, runId);
     coordinator.resolveDecision({ requestId, decision: "select", optionId: "replace", actor: { kind: "lead", resolvedBy: "lead" } });
     expect(summary().attention.leadHandling).toBeUndefined();
+    expect(ticketNeedsUser(summary())).toBeNull();
+  });
+
+  // #561：Lead 已经答了的决定，在工单详情读的介入接口里也不是待处理，和外面（TicketSummary）一致。
+  it("switch on: the detail's intervention list shows a decision Lead answered as resolved, with no buttons", () => {
+    const { coordinator, itemId, runId, summary, service } = setup({ bypass: true });
+    const requestId = askDecision(coordinator, itemId, runId);
+    const before = service.listKernelInterventions({ itemId }).find((item) => item.id === `decision:${requestId}`)!;
+    expect(before.state).toBe("pending");
+
+    coordinator.resolveDecision({ requestId, decision: "select", optionId: "replace", actor: { kind: "lead", resolvedBy: "lead" } });
+
+    const detail = service.listKernelInterventions({ itemId });
+    expect(detail.filter((item) => item.state === "pending")).toEqual([]);
+    expect(detail.find((item) => item.id === `decision:${requestId}`)).toMatchObject({
+      state: "resolved", resolvedBy: "lead", actions: [], resolution: { kind: "option", optionId: "replace" },
+    });
+    expect(service.listKernelInterventions({ itemId, state: "pending" })).toEqual([]);
     expect(ticketNeedsUser(summary())).toBeNull();
   });
 });

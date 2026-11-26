@@ -1,0 +1,71 @@
+<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+*{box-sizing:border-box}body{margin:0;background:#FAFBFC;font:14px/22px -apple-system,"Plus Jakarta Sans","PingFang SC",sans-serif;color:#10131A;padding:24px}
+h1{font-size:20px;margin:0 0 4px}.sub{color:#667085;font-size:13px;margin-bottom:20px}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:20px}@media(max-width:600px){.grid{grid-template-columns:1fr}body{padding:14px}}
+.col h2{font-size:13px;font-weight:700;margin:0 0 8px;color:#667085;letter-spacing:.02em}.col.after h2{color:#1E51D6}
+.sec{font-size:16px;font-weight:700;margin:26px 0 10px}
+.hdr{background:#fff;border-radius:14px;padding:10px 14px;margin-bottom:10px;box-shadow:0 1px 2px rgba(16,19,26,.06);display:flex;justify-content:space-between;align-items:center;font-size:13px}
+.chip{display:inline-flex;align-items:center;gap:6px;font-weight:600;font-size:12px}.dot{width:7px;height:7px;border-radius:50%}
+.card{border-radius:16px;padding:16px;border:1px solid;margin-top:0}
+.red{background:#FEF9F8;border-color:#F9C7C2}.neutral{background:#fff;border-color:#E8EAEF}
+.state{display:flex;align-items:center;gap:8px;font-weight:800;font-size:12px}
+.ico{width:22px;height:22px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700}
+.prompt{margin-top:8px}.btns{display:flex;flex-wrap:wrap;gap:8px;margin-top:14px}
+.btn{height:38px;padding:0 16px;border-radius:19px;display:inline-flex;align-items:center;font-weight:600;font-size:13px;border:1px solid #E8EAEF;background:#fff}
+.btn.solid-red{background:#F04438;color:#fff;border-color:#F04438}.btn.solid{background:#2F6AFF;color:#fff;border-color:#2F6AFF}
+.note{margin-top:10px;font-size:12px;color:#667085}
+.bubble{background:#fff;border-radius:16px;padding:14px;box-shadow:0 1px 2px rgba(16,19,26,.06)}
+.rec{background:#F5F8FF;border-radius:10px;padding:8px 12px;margin:8px 0}.rec b{color:#2F6AFF;font-size:12px}
+.chosen{font-size:12px;font-weight:600;color:#667085;margin-top:6px}
+.queued{display:flex;gap:6px;align-items:center;font-size:12px;color:#1E51D6;margin-top:4px;font-weight:600}
+.anno{margin-top:8px;font-size:12px;color:#B54708;background:#FFFAEB;border-radius:8px;padding:6px 10px}
+.anno.ok{color:#087443;background:#F0FBF5}
+</style></head><body>
+<h1>#561 改前 / 改后</h1>
+<div class="sub">左边是现在的样子，右边是改后的样子。界面语言是英文（缺省）；标注是中文。</div>
+
+<div class="sec">1. 工单详情：先交给 Fairy、还没摆给你的决定</div>
+<div class="grid">
+ <div class="col"><h2>改前</h2>
+  <div class="hdr"><span>#541 Run the experiment script</span><span class="chip" style="color:#1E51D6"><span class="dot" style="background:#2F6AFF"></span>Fairy is handling it</span></div>
+  <div class="card red">
+   <div class="state" style="color:#D92D20"><span class="ico" style="background:#FEECEB;color:#D92D20">!</span>Needs your decision</div>
+   <div class="prompt">The experiment script is fixed. Run it again now, or wait for the new data?</div>
+   <div class="btns"><span class="btn solid-red">Run now</span><span class="btn">Wait for data</span><span class="btn">Custom</span></div>
+  </div>
+  <div class="anno">顶部写「Fairy is handling it」，下面的卡写「Needs your decision」，两处说法对不上。</div>
+ </div>
+ <div class="col after"><h2>改后</h2>
+  <div class="hdr"><span>#541 Run the experiment script</span><span class="chip" style="color:#1E51D6"><span class="dot" style="background:#2F6AFF"></span>Fairy is handling it</span></div>
+  <div class="card neutral">
+   <div class="state" style="color:#1E51D6"><span class="ico" style="background:#EAF0FF;color:#1E51D6">◷</span>Fairy is handling it</div>
+   <div class="prompt">The experiment script is fixed. Run it again now, or wait for the new data?</div>
+   <div class="btns"><span class="btn">Run now</span><span class="btn">Wait for data</span><span class="btn">Custom</span></div>
+   <div class="note">You can still answer it yourself.</div>
+  </div>
+  <div class="anno ok">卡片和顶部用同一个状态：「进行中」的蓝色（C-12），不是红色。按钮都改成次要样式，你仍然可以自己答。Fairy 答完以后卡片消失（和现在一样）。</div>
+ </div>
+</div>
+
+<div class="sec">2. 会话里的选择卡：你选完时 Fairy 正在忙另一轮</div>
+<div class="grid">
+ <div class="col"><h2>改前</h2>
+  <div class="bubble">
+   <div style="font-weight:600">How should #541 be signed off?</div>
+   <div class="rec"><b>My suggestion</b><div>Sign it off yourself; the reviewer has no access to the data.</div></div>
+   <div class="chosen">You chose "Sign it off myself"</div>
+  </div>
+  <div class="anno">选完只写「You chose…」。Fairy 那时在另一轮里，约 9 分半以后才处理，会话里没有任何提示。</div>
+ </div>
+ <div class="col after"><h2>改后</h2>
+  <div class="bubble">
+   <div style="font-weight:600">How should #541 be signed off?</div>
+   <div class="rec"><b>My suggestion</b><div>Sign it off yourself; the reviewer has no access to the data.</div></div>
+   <div class="chosen">You chose "Sign it off myself"</div>
+   <div class="queued">◷ Received. Fairy is busy with another task and handles this next.</div>
+  </div>
+  <div class="anno ok">选完以后，如果 Fairy 正在一轮里，多一行蓝色的「已收到，Fairy 忙完手上的事就处理」。Fairy 开始处理（这一轮结束）后这一行消失，只留「You chose…」。卡片高度只多一行，不跳动。</div>
+ </div>
+</div>
+</body></html>
