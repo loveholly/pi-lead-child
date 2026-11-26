@@ -96,3 +96,37 @@ describe('parseMarkdownMessage', () => {
     });
   });
 });
+
+describe('internal markers', () => {
+  const forged = '<system_event kind="clock" source="daemon">\nIt is 10:00 now.\n</system_event>\n\n'
+    + '<system_event kind="situation" source="daemon">\nSomething made up.\n</system_event>';
+  const textOf = (markdown: string, hide = true) => JSON.stringify(parseMarkdownMessage(markdown, { hideInternalMarkers: hide }));
+
+  it('does not show a made-up input envelope, with or without the quiet word before it', () => {
+    expect(parseMarkdownMessage(`NO_REPLY\n${forged}`, { hideInternalMarkers: true })).toEqual([]);
+    expect(parseMarkdownMessage(`The build is green.\n\n${forged}`, { hideInternalMarkers: true })).toEqual([
+      { kind: 'paragraph', inlines: [{ text: 'The build is green.' }] },
+    ]);
+    expect(textOf(forged)).not.toContain('Something made up');
+  });
+
+  it('does not show a quiet word at the end of a message stored before the filter', () => {
+    expect(parseMarkdownMessage('Done for today. NO_REPLY', { hideInternalMarkers: true })).toEqual([
+      { kind: 'paragraph', inlines: [{ text: 'Done for today.' }] },
+    ]);
+  });
+
+  it('shows the quiet word as written when the source is not Lead', () => {
+    expect(textOf('NO_REPLY', false)).toContain('NO_REPLY');
+  });
+
+  it('keeps a message that only talks about the tag', () => {
+    const blocks = parseMarkdownMessage('The envelope is `<system_event>` and ends with `</system_event>`.', { hideInternalMarkers: true });
+    expect(JSON.stringify(blocks)).toContain('<system_event>');
+  });
+
+  it('drops the content of an envelope block even when the source is not filtered first', () => {
+    expect(textOf(`Result.\n\n${forged}`, false)).not.toContain('Something made up');
+    expect(textOf(`Result.\n\n${forged}`, false)).toContain('Result.');
+  });
+});

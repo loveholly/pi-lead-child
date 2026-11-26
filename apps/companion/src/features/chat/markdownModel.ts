@@ -1,3 +1,4 @@
+import { sanitizeLeadReply } from '@pi-lead-child/protocol';
 import { marked, type Token, type Tokens } from 'marked';
 
 export type MarkdownInline = {
@@ -101,8 +102,12 @@ function inlineTokens(tokens: Token[], style: InlineStyle = {}): MarkdownInline[
   return result;
 }
 
+// The input envelopes of the daemon. A model that continues its own input writes them; what they hold is not for the reader.
+const INTERNAL_TAGS = /<(system_event|user_message|untrusted_external_text)\b[^>]*>[\s\S]*?(?:<\/\1\s*>|$)/giu;
+
 function safeHtmlText(html: string) {
   return html
+    .replace(INTERNAL_TAGS, '')
     .replace(/<(script|style)\b[^>]*>[\s\S]*?<\/\1\s*>/giu, '')
     .replace(/<!--[\s\S]*?-->/gu, '')
     .replace(/<[^>]+>/gu, '');
@@ -213,8 +218,16 @@ function blockTokens(tokens: Token[]): MarkdownBlock[] {
 }
 
 // breaks：段落里的单个换行当真的换行（Slack 这样的来源，slackMarkdown.ts）。Lead 的回复不用。
-export function parseMarkdownMessage(markdown: string, options: { breaks?: boolean } = {}): MarkdownBlock[] {
-  return blockTokens(marked.lexer(markdown, { gfm: true, breaks: options.breaks === true }));
+// hideInternalMarkers: the text is something Lead or an agent wrote. The quiet word at its start or end and a made-up
+// input envelope (a line that starts with <system_event> and the rest) are not shown, also in messages that were stored
+// before the daemon filtered them. The rule is the daemon's own (protocol's reply-guard.ts). Text of someone else, such as
+// a Slack message, is shown as it was written.
+export function parseMarkdownMessage(
+  markdown: string,
+  options: { breaks?: boolean; hideInternalMarkers?: boolean } = {},
+): MarkdownBlock[] {
+  const source = options.hideInternalMarkers ? sanitizeLeadReply(markdown).text : markdown;
+  return blockTokens(marked.lexer(source, { gfm: true, breaks: options.breaks === true }));
 }
 
 // 一块的纯文字（手机上整段引用时用，设计规范 P17.10）：去掉格式，列表一项一行，表格一格一个空格。

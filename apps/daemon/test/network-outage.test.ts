@@ -67,8 +67,10 @@ function lead(failures: string[] = [], onFailure: () => void = () => {}) {
           if (failure) {
             listener({ type: "message_end", message: { role: "assistant", stopReason: "error", errorMessage: failure, content: [] } });
           } else {
-            listener({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "NO_REPLY" } });
-            listener({ type: "message_end", message: { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "NO_REPLY" }] } });
+            // A user's message is answered with a word. NO_REPLY is for Lead's own rounds: as the answer to a user it is an empty reply.
+            const answer = message.includes("<user_message") ? "Got it." : "NO_REPLY";
+            listener({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: answer } });
+            listener({ type: "message_end", message: { role: "assistant", stopReason: "stop", content: [{ type: "text", text: answer }] } });
           }
         }
       },

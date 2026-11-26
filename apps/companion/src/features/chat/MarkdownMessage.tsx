@@ -32,7 +32,11 @@ export function MarkdownMessage({ markdown, size = 'message-body', tone = 'defau
   size?: FontSizeToken;
   tone?: Tone;
 }) {
-  const blocks = useMemo(() => parseMarkdownMessage(markdown, { breaks }), [breaks, markdown]);
+  // A source that does not take object links is someone else's original text (Slack): show it as written.
+  const blocks = useMemo(
+    () => parseMarkdownMessage(markdown, { breaks, hideInternalMarkers: objectLinks }),
+    [breaks, markdown, objectLinks],
+  );
 
   return (
     <BodySize.Provider value={size}>

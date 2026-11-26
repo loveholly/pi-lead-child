@@ -566,7 +566,8 @@ function stubSessionFactory(options?: {
           }
         } else if (options?.response !== "empty") {
           for (const l of listeners) {
-            l({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: `echo:${msg}` } });
+            // The echo repeats the input without its envelope tags: a model that writes the daemon's envelopes is cut by the reply guard.
+            l({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: `echo:${msg.replace(/<(\/?)(system_event|user_message|untrusted_external_text)\b/gu, "[$1$2")}` } });
           }
         }
         if (options?.toolItemId) {

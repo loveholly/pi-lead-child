@@ -2,6 +2,7 @@
 // 没有用户消息（userText 为空），没有发起的 binding，所有带 chat scope 的客户端都收得到。
 // originKind 以 system: 开头，客户端用 systemTurnLabel 给它们贴标签。
 import type { Locale } from "./i18n.ts";
+import { sanitizeLeadReply } from "./reply-guard.ts";
 import { systemTurnMessages } from "./system-turns.messages.ts";
 
 export const SYSTEM_TURN_ORIGIN_PREFIX = "system:";
@@ -73,13 +74,14 @@ export function systemTurnLabel(originKind: string | null | undefined, locale: L
 // daemon 见到它（或者什么都没说）就不在会话里留下这一轮。
 export const QUIET_REPLY = "NO_REPLY";
 
-// 去掉文字里单独出现的 NO_REPLY（连同它后面的句号）。它是给 daemon 看的，从不出现在会话里。
+// Remove NO_REPLY at the start or the end of the text (with the full stop after it, also several in a row) and drop a made-up
+// input envelope. The quiet word is for the daemon and never shows in the conversation. The rule is in reply-guard.ts: every exit uses it.
 export function stripQuietReply(text: string): string {
-  return text.replace(/\bNO_REPLY\b[。．.!！]?/giu, "").trim();
+  return sanitizeLeadReply(text).text;
 }
 
 export function isQuietReply(text: string): boolean {
-  return stripQuietReply(text) === "";
+  return sanitizeLeadReply(text).silent;
 }
 
 // 没有通知、也没有卡片的 blocker（例如派发重试用完）在会话里只留这一行，daemon 直接写，不经过 Lead：

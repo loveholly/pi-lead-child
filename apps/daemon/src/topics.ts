@@ -23,7 +23,7 @@ import {
   withExternalContent, type LeadEngine, type LeadTurnOrigin, type LeadUserFile,
 } from "@pi-lead-child/lead";
 import {
-  redactSecretText, TOPIC_OPENING_ORIGIN, TOPIC_TURN_ERRORS, TOPIC_USER_ORIGIN_SUFFIX, TOPICS_RESOURCE, type SendTopicMessageResponse,
+  createReplyStreamGuard, redactSecretText, TOPIC_OPENING_ORIGIN, TOPIC_TURN_ERRORS, TOPIC_USER_ORIGIN_SUFFIX, TOPICS_RESOURCE, type ReplyStreamGuard, type SendTopicMessageResponse,
 } from "@pi-lead-child/protocol";
 import {
   appendTopicTurnDelta, completeTopicTurn, createTopicTurn, failTopicTurn, getTopic, getTopicTurn, insertChatFiles,
@@ -71,6 +71,8 @@ interface RunningTurn {
   assistantText: string;
   // The text of the model message that is streaming now (one turn can hold several messages, with tools between).
   messageText: string;
+  // Keeps the daemon's own markers (the quiet word, made-up input envelopes) out of what the topic shows.
+  guard: ReplyStreamGuard;
   error: string | null;
   ranTools: boolean;
 }
@@ -239,7 +241,7 @@ export class TopicRuntime {
     const turn = getTopicTurn(db, turnId);
     const topic = getTopic(db, topicId);
     if (!turn || !topic) return;
-    const running: RunningTurn = { turn, assistantText: "", messageText: "", error: null, ranTools: false };
+    const running: RunningTurn = { turn, assistantText: "", messageText: "", guard: createReplyStreamGuard(), error: null, ranTools: false };
     let live: LiveTopic;
     try {
       live = await this.#ensure(topicId);
@@ -392,14 +394,19 @@ export class TopicRuntime {
     const topicId = live.topicId;
     if (event.type === "message_start" && event.message?.role === "assistant") running.messageText = "";
     if (event.type === "message_update" && event.assistantMessageEvent?.type === "text_delta") {
-      this.#text(running, topicId, String(event.assistantMessageEvent.delta ?? ""));
+      const delta = String(event.assistantMessageEvent.delta ?? "");
+      running.messageText += delta;
+      this.#feed(running, topicId, (guard) => guard.push(delta));
     }
     if (event.type === "message_end" && event.message?.role === "assistant") {
       // A provider that does not stream gives the text only here: send what the deltas did not carry.
       const full = assistantMessageText(event.message);
       if (full.startsWith(running.messageText) && full.length > running.messageText.length) {
-        this.#text(running, topicId, full.slice(running.messageText.length));
+        const rest = full.slice(running.messageText.length);
+        running.messageText = full;
+        this.#feed(running, topicId, (guard) => guard.push(rest));
       }
+      this.#feed(running, topicId, (guard) => guard.end());
       if (event.message.stopReason === "error") {
         running.error = String(event.message.errorMessage || TOPIC_TURN_ERRORS.emptyReply);
         this.#log(topicId, `model error: ${redactSecretText(running.error).slice(0, 200)}`);
@@ -426,9 +433,14 @@ export class TopicRuntime {
     }
   }
 
+  // Text goes through the guard.
+  #feed(running: RunningTurn, topicId: number, next: (guard: ReplyStreamGuard) => string): void {
+    const piece = next(running.guard);
+    if (piece) this.#text(running, topicId, piece);
+  }
+
   #text(running: RunningTurn, topicId: number, delta: string): void {
     if (!delta) return;
-    running.messageText += delta;
     running.assistantText += delta;
     appendTopicTurnDelta(this.#options.db, running.turn.id, delta);
     this.#options.publish({

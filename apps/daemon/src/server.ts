@@ -159,7 +159,7 @@ import {
   partialUiSurface,
   PRESENCE_IDLE_MS, QUIET_REPLY, redactAndCap, redactSecretText, userFacingBacklogText,
   plainObjectLinks,
-  stripQuietReply,
+  createReplyStreamGuard, type ReplyStreamGuard,
   SYSTEM_TURN_ORIGINS,
   isOnBehalfOwnerActionNotification, isOwnerActionNotificationKind, ownerActionRecordText, ownerActionRefOfNotification, ownerActionTurnId,
   CONNECTION_SETTINGS_TAMPERED_KIND, connectionSettingsTamperAlertText, describeConnectionSettings,
@@ -668,6 +668,9 @@ type SystemTurnBuffer = {
   toolEvents: Array<{ event: any; textOffset: number }>;
   lastToolOffset: number;
   drewSurface: boolean;
+  // The last assistant message ended with the quiet word (or only a made-up envelope) and showed nothing else.
+  // The guard removes the quiet word before the text reaches the buffer, so the buffer keeps the fact here.
+  quietAnswer: boolean;
 };
 
 // 系统回合里要写进会话的话。最后一次工具调用之后的回答是 NO_REPLY 时，这一轮没有要告诉用户的话：
@@ -675,8 +678,8 @@ type SystemTurnBuffer = {
 // 「这是 4M token 预算告警，按约定记 no_action，不打扰用户。」，没有一句是在对用户说）。画了卡片的一轮例外。
 function systemTurnSpokenText(buffer: SystemTurnBuffer): string {
   const answer = buffer.text.slice(buffer.lastToolOffset);
-  if (!buffer.drewSurface && /\bNO_REPLY\b/iu.test(answer) && stripQuietReply(answer) === "") return "";
-  return stripQuietReply(buffer.text);
+  if (!buffer.drewSurface && buffer.quietAnswer && answer.trim() === "") return "";
+  return buffer.text.trim();
 }
 
 type DaemonHandle = {
@@ -1160,6 +1163,8 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     sealAt?: "run_end" | "reply";
     // 当前这条助手消息已经流出的文本，用来从 message.completed 里截出还没播出的尾巴。
     messageText?: string;
+    // The guard of this assistant message (projectTicketAgentEvent).
+    replyGuard?: ReplyStreamGuard;
     // 这一轮画了定稿的卡片（render_ui）。没写字也算回答了。
     drewSurface?: boolean;
     // 这一轮调过工具（可能已经建了提醒、工单）：失败了也不自动重试，免得做第二遍。
@@ -1235,6 +1240,8 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
   // 当前这条 assistant 消息已经流过的全文（跨出水口累计）。message_end 的补尾必须拿它来比：
   // 出水口中途改接过之后，任何单个出水口的整轮文本都不再是本条消息的前缀。
   let streamingMessageText = "";
+  // The guard of the assistant message that streams now (feedLeadText). A new one at the start of each round.
+  let leadReplyGuard: ReplyStreamGuard = createReplyStreamGuard();
   let activeTurnError: string | null = null;
   let pendingLeadModelRestart: LeadModelSwitchRequest | null = null;
   // 工单 agent 的轮次，按 runId 记：正在接文本的那一条。
@@ -2007,20 +2014,24 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     }
     const entry = ticketAgentTurns.get(runId);
     if (!entry) return;
+    // The ticket agent's words pass the same guard: the quiet word and made-up input envelopes stay out of the conversation.
+    // A second assistant message in the same turn starts on its own paragraph, so two messages do not run into one sentence.
+    const guard = (entry.replyGuard ??= createReplyStreamGuard());
+    const publishGuarded = (next: (guard: ReplyStreamGuard) => string) => {
+      const first = guard.atStart;
+      const piece = next(guard);
+      if (piece) publishTurnText(entry, first && entry.assistantText.trim() ? `\n\n${piece}` : piece);
+    };
     if (event.type === "message.delta") {
-      // 同一轮里的第二条助手消息开始了：先空一行，免得两条消息粘成一句。
-      if (!entry.messageText && entry.assistantText.trim()) publishTurnText(entry, "\n\n");
       entry.messageText = `${entry.messageText ?? ""}${event.delta}`;
-      publishTurnText(entry, event.delta);
+      publishGuarded((g) => g.push(event.delta));
       return;
     }
     if (event.type === "message.completed") {
       const streamed = entry.messageText ?? "";
       const suffix = event.text.startsWith(streamed) ? event.text.slice(streamed.length) : event.text;
-      if (suffix) {
-        if (!streamed && entry.assistantText.trim()) publishTurnText(entry, "\n\n");
-        publishTurnText(entry, suffix);
-      }
+      if (suffix) publishGuarded((g) => g.push(suffix));
+      publishGuarded((g) => g.end());
       entry.messageText = "";
       if (entry.sealAt === "run_end") return;
       if (entry.assistantText.trim()) sealChannelTurn(entry);
@@ -2324,6 +2335,26 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       materializeSystemTurn();
     }
     if (activeChannelTurn) publishTurnText(activeChannelTurn, text);
+  }
+
+  // Every word of an assistant message goes through this guard before it reaches the conversation, the legacy stream
+  // clients, the AiSH stream, the stored turn or the Slack reply. It removes the quiet word and made-up input envelopes.
+  function feedLeadText(next: (guard: ReplyStreamGuard) => string): void {
+    const text = next(leadReplyGuard);
+    if (!text) return;
+    broadcast({ type: "delta", text });
+    aishStream?.append(text);
+    routeAssistantText(text);
+  }
+
+  // The assistant message is complete: let out the held tail. When the message showed nothing because it held only the
+  // quiet word (or a made-up envelope), the answer of a system round is quiet.
+  function finishLeadMessage(): void {
+    const hadText = leadReplyGuard.open;
+    feedLeadText((guard) => guard.end());
+    if (!hadText || !systemTurnBuffer || pendingSteerSink) return;
+    if (leadReplyGuard.emitted > 0) systemTurnBuffer.quietAnswer = false;
+    else if (leadReplyGuard.removed) systemTurnBuffer.quietAnswer = true;
   }
 
   // 插话接过出水口（会话不报告输入送到的时刻时，在插话之后 Lead 第一次开口时改接）。
@@ -3975,10 +4006,8 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     }
     if (event.type === "message_update" && event.assistantMessageEvent?.type === "text_delta") {
       const delta = String(event.assistantMessageEvent.delta ?? "");
-      broadcast({ type: "delta", text: delta });
-      aishStream?.append(delta);
       streamingMessageText += delta;
-      routeAssistantText(delta);
+      feedLeadText((guard) => guard.push(delta));
     }
     if (event.type === "message_update") streamRenderUi(event.assistantMessageEvent);
     if (event.type === "tool_execution_end") sched.dispatch({ type: "tool.end", id: String(event.toolCallId) });
@@ -3997,6 +4026,8 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       const args = JSON.stringify(event.args ?? {});
       broadcast({ type: "tool", name: event.toolName, args: args.length > 120 ? args.slice(0, 120) + "…" : args });
     }
+    // A tool starts: the assistant message that called it has ended. Let out what the guard held back; later text is a new message.
+    if (event.type === "tool_execution_start") finishLeadMessage();
     let handled = false;
     if (event.type.startsWith("tool_execution_")) {
       if (pendingSteerSink && !activeChannelTurn) {
@@ -4007,6 +4038,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
         const buffer = systemTurnBuffer;
         handled = true;
         buffer.lastToolOffset = buffer.text.length;
+        buffer.quietAnswer = false;
         if (event.toolName === "render_ui") buffer.drewSurface = true;
         if (!activeChannelTurn && LEAD_QUIET_TOOLS.has(String(event.toolName))) {
           // 只读、笔记工具先攒着：这一轮最后可能不落成。
@@ -4115,7 +4147,11 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       // 是 fullText 的前缀：一轮里有多条 assistant 消息（补尾会静默失效），以及出水口被插话
       // 中途改接（前半段记在被打断的那轮，后半段记在插话那轮）。补出来的这一段照样走
       // routeAssistantText——若插话之后一个 delta 都没来过，这段就是插话之后的第一句话。
-      if (fullText.startsWith(streamed)) routeAssistantText(fullText.slice(streamed.length));
+      if (fullText.startsWith(streamed) && fullText.length > streamed.length) {
+        const rest = fullText.slice(streamed.length);
+        feedLeadText((guard) => guard.push(rest));
+      }
+      finishLeadMessage();
     }
     if (event.type === "compaction_start") {
       compactionTimedOut = false;
@@ -4825,7 +4861,8 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     pendingSystemOrigin = options.system ?? null;
     pendingSystemReuseTurnId = options.system ? options.reuseTurnId ?? null : null;
     pendingSystemRespondsTo = null;
-    systemTurnBuffer = options.system ? { text: "", toolEvents: [], lastToolOffset: 0, drewSurface: false } : null;
+    systemTurnBuffer = options.system ? { text: "", toolEvents: [], lastToolOffset: 0, drewSurface: false, quietAnswer: false } : null;
+    leadReplyGuard = createReplyStreamGuard();
     systemEntryThisTurn = null;
     streamingMessageText = "";
     activeTurnError = null;
@@ -4954,6 +4991,8 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       // 这次运行结束时还在 pi 队列里的输入：交出去时 pi 已经过了最后一次取队列。用户的消息转为下一轮的输入，
       // 插进来的系统事件不算交给了 Lead（工单 04）。
       takeLeftoverInputs();
+      // A message that never got its message_end (aborted): let out the few characters the guard held back.
+      finishLeadMessage();
       // 系统回合说了要告诉用户的话（或者改了外部状态）才落成一轮；什么都没有就不留痕迹。
       settleSystemTurnBuffer();
       if (stoppedByUser(sched.state)) {
@@ -5049,6 +5088,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       }
       const failedSteer = pendingSteerSink;
       if (!pendingSteerSink) {
+        finishLeadMessage();
         settleSystemTurnBuffer({ force: true });
         materializeSystemTurn();
       } else {

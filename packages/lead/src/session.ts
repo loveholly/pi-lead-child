@@ -64,6 +64,7 @@ import type { ModelHoldPort } from "./model-hold.js";
 import { createCredibilityExtension } from "./credibility/extension.js";
 import { LEAD_CODEMODE_TOOL, LEAD_HAND_TOOLS, leadHandsExtension } from "./hands.js";
 import { handbookGuardExtension } from "./handbook-guard.js";
+import { replyHistoryExtension } from "./reply-history.js";
 import { leadSchedulerExtension, type LeadSchedulerHooks } from "./scheduler/extension.js";
 import type { LeadHandoffDeps } from "./hand-off-tool.js";
 import { toolSoftLimitMs, type BackgroundJobRegistry, type ForegroundWaits, type LeadBackgroundJobs } from "./background-jobs.js";
@@ -516,6 +517,8 @@ export async function createLeadSession(opts: {
         }),
       },
       { name: "plc-environment", factory: environmentExtension, hidden: true },
+      // Made-up input envelopes (<system_event> and so on) leave the session history: every later request sends the history to the model again, and a model that reads them tends to write them again.
+      { name: "plc-reply-history", factory: replyHistoryExtension, hidden: true },
       // 订阅账号的每次请求（D5）：失败、成功都记下（重试也算一次）。按回答消息自己的 provider 记，不看 ctx.model：
       // pi-multi-pass 在同一个 agent_end 里可能已经换了账号。
       ...(opts.subscriptionAccounts ? [{
