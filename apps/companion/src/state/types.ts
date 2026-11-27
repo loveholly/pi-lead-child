@@ -511,6 +511,9 @@ export interface InterventionCommandState {
   retryable: boolean;
 }
 
+/** The panels that an entry in the conversation opens: the topic panel, the ticket detail, the agenda in the work rail. */
+export type PanelNudgeTarget = 'topic' | 'thread' | 'agenda';
+
 export interface WorkspaceData {
   hydrated: boolean;
   selectedSessionId: string | null;
@@ -522,6 +525,11 @@ export interface WorkspaceData {
   topicOpenId: number | null;
   /** For each topic, the last turn this device showed. A later turn marks the topic as having a new reply. */
   topicSeenByTopic: Record<number, string>;
+  /**
+   * You clicked an entry that opens a panel (a topic, a ticket detail, the agenda), and that panel already shows it, so
+   * nothing else would change (#590). The panel flashes once (theme Q-9). seq goes up with each such click.
+   */
+  panelNudge: { panel: PanelNudgeTarget; seq: number } | null;
   // 右侧的视图面板开着（P16.2：和工单详情共用右侧的位置，打开一个时另一个收起）。手机上是盖在内容上的面板。
   viewsOpen: boolean;
   // 视图面板上选中的视图（tab）。null 时是第一个。只记在这台设备上，不同步。

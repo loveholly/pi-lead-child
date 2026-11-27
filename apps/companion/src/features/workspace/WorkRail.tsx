@@ -1,5 +1,5 @@
 import {
-  Box, Chip, Column, IconButton, LeadAvatar, Row, ScrollArea, SegmentedControl, SwitchTransition, Text, TextField,
+  Box, Chip, Column, Flash, IconButton, LeadAvatar, Row, ScrollArea, SegmentedControl, SwitchTransition, Text, TextField,
   type FairyEyeState, type FairyEyeTone, type LeadAvatarSource,
 } from '@pi-lead-child/components';
 import type {
@@ -47,6 +47,8 @@ type WorkRailProps = {
   timeline?: TimelineResponse | null;
   onUpdateMilestone?: (milestoneId: number, patch: MilestonePatch) => Promise<void>;
   onUpdateAgendaEntry?: (entryId: number, patch: AgendaEntryPatch) => Promise<void>;
+  // 变成一个新的值时日程闪一下（主题 Q-9）：左栏已经开着日程，你又点了打开日程的入口（#590）。
+  agendaFlash?: number | null;
   loading?: boolean;
   view?: RailView;
   onViewChange?: (view: RailView) => void;
@@ -97,6 +99,7 @@ export function WorkRail({
   timeline = null,
   onUpdateMilestone,
   onUpdateAgendaEntry,
+  agendaFlash = null,
   loading = false,
   view: controlledView,
   onViewChange,
@@ -308,12 +311,17 @@ export function WorkRail({
               <ProjectList overviews={projectOverviews} onSelect={openProject} onSetArchived={onSetProjectArchived} />
             ) : null}
             {view === 'agenda' ? (
-              <AgendaTimeline
-                timeline={timeline}
-                onOpenTicket={(ticketId) => onSelectTicket(String(ticketId))}
-                onUpdateMilestone={onUpdateMilestone}
-                onUpdateAgendaEntry={onUpdateAgendaEntry}
-              />
+              <Box position="relative">
+                <Flash signal={agendaFlash} testID="agenda-flash" />
+                <Box position="relative">
+                  <AgendaTimeline
+                    timeline={timeline}
+                    onOpenTicket={(ticketId) => onSelectTicket(String(ticketId))}
+                    onUpdateMilestone={onUpdateMilestone}
+                    onUpdateAgendaEntry={onUpdateAgendaEntry}
+                  />
+                </Box>
+              </Box>
             ) : null}
           </Column>
         </ScrollArea>

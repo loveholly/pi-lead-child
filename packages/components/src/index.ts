@@ -199,6 +199,8 @@ export { RecordRow } from './lists/RecordRow';
 export type { RecordRowProps } from './lists/RecordRow';
 
 // 动效
+export { Flash, flashTimings } from './motion/Flash';
+export type { FlashProps } from './motion/Flash';
 export { Grow, growTimings } from './motion/Grow';
 export type { GrowProps } from './motion/Grow';
 export { Appear, ContentSwap, LayoutTransition, SlidePanel, SwitchTransition } from './motion/Motion';

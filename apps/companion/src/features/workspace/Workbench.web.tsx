@@ -38,7 +38,7 @@ export default function Workbench() {
   const selectTicketState = useWorkspaceStore((state) => state.selectTicket);
   const openRail = useWorkspaceStore((state) => state.openRail);
   const closeRail = useWorkspaceStore((state) => state.closeRail);
-  const openThread = useWorkspaceStore((state) => state.openThread);
+  const showTicket = useWorkspaceStore((state) => state.showTicket);
   const closeThread = useWorkspaceStore((state) => state.closeThread);
   const viewsOpen = useWorkspaceStore((state) => state.viewsOpen);
   const openViews = useWorkspaceStore((state) => state.openViews);
@@ -72,10 +72,11 @@ export default function Workbench() {
     return <WorkspaceBootShell />;
   }
 
+  // 桌面上和会话里的工单入口走同一个 showTicket：详情已经开着这张工单时顶栏闪一下（#590）。
   const selectTicket = (ticketId: string) => {
-    selectTicketState(Number(ticketId));
-    if (desktop) openThread();
+    if (desktop) showTicket(Number(ticketId));
     else {
+      selectTicketState(Number(ticketId));
       setTicketReturnDestination(compactDestination);
       setCompactDestination('tickets');
       openCompactPanel('thread');

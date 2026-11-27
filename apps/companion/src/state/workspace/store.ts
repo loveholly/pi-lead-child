@@ -6,6 +6,7 @@ import type {
   CompactDestination,
   CompactPanel,
   InterventionCommandState,
+  PanelNudgeTarget,
   RailView,
   TicketFilter,
   TicketGroupId,
@@ -23,6 +24,12 @@ export interface WorkspaceStoreState extends WorkspaceData {
   closeThread(): void;
   openTopic(topicId: number): void;
   closeTopic(): void;
+  /** Show a ticket in the detail on the right (desktop web). When it shows that ticket already, the detail flashes. */
+  showTicket(ticketId: number): void;
+  /** Show the agenda in the work rail (desktop web). When it shows the agenda already, the agenda flashes. */
+  showAgenda(): void;
+  /** The panel already shows what you clicked: it flashes once (theme Q-9, #590). */
+  nudgePanel(panel: PanelNudgeTarget): void;
   markTopicSeen(topicId: number, turnId: string): void;
   noteTopics(topics: ReadonlyArray<{ id: number; lastTurnId: string | null }>): void;
   openViews(): void;
@@ -61,6 +68,7 @@ export function createInitialWorkspaceData(hydrated = false): WorkspaceData {
     threadOpen: false,
     topicOpenId: null,
     topicSeenByTopic: {},
+    panelNudge: null,
     viewsOpen: false,
     selectedView: null,
     ticketChatExpandedId: null,
@@ -115,7 +123,32 @@ export function createWorkspaceStore() {
       const current = get();
       if (current.topicOpenId !== topicId || current.threadOpen || current.viewsOpen || current.compactPanel !== null) {
         set({ topicOpenId: topicId, threadOpen: false, viewsOpen: false, compactPanel: null });
+        return;
       }
+      // The panel shows this topic already: a click would change nothing, so the panel flashes (#590).
+      get().nudgePanel('topic');
+    },
+    showTicket: (ticketId) => {
+      const current = get();
+      if (current.selectedTicketId === ticketId && current.threadOpen && !current.viewsOpen && current.topicOpenId === null
+        && current.compactPanel === null) {
+        current.nudgePanel('thread');
+        return;
+      }
+      current.selectTicket(ticketId);
+      get().openThread();
+    },
+    showAgenda: () => {
+      const current = get();
+      if (current.railOpen && current.railView === 'agenda') {
+        current.nudgePanel('agenda');
+        return;
+      }
+      current.setRailView('agenda');
+      get().openRail();
+    },
+    nudgePanel: (panel) => {
+      set({ panelNudge: { panel, seq: (get().panelNudge?.seq ?? 0) + 1 } });
     },
     closeTopic: () => {
       if (get().topicOpenId !== null) set({ topicOpenId: null });

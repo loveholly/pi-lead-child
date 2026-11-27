@@ -1,6 +1,7 @@
 import type { ReactNode } from 'react';
 
 import { IconButton } from '../controls/Button';
+import { Flash } from '../motion/Flash';
 import { Box, Column, Row } from '../primitives/layout';
 import { Text } from '../primitives/Text';
 import { textLeading } from '../theme/tokens';
@@ -28,6 +29,8 @@ export type DetailHeaderProps = {
   backLabel?: string;
   /** 手机全屏页：上面的留白更紧一些（左右的留白跟着外面的密度区域）。 */
   dense?: boolean;
+  /** 变成一个新的值时头部闪一下（主题 Q-9）：面板已经开着、你又点了打开它的入口（#590）。 */
+  flash?: number | null;
   testID?: string;
 };
 
@@ -35,7 +38,7 @@ export type DetailHeaderProps = {
 // 头部放在滚动区外，往下翻也知道在看哪一张；滚动以后由调用方传 compact，收成一行。
 export function DetailHeader({
   id, title, badges, project, compact = false, more, onClose, closeLabel: closeLabelProp, onBack, backLabel: backLabelProp, dense = false,
-  testID,
+  flash = null, testID,
 }: DetailHeaderProps) {
   const m = useMessages(displayMessages);
   const closeLabel = closeLabelProp ?? m.close;
@@ -59,8 +62,10 @@ export function DetailHeader({
       borderBottomWidth={1}
       borderBottomColor="border-soft"
       bg="surface"
+      position="relative"
     >
-      <Row items="flex-start" gap="inline-item">
+      <Flash signal={flash} testID={testID ? `${testID}-flash` : undefined} />
+      <Row items="flex-start" gap="inline-item" position="relative">
         {back ? lineBox(back) : null}
         {id ? <Text testID={testID ? `${testID}-id` : undefined} shrink={0} size="meta" mono weight="bold" tone="secondary">{id}</Text> : null}
         <Box flex={1} minW={0}>
@@ -72,7 +77,7 @@ export function DetailHeader({
         {close ? lineBox(close) : null}
       </Row>
       {compact || (!badges && !project) ? null : (
-        <Row testID={testID ? `${testID}-meta` : undefined} minH={24} flexWrap="wrap" items="center" gap="inline-item">
+        <Row testID={testID ? `${testID}-meta` : undefined} minH={24} flexWrap="wrap" items="center" gap="inline-item" position="relative">
           {badges}
           {project ? (
             <Row items="center" gap="icon-label" minW={0}>
