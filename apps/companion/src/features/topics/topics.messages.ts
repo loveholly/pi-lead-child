@@ -39,6 +39,11 @@ export const topicsMessages = defineMessages({
     newReply: 'New reply',
     youOpened: (title: string) => `You opened the topic "${title}"`,
     broughtBack: 'Brought back',
+    // The "Brought back" row opens a panel in place with the whole conclusion (#590).
+    conclusionOf: (title: string) => `Conclusion of the topic ${title}`,
+    showConclusion: (title: string) => `Show the conclusion of the topic ${title}`,
+    hideConclusion: (title: string) => `Hide the conclusion of the topic ${title}`,
+    openThisTopic: 'Open the topic',
     // The work rail.
     railTitle: 'Topics',
     railEmpty: 'No open topics',
@@ -84,6 +89,10 @@ export const topicsMessages = defineMessages({
     newReply: '新回复',
     youOpened: (title) => `你开了话题「${title}」`,
     broughtBack: '已带回',
+    conclusionOf: (title) => `话题「${title}」的结论`,
+    showConclusion: (title) => `展开话题「${title}」的结论`,
+    hideConclusion: (title) => `收起话题「${title}」的结论`,
+    openThisTopic: '打开话题',
     railTitle: '话题',
     railEmpty: '没有开着的话题',
     failed: '这条消息没有得到回答。',

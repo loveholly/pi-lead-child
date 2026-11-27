@@ -127,6 +127,8 @@ export type TicketThreadProps = {
   ticket: Ticket;
   onClose: () => void;
   standalone?: boolean;
+  /** 变成一个新的值时顶栏闪一下：详情已经开着这张工单，你又点了打开它的入口（主题 Q-9，#590）。 */
+  flash?: number | null;
   showComposer?: boolean;
   timing?: { elapsedMs: number | null | undefined; activeExecutionMs?: number | null; statusDurationMs?: number | null };
   checkpoints?: CheckpointPresentationInput[];
@@ -254,6 +256,7 @@ export function TicketThread({
   ticket,
   onClose,
   standalone = false,
+  flash = null,
   showComposer,
   timing,
   checkpoints = [],
@@ -480,6 +483,7 @@ export function TicketThread({
       onBack={onClose}
       onClose={standalone ? undefined : onClose}
       closeLabel={m.closeDetail}
+      flash={flash}
       more={(
         <HeaderMenu
           link={ticketLink}

@@ -28,6 +28,8 @@ export function TopicPanel({ topicId, onClose, standalone = false }: { topicId: 
   const messageIds = useTopicMessageIds(topicId);
   const connected = useConnectionState() === 'connected';
   const markSeen = useWorkspaceStore((state) => state.markTopicSeen);
+  // The panel shows this topic already and you clicked an entry that opens it: the header flashes (#590, theme Q-9).
+  const flash = useWorkspaceStore((state) => (state.panelNudge?.panel === 'topic' ? state.panelNudge.seq : null));
   const [error, setError] = useState<string | null>(null);
   // The model on the input (theme 11.18): the topic's own model, or the main conversation's when it has none.
   // The picker changes this topic only (topic.set_model).
@@ -68,6 +70,7 @@ export function TopicPanel({ topicId, onClose, standalone = false }: { topicId: 
       <DetailHeader
         testID="topic-panel-header"
         title={title}
+        flash={flash}
         more={topic ? (
           <TopicMenu
             topic={topic}

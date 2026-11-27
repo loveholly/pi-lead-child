@@ -38,6 +38,8 @@ const COMPILED_IN_TESTS = [
   '/src/features/settings/ModelLibrary.tsx',
   '/src/features/settings/ModelSection.tsx',
   '/src/features/settings/ModelPicker.tsx',
+  // #590: the "Brought back" row of a topic reads a nullable topic in its click handlers.
+  '/src/features/topics/TopicReferences.tsx',
 ];
 // @babel/core 没有类型声明（仓库里没有 @types/babel__core）：用 require 取，只声明这里用到的那一个函数。
 const { transformAsync } = createRequire(import.meta.url)('@babel/core') as {

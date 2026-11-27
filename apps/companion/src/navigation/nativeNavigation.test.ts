@@ -2,6 +2,8 @@
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 
+import { createWorkspaceStore } from '../state/workspace/store';
+
 const source = (relativePath: string) => readFileSync(new URL(relativePath, import.meta.url), 'utf8');
 
 describe('native workspace navigation', () => {
@@ -72,9 +74,14 @@ describe('native workspace navigation', () => {
     const webWorkbench = source('../features/workspace/Workbench.web.tsx');
 
     expect(webWorkbench).toContain('<LayoutTransition testID="workspace-session"');
-    expect(webWorkbench).toContain('if (desktop) openThread()');
+    // The desktop opens the ticket detail through the store's showTicket (#590): it opens the thread, which changes the
+    // session column's width that LayoutTransition animates; when the detail already shows the ticket, it flashes.
+    expect(webWorkbench).toContain('if (desktop) showTicket(Number(ticketId))');
     expect(webWorkbench).toContain("openCompactPanel('thread')");
     expect(webWorkbench).toContain('setTicketReturnDestination(compactDestination)');
+    const store = createWorkspaceStore();
+    store.getState().showTicket(66);
+    expect(store.getState()).toMatchObject({ selectedTicketId: 66, threadOpen: true, viewsOpen: false, topicOpenId: null });
   });
 
   it('shows an explicit not-found state for an invalid ticket deep link', () => {

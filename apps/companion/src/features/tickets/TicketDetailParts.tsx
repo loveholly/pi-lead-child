@@ -1,5 +1,5 @@
 import {
-  Box, Column, FloatingButton, FloatingSheet, Icon, Popover, Pressable, Row, Text, useBreakpoint,
+  Box, Column, Flash, FloatingButton, FloatingSheet, Icon, Popover, Pressable, Row, Text, useBreakpoint,
   type ColorToken, type IconName, type TextTone,
 } from '@pi-lead-child/components';
 import { useMemo, useState, type ReactNode } from 'react';
@@ -15,7 +15,9 @@ import { ticketDetailLayoutMessages } from './ticketDetailLayout.messages';
 // ── 顶栏 ──
 // 手机：左边返回圆钮，右边「⋯」圆钮；在页面顶部时中间是空的（工单号不好记），滚过大标题以后中间出现标题，下面一条细线。
 // 桌面：高 48，左边面包屑「项目 › 工单 #N」，右边「⋯」和关闭，下面一条细线。
-export function DetailTopBar({ phone, project, displayId, title, scrolled, more, onBack, onClose, closeLabel }: {
+// flash：变成一个新的值时顶栏闪一下（主题 Q-9b）：详情已经开着这张工单，你又点了打开它的入口（#590）。
+// 只在桌面：手机上详情盖住会话，打开它的入口这时看不到。
+export function DetailTopBar({ phone, project, displayId, title, scrolled, more, onBack, onClose, closeLabel, flash = null }: {
   phone: boolean;
   project: string | null;
   displayId: string;
@@ -25,6 +27,7 @@ export function DetailTopBar({ phone, project, displayId, title, scrolled, more,
   onBack: () => void;
   onClose?: () => void;
   closeLabel: string;
+  flash?: number | null;
 }) {
   const m = useMessages(ticketDetailLayoutMessages);
   if (phone) {
@@ -43,14 +46,19 @@ export function DetailTopBar({ phone, project, displayId, title, scrolled, more,
     );
   }
   return (
-    <Row testID="ticket-thread-header" items="center" gap="inline-item" px="page-x" minH={48} borderBottomWidth={1} borderBottomColor="border-soft">
-      <Text flex={1} minW={0} size="secondary" tone="secondary" numberOfLines={1}>{m.breadcrumb(project, displayId)}</Text>
-      {more}
-      {onClose ? (
-        <Pressable testID="ticket-thread-header-close" aria-label={closeLabel} onPress={onClose} rounded="sm" p="pill-x" feedback="highlight">
-          <Icon name="close" size={16} color="text-secondary" />
-        </Pressable>
-      ) : null}
+    <Row testID="ticket-thread-header" items="center" px="page-x" minH={48} borderBottomWidth={1} borderBottomColor="border-soft"
+      position="relative">
+      <Flash signal={flash} testID="ticket-thread-header-flash" />
+      {/* 内容画在闪的底上面（Flash 的说明）。 */}
+      <Row flex={1} minW={0} items="center" gap="inline-item" position="relative">
+        <Text flex={1} minW={0} size="secondary" tone="secondary" numberOfLines={1}>{m.breadcrumb(project, displayId)}</Text>
+        {more}
+        {onClose ? (
+          <Pressable testID="ticket-thread-header-close" aria-label={closeLabel} onPress={onClose} rounded="sm" p="pill-x" feedback="highlight">
+            <Icon name="close" size={16} color="text-secondary" />
+          </Pressable>
+        ) : null}
+      </Row>
     </Row>
   );
 }

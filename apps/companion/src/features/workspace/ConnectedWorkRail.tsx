@@ -62,6 +62,8 @@ export function ConnectedWorkRail({
     [allNotifications, ownBindingId],
   );
   const railView = useWorkspaceStore((state) => state.railView);
+  // 左栏已经开着日程、你又点了打开日程的入口：日程闪一下（store 的 showAgenda，#590）。
+  const agendaFlash = useWorkspaceStore((state) => (state.panelNudge?.panel === 'agenda' ? state.panelNudge.seq : null));
   const ticketQuery = useWorkspaceStore((state) => state.ticketQuery);
   const ticketFilter = useWorkspaceStore((state) => state.ticketFilter);
   const ticketProject = useWorkspaceStore((state) => state.ticketProject);
@@ -158,6 +160,7 @@ export function ConnectedWorkRail({
       onSetProjectArchived={(projectId, archived) => runtime.setProjectArchived(projectId, archived)}
       timeline={timeline}
       onUpdateMilestone={(milestoneId, patch) => runtime.updateMilestone(milestoneId, patch)}
+      agendaFlash={agendaFlash}
       onUpdateAgendaEntry={async (entryId, patch) => { await runtime.performUiAction('agenda_entry', String(entryId), 'update', { input: patch }); }}
       view={view ?? railView}
       onViewChange={(nextView) => {

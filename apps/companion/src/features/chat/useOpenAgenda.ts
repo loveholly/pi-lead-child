@@ -6,11 +6,12 @@ import { useWorkspaceStore } from '../../state/CompanionStateProvider';
 // 打开日程（提醒的家）。原生端进日程 tab；web 桌面打开左栏并切到日程；web 手机收起盖在上面的面板（例如工单详情），
 // 切到日程页（和底部导航点「日程」一样）。只切 railView 不够：左栏关着、或者面板盖着时用户看不到日程（发布评审 3688968）。
 // 不改选中的工单，也不打开工单详情：提醒不是工单。
+// 桌面上左栏已经开着日程时，点了也不会有变化：日程闪一下（主题 Q-9，#590；store 的 showAgenda）。
 export function useOpenAgenda(): () => void {
   const { desktop } = useBreakpoint();
   const router = useRouter();
   const setRailView = useWorkspaceStore((state) => state.setRailView);
-  const openRail = useWorkspaceStore((state) => state.openRail);
+  const showAgenda = useWorkspaceStore((state) => state.showAgenda);
   const closeCompactPanel = useWorkspaceStore((state) => state.closeCompactPanel);
   const setCompactDestination = useWorkspaceStore((state) => state.setCompactDestination);
   return () => {
@@ -18,11 +19,11 @@ export function useOpenAgenda(): () => void {
       router.push('/agenda');
       return;
     }
-    setRailView('agenda');
     if (desktop) {
-      openRail();
+      showAgenda();
       return;
     }
+    setRailView('agenda');
     closeCompactPanel();
     setCompactDestination('agenda');
   };
