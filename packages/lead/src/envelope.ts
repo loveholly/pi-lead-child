@@ -358,8 +358,20 @@ export function leadMessageEventBlock(event: LeadEventLike, options: { contextIn
   // 回复绑定到这条消息和它的对话（工单 #286）：写明对话的编号，reply_to_source 要照抄，对不上时不发。
   const replyConversation = messageEventConversationKey(payload);
   if (replyConversation) {
-    lines.push(`这条消息在对话「${capped(textOf(conversation.label) ?? replyConversation, FIELD_MAX)}」（conversation=${replyConversation}）。`
+    // 工单 #589：写明在主对话还是 thread 里、回复落在哪里。同一个私信的主对话和 thread 名字一样，光看名字分不出。
+    const where = payload.thread === true ? "的一个 thread 里，回复进这个 thread"
+      : payload.thread === false ? "的主对话里，回复挂在这条消息下面" : "";
+    lines.push(`这条消息在对话「${capped(textOf(conversation.label) ?? replyConversation, FIELD_MAX)}」${where}（conversation=${replyConversation}）。`
       + `回复它用 reply_to_source（event=${event.seq}，conversation=${replyConversation}），话只按这个对话里的消息写。`);
+  }
+  const siblings = siblingsOf(payload.siblings);
+  if (siblings.length) {
+    lines.push(`同一个对话里还有 ${siblings.length} 张没结束的卡，回复前先分清这段话回的是哪一条（对方最后一句话在下面的外部标签里）：`);
+    for (const sibling of siblings) {
+      lines.push(`- 卡 #${sibling.cardId}：${capped(sibling.sender, FIELD_MAX)}${sibling.at ? ` ${sibling.at}` : ""} 在`
+        + `${sibling.thread ? " thread 里，回复进那个 thread" : "主对话里，回复挂在那条消息下面"}；`
+        + `${sibling.messageEvent ? `消息事件 #${sibling.messageEvent}，` : ""}conversation=${sibling.conversation}`);
+    }
   }
   // 怎样处理外部消息写在 skill channel-replies 里（2026-10-28 从系统提示词拆出去）：事件自己点名，Lead 不靠想起来去读。
   lines.push(CHANNEL_SKILL_HINT);
@@ -400,7 +412,26 @@ export function leadMessageEventBlock(event: LeadEventLike, options: { contextIn
     source: textOf(payload.sourceLabel) ?? textOf(payload.source) ?? "外部通道",
     sender: textOf(sender.name) ?? "对方", trust, conversation: textOf(conversation.label) ?? undefined,
   }, typeof payload.text === "string" ? payload.text : "");
-  return [head, message, ...(context ? leadContextPackBlocks(context) : [])].join("\n");
+  const siblingTexts = siblings.map((sibling) => leadExternalText({
+    source: textOf(payload.sourceLabel) ?? textOf(payload.source) ?? "外部通道", sender: sibling.sender,
+    conversation: `卡 #${sibling.cardId}（${sibling.thread ? "thread" : "主对话"}）`, part: "sibling_last_message",
+  }, sibling.text));
+  return [head, message, ...siblingTexts, ...(context ? leadContextPackBlocks(context) : [])].join("\n");
+}
+
+interface MessageSibling { cardId: number; conversation: string; thread: boolean; sender: string; at: string | null; messageEvent: number | null; text: string }
+
+// 消息事件上同一个对话里别的没结束的卡（工单 #589）。形状不对的项跳过。
+function siblingsOf(value: unknown): MessageSibling[] {
+  return (Array.isArray(value) ? value.filter(isRecord) : []).flatMap((item) => {
+    const cardId = countOf(item.cardId);
+    const conversation = textOf(item.conversation);
+    if (cardId <= 0 || !conversation) return [];
+    return [{
+      cardId, conversation, thread: item.thread === true, sender: textOf(item.sender) ?? "对方", at: textOf(item.at),
+      messageEvent: countOf(item.messageEvent) || null, text: typeof item.text === "string" ? item.text : "",
+    }];
+  }).slice(0, 4);
 }
 
 // ── 上下文包（统一消息事件 spec D5，工单 04）──────────────────────────────────────────────

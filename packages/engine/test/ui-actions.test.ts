@@ -646,7 +646,9 @@ describe("channel conversations", () => {
         reacts.push([conversationId, input]);
         return { conversation: conversationId, label: "oliver.z的私信", objectKey: "slack:D0OLIVER:main", seq: 7, emoji: input.emoji, card: null };
       },
-      openCards: () => [{ id: 3, sender: "Ivy Lin", conversation: "Ivy Lin的私信", state: "open", since: "2026-10-26T08:35:00.000Z" }],
+      openCards: () => [{
+        id: 3, sender: "Ivy Lin", conversation: "Ivy Lin的私信", state: "open", since: "2026-10-26T08:35:00.000Z", conversationKey: "slack:D0IVYLIN:main",
+      }],
     };
     return { channelMessages, sends, reacts };
   }
@@ -703,7 +705,7 @@ describe("channel conversations", () => {
     // 发完自查：还在等用户的卡（只有结构化的事实），和怎么结束它们。
     expect(outcome.forLead).toEqual({
       sent: { conversation: "slack:@U0OLIVER", label: "oliver.z的私信", objectKey: "slack:D0OLIVER:main", text: input.text, card: null, outcome: "sent" },
-      openCards: [{ id: 3, sender: "Ivy Lin", conversation: "Ivy Lin的私信", state: "open", since: "2026-10-26T08:35:00.000Z" }],
+      openCards: [{ id: 3, sender: "Ivy Lin", conversation: "Ivy Lin的私信", state: "open", since: "2026-10-26T08:35:00.000Z", conversationKey: "slack:D0IVYLIN:main" }],
       next: expect.stringContaining("handled"),
     });
     expect(ledger().at(-1)).toMatchObject({

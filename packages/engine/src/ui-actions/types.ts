@@ -394,6 +394,8 @@ export interface ChannelMessageService {
   send(conversationId: string, input: {
     text: string; words: "user" | "assistant"; by: string; forUser: boolean; cardId?: number; event?: number; seenBefore?: number | null;
     refusal?: boolean;
+    // 回复落点的核对（工单 #589）拦下以后，调用方确认这段话就是回这个对话的：不再核对。
+    targetChecked?: boolean;
   }): Promise<ChannelSentMessage>;
   // 回一个表情（缺省回对方最后一条）。出错时抛带 code 的 ChannelActionError（invalid_action：表情名不对；not_found；outbound_failed）。
   react(conversationId: string, input: { emoji: string; seq?: number; remove?: boolean; by: string; seenBefore?: number | null }): Promise<ChannelReaction>;

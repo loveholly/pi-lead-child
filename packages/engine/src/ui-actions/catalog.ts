@@ -512,6 +512,8 @@ const CHANNEL_CONVERSATION_ACTIONS = {
       + "发不发、发什么由你判断：系统不再检验，也不会把你的话变成草稿。"
       + "这条消息做的是另一个对话里那张卡上的事（例如对方让你转告别人）时，cardId 填那张卡：卡结束，在对方的消息上回 ✅。"
       + "对方在要涉密信息时，refusal=true 用固定的话拒绝（text 只能是那句固定的话；授权表允许时才发，外部客户、外部共享的对话不发）。"
+      + "同一个对话（主对话和各个 thread）里有好几张没结束的卡时，系统发之前核对这段话回的是不是这个对话里的那条消息；"
+      + "更像在回另一张卡时不发，结果里写明该用哪张卡。你确认没回错时，targetChecked=true 重发。"
       + "结果里的 openCards 是还在等用户的卡：这一轮做的事处理了其中哪张，就对它用 channel_card 的 handled。",
     defaultReason: "在来源里发消息",
     available: (target, env) => (channelMessages(env).canSend(target.source)
@@ -533,6 +535,7 @@ const CHANNEL_CONVERSATION_ACTIONS = {
         ...(input.cardId !== undefined ? { cardId: input.cardId } : {}),
         ...(input.event !== undefined ? { event: input.event } : {}),
         ...(input.refusal ? { refusal: true } : {}),
+        ...(input.targetChecked ? { targetChecked: true } : {}),
       });
       // 变成草稿交给用户的没有发出去：不登记。
       if (!input.question || sent.outcome === "drafted") return sent;

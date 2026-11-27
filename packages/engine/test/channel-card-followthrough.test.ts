@@ -277,6 +277,8 @@ describe("open cards for Lead's self-check", () => {
     const item = await receive(channels, slack.dm("U0IVY", "PROJ-34469 让 Nina 改状态"));
     expect(channels.openCards()).toEqual([{
       id: item.cardId, sender: "Ivy Lin", conversation: expect.any(String), state: "open", since: clock.toISOString(),
+      // 工单 #589：回复用的对话编号和回复落在哪里。
+      conversationKey: item.objectKey, lands: "回复挂在主对话里对方那条消息下面",
     }]);
   });
 });

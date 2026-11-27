@@ -136,9 +136,10 @@ import { maskEmails } from "./pii-mask.js";
 import { channelReplyDecision, type ChannelReplyDecisionResult } from "./reply-decision.js";
 import { replyConfidenceBucket } from "./reply-gate.js";
 import { CHANNEL_SELF_REPLY_TIMEOUT_MS, judgeSelfReply } from "./self-reply.js";
+import { CHANNEL_REPLY_TARGET_TIMEOUT_MS, judgeReplyTarget, type ReplyTargetMessage } from "./reply-target.js";
 import { CHANNEL_URGENCY_TIMEOUT_MS, channelUrgencyNotAsked, judgeChannelUrgency, type ChannelUrgency } from "./urgency.js";
 import type {
-  ChannelAdapter, ChannelAdapterContext, ChannelCredential, ChannelCredentialSource, ChannelDelivery,
+  ChannelAdapter, ChannelAdapterContext, ChannelConversationPlace, ChannelCredential, ChannelCredentialSource, ChannelDelivery,
   ChannelConversationCandidate, ChannelInbound, ChannelInboundRole, ChannelInterest, ChannelOpenCard, ChannelOpenLane, ChannelReaction,
   ChannelConversationRead, ChannelEditedMessage, ChannelFile, ChannelMarkPreview, ChannelRecentConversation, ChannelSentMessage,
   ChannelCatchUpReport, ChannelTransportContext, ChannelDocument, ChannelDocumentChange, ChannelDocumentContent, ChannelDocumentEdited,
@@ -203,6 +204,8 @@ export interface ChannelHubOptions {
   // 取历史（补起点）最多等多久。缺省 3 秒。
   historyTimeoutMs?: number;
   selfReplyTimeoutMs?: number;
+  // 回复落点的核对（reply-target.ts，工单 #589）最多等多久。缺省 6 秒。
+  replyTargetTimeoutMs?: number;
   // 上下文包（统一消息事件 spec D5，工单 04）：对话摘要用的便宜模型、对象的状态、笔记的召回、拼的时间上限。
   // 不给时只有读库的几项，对象的状态写「没查到」，更早的消息没有摘要。
   contextPack?: ContextPackOptions;
@@ -393,6 +396,12 @@ export class ChannelActionError extends Error {
 }
 
 const EXCERPT_MAX = 280;
+// 只回了表情就结束的卡，多久以内还算没结束（回复落点的核对，工单 #589）。
+const REPLY_TARGET_HANDLED_WINDOW_MS = 2 * 60 * 60_000;
+// 回复这张卡会落在哪里（给 Lead 看）：主对话里的卡，回复挂在对方那条消息下面；thread 里的卡，回复进这个 thread。
+export function replyLanding(place: ChannelConversationPlace): string {
+  return place.thread ? "回复进这个 thread" : "回复挂在主对话里对方那条消息下面";
+}
 // 用户本人在这个对话里亲手回过以后，排着的自动回复不再发（ChannelHub.ownReplySince）。给 Lead 的说明：发生了什么、下一步。
 const OWN_REPLY_HELD = "用户在这个对话里亲手回过，回复没有发出去";
 const OWN_REPLY_NEXT = "下一步：不要换个办法再发；要补充什么，在用户的对话里告诉用户";
@@ -1546,7 +1555,7 @@ export class ChannelHub {
     const recorded = appendEvent(db, {
       source: "system", sourceRef: messageEventRef(adapter.id, merged.seqs), kind: MESSAGE_EVENT_KIND, entityKey: card.objectKey,
       correlationId: `channel:${card.objectKey}`, level: "tell", causationId: String(event.seq), occurredAt: at.toISOString(),
-      payload: { ...payload, forSeq: request.forSeq, objects: request.objects },
+      payload: { ...payload, forSeq: request.forSeq, objects: request.objects, ...this.siblingFacts(adapter, card) },
     });
     if (!context || !recorded.inserted) return recorded.inserted;
     this.recordContextPacked(card, recorded.event.seq, context, at);
@@ -2154,7 +2163,7 @@ export class ChannelHub {
     conversationId: string,
     input: {
       text: string; words: "user" | "assistant"; by: string; forUser: boolean; seenBefore?: number | null; cardId?: number; event?: number;
-      refusal?: boolean;
+      refusal?: boolean; targetChecked?: boolean;
     },
   ): Promise<ChannelSentMessage> {
     const source = conversationId.split(":")[0] ?? "";
@@ -2170,6 +2179,9 @@ export class ChannelHub {
     } catch (error) {
       throw new ChannelActionError("not_found", errorText(error));
     }
+    // 工单 #589：同一个对话里有好几张没结束的卡时，核对这段话回的是不是目标卡的那条消息。cardId（明说做的是哪张卡上的事）、
+    // 固定的拒绝、调用方核对过（targetChecked）时不问。
+    if (!input.refusal && input.cardId === undefined && !input.targetChecked) await this.assertReplyTarget(adapter, place.objectKey, input.text);
     // 交接说明的上限（用户 2026-10-30 定 D2）：Lead 自己的回复（不是替用户发的）落在一张开着的卡上时，按这张卡最新一条消息的
     // 上限：放手照常发；做好给你看、交给你、只告诉你、婉拒，回复放到卡上等用户点发送，不发出去。固定的拒绝走它自己的检查。
     // 连续对话不算（用户 2026-10-29：「连续对话和互动哪来那么多傻逼死锁机制」）：你或 Lead 在这个对话里最近 30 分钟说过话，
@@ -2649,11 +2661,133 @@ export class ChannelHub {
       const card = getChannelCard(this.db, id);
       if (!card) return [];
       const lane = getChannelLaneById(this.db, card.laneId);
+      const place = this.placeOf(card.source, card.objectKey);
       return [{
         id: card.id, sender: card.sender.name, conversation: lane?.label ?? card.objectKey, state: card.state,
         since: getEvent(this.db, card.lastSeq)?.occurredAt ?? card.updatedAt,
+        conversationKey: card.objectKey, ...(place ? { lands: replyLanding(place) } : {}),
       }];
     });
+  }
+
+  // ── 回复的落点（工单 #589）────────────────────────────────────────────────────────────
+  // 同一个对话（私信、频道，含主对话和各个 thread）里有好几张没结束的卡时，回复的落点只由调用方给的对话决定，
+  // 系统以前不核对回复的话回的是不是那条消息。2026-11-27：回 thread 里 PR 的话发进了主对话那张卡的消息下面。
+
+  // 一条道在来源里的位置。来源说不出时是 null（不核对）。
+  private placeOf(source: string, objectKey: string): ChannelConversationPlace | null {
+    try {
+      return this.options.registry.get(source)?.conversationPlace?.(objectKey) ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * 一个对话里没结束的卡，每条道最新的一张，新的在前：还开着的（open、snoozed、replying_self），加上最近
+   * REPLY_TARGET_HANDLED_WINDOW_MS 里只回了表情、没回过话就结束的（handled 且没有 sent）。对方多半还在等那条消息的回复
+   * （11-27 的卡 B 就是先回了 :eyes:、标成已处理）。
+   */
+  private unfinishedCardsIn(source: string, group: string): ChannelCard[] {
+    const states = CHANNEL_CARD_OPEN_STATES.map(() => "?").join(", ");
+    const since = new Date(this.now().getTime() - REPLY_TARGET_HANDLED_WINDOW_MS).toISOString();
+    const rows = this.db.prepare(
+      `SELECT id FROM channel_cards WHERE source = ?
+         AND (state IN (${states}) OR (state = 'handled' AND sent IS NULL AND resolved_at >= ?))
+       ORDER BY id DESC LIMIT 200`,
+    ).all(source, ...CHANNEL_CARD_OPEN_STATES, since) as Array<{ id: number }>;
+    const seen = new Set<string>();
+    const cards: ChannelCard[] = [];
+    for (const { id } of rows) {
+      const card = getChannelCard(this.db, id);
+      if (!card || seen.has(card.objectKey) || this.placeOf(source, card.objectKey)?.group !== group) continue;
+      seen.add(card.objectKey);
+      cards.push(card);
+    }
+    return cards;
+  }
+
+  // 给 SmartModel 比较的一条：卡上对方最新的一条消息。原话从道里取，没有时用卡的摘录。
+  private replyTargetMessageOf(card: ChannelCard, place: ChannelConversationPlace): ReplyTargetMessage {
+    const lane = getChannelLaneById(this.db, card.laneId);
+    const last = (lane?.context ?? []).filter((message) => message.role === "them").at(-1);
+    return {
+      cardId: card.id, where: place.thread ? "a thread" : "the main conversation", sender: card.sender.name,
+      at: getEvent(this.db, card.lastSeq)?.occurredAt ?? null, text: last?.text ?? card.excerpt,
+    };
+  }
+
+  // 给 Lead 的一张卡：谁、什么时候、在哪里、回复落在哪里、代码认出的意图和 PR、消息事件和要填的对话。不放原话（发消息的工具
+  // 结果不算外部内容，turn-origin.ts）：原话在消息事件上，或者用 read_channel_conversation 看。
+  private replyTargetCardLine(card: ChannelCard, place: ChannelConversationPlace): string {
+    const event = this.messageEventOf(card.id, card.lastSeq);
+    const payload = event ? getEvent(this.db, event)?.payload : undefined;
+    const inbound = payload?.inbound as { intent?: unknown } | undefined;
+    const intent = isChannelIntent(inbound?.intent) ? CHANNEL_INTENT_LABELS[inbound.intent] : null;
+    const objects = Array.isArray(payload?.objects)
+      ? (payload.objects as Array<{ owner?: unknown; repo?: unknown; number?: unknown }>)
+        .map((object) => `${String(object.owner)}/${String(object.repo)}#${String(object.number)}`) : [];
+    const at = getEvent(this.db, card.lastSeq)?.occurredAt ?? card.updatedAt;
+    const what = [intent ? `意图：${intent}` : null, objects.length ? `提到 ${objects.join("、")}` : null].filter(Boolean).join("，");
+    return `卡 #${card.id}：${card.sender.name} ${at} 在${place.thread ? " thread 里" : "主对话里"}的消息${what ? `（${what}）` : ""}，`
+      + `${replyLanding(place)}；${event ? `消息事件 #${event}，` : ""}conversation=${card.objectKey}`;
+  }
+
+  /**
+   * 消息事件上的落点（工单 #589）：这条消息在主对话还是 thread 里，同一个对话里别的没结束的卡（最多 4 张，新的在前）各在哪里、
+   * 对方最后一句话。来源说不出位置时什么都不加。
+   */
+  private siblingFacts(adapter: ChannelAdapter, card: ChannelCard): Pick<MessageReceivedPayload, "thread" | "siblings"> {
+    const place = this.placeOf(adapter.id, card.objectKey);
+    if (!place) return {};
+    const siblings = this.unfinishedCardsIn(adapter.id, place.group).filter((other) => other.objectKey !== card.objectKey).slice(0, 4)
+      .map((other) => {
+        const message = this.replyTargetMessageOf(other, this.placeOf(adapter.id, other.objectKey) ?? place);
+        return {
+          cardId: other.id, conversation: other.objectKey, thread: this.placeOf(adapter.id, other.objectKey)?.thread ?? false,
+          sender: other.sender.name, at: message.at, messageEvent: this.messageEventOf(other.id, other.lastSeq),
+          text: oneLine(message.text, EXCERPT_MAX),
+        };
+      });
+    return { thread: place.thread, ...(siblings.length ? { siblings } : {}) };
+  }
+
+  /**
+   * 发回复前核对落点（工单 #589）。目标卡是这个对话（objectKey）上没结束的卡；同一个 group 里没有别的没结束的卡时不问 SmartModel。
+   * SmartModel 判断这段话更像在回另一张卡（reply-target.ts 的 mismatch）时抛 conflict，写明两张卡各是什么、各落在哪里、该怎么重发。
+   * 判断不了（没有模型、超时、出错、说不清）时不拦。
+   */
+  private async assertReplyTarget(adapter: ChannelAdapter, objectKey: string, text: string): Promise<void> {
+    const place = this.placeOf(adapter.id, objectKey);
+    if (!place) return;
+    const cards = this.unfinishedCardsIn(adapter.id, place.group);
+    const target = getOpenChannelCard(this.db, objectKey) ?? cards.find((card) => card.objectKey === objectKey);
+    if (!target) return;
+    const others = cards.filter((card) => card.objectKey !== objectKey);
+    if (!others.length) return;
+    const placed = (card: ChannelCard) => this.placeOf(adapter.id, card.objectKey) ?? place;
+    const verdict = await judgeReplyTarget({
+      reply: text, target: this.replyTargetMessageOf(target, place),
+      others: others.map((card) => this.replyTargetMessageOf(card, placed(card))),
+      model: this.smartModelNow(), timeoutMs: Math.max(this.options.replyTargetTimeoutMs ?? CHANNEL_REPLY_TARGET_TIMEOUT_MS, 1),
+    });
+    if (!verdict.judged) {
+      this.log(`[channels] ${adapter.id}: reply target check for card #${target.id} not judged (${verdict.error ?? "unknown"}); sending`);
+      return;
+    }
+    const better = verdict.mismatch ? others.find((card) => card.id === verdict.better) : undefined;
+    if (!better) return;
+    this.log(`[channels] ${adapter.id}: refused a reply aimed at card #${target.id}: it answers card #${better.id}`);
+    const lane = getChannelLaneById(this.db, target.laneId);
+    const event = this.messageEventOf(better.id, better.lastSeq);
+    throw new ChannelActionError("conflict", [
+      `没有发：${lane?.label ?? place.group}里有 ${cards.length} 张没结束的卡，这段话更像在回卡 #${better.id}，不是你发往的卡 #${target.id}。`,
+      `- 你发往的：${this.replyTargetCardLine(target, place)}`,
+      `- 更像在回的：${this.replyTargetCardLine(better, placed(better))}`,
+      "两条消息的原话在各自的消息事件上，也可以用 read_channel_conversation 看。",
+      `要回卡 #${better.id}：${event ? `reply_to_source（event=${event}，conversation=${better.objectKey}）` : `send_channel_message（conversation=${better.objectKey}）`}。`
+        + `确认这段话就是回卡 #${target.id} 的：同样的参数加 confirm_target=true 重发。`,
+    ].join("\n"));
   }
 
   // 卡上最新的消息你说话时见过没有：seenBefore 是你这一轮开始的时间，没有时（你自己在页面上做的）算见过。

@@ -192,6 +192,11 @@ export function createUiActionTools(deps: UiActionToolDeps): ToolDefinition<any>
   ];
 }
 
+// 回复的落点核对（工单 #589）：同一个对话里有好几张没结束的卡时，系统发之前核对这段话回的是哪一条消息。
+const CONFIRM_TARGET_HINT = "同一个对话（主对话和各个 thread）里有好几张没结束的卡时，发之前系统核对这段话回的是不是这个对话里的那条消息："
+  + "更像在回另一张卡时不发，结果里写明两张卡各是什么、各落在哪里、该用哪张卡。按结果改了重发；你确认没回错，同样的参数加 confirm_target=true 重发。";
+const confirmTarget = Type.Optional(Type.Boolean({ description: "被回复落点的核对拦下以后，你确认这段话就是回这个对话的：true 时不再核对" }));
+
 /**
  * 回复到来源（统一消息事件 spec D8、D9，工单 05）：只有这一个回复工具，怎么发由入口的出站扩展决定，不由 Lead 选哪个工具决定。
  * 用户本人的入口（Companion、plc）：Lead 这一轮说的话就是回复，工具不发到别处。外部通道：操作层的 channel_conversation 的
@@ -214,6 +219,7 @@ export function createReplyToSourceTool(deps: UiActionToolDeps): ToolDefinition<
       + "授权表没让拒绝、发信人是外部客户、对话和外部组织共享时会被拒绝：改用 notify_user 告诉用户。拒绝以后告诉用户一声。"
       + "event 和 conversation 都照这条消息事件上写的填：回复只能回到这条消息所在的对话，两样对不上时不发（防止把给别的对话写的话发到这里）。"
       + "回复只按这个对话里的消息写：别的对话里的消息、你和用户在会话里聊的事，不是这个对话的前文，不能拿来回答这条消息。"
+      + CONFIRM_TARGET_HINT
       + SLACK_WRITING_HINT,
     parameters: Type.Object({
       event: Type.Integer({ minimum: 1, description: "消息事件的编号（交给你的消息写着「消息事件 #N」）" }),
@@ -224,8 +230,9 @@ export function createReplyToSourceTool(deps: UiActionToolDeps): ToolDefinition<
       text: Type.Optional(Type.String({ minLength: 1, maxLength: 4000, description: "回复的话。refusal=true 时不写" })),
       refusal: Type.Optional(Type.Boolean({ description: "true：用固定的话拒绝（对方在要涉密信息）" })),
       reason: Type.Optional(Type.String({ minLength: 1, maxLength: 2000, description: "凭什么这样回，例如「用户说告诉他明天发」" })),
+      confirm_target: confirmTarget,
     }),
-    execute: async (_id, params: { event: number; conversation?: string; text?: string; refusal?: boolean; reason?: string }) => {
+    execute: async (_id, params: { event: number; conversation?: string; text?: string; refusal?: boolean; reason?: string; confirm_target?: boolean }) => {
       const words = params.text ?? (params.refusal ? AUTHORITY_REFUSAL_TEXT : undefined);
       if (!words?.trim()) throw new Error("要写回复的话（text）；用固定的话拒绝时给 refusal=true");
       const message = externalMessageOf(deps.db, params.event);
@@ -251,7 +258,10 @@ export function createReplyToSourceTool(deps: UiActionToolDeps): ToolDefinition<
       return performLeadUiAction(deps, {
         target: { type: "channel_conversation", id: message.conversation },
         action: "send_message",
-        input: { text: words, words: "assistant", event: message.event, ...(params.refusal ? { refusal: true } : {}) },
+        input: {
+          text: words, words: "assistant", event: message.event, ...(params.refusal ? { refusal: true } : {}),
+          ...(params.confirm_target ? { targetChecked: true } : {}),
+        },
         reason: params.reason ?? (params.refusal ? `用固定的话拒绝消息事件 #${message.event}` : `回复消息事件 #${message.event}`),
       });
     },
@@ -281,6 +291,8 @@ export function createChannelActionTools(deps: UiActionToolDeps): ToolDefinition
         + "别的轮次带「auto-reply」的署名。这个对话里有等用户的卡时，卡跟着结束（已回复）。发不发、发什么由你判断，系统不再检验。"
         + "转告用户口述的事时，位置、名字、数字、步骤照用户说的写；你认为用户说错了，先在会话里指出、问一句，确认后再发。"
         + "这条消息做的是另一个对话里那张卡上的事（例如用户让你照卡上的话转告别人）时，card_id 填那张卡：卡结束，在对方的消息上回 ✅。"
+        + "往有卡的对话里发，就是回那张卡：主对话里的卡，话挂在对方那条消息下面；thread 里的卡，话进那个 thread。"
+        + CONFIRM_TARGET_HINT
         + "写法：像平时聊天。一件事的第一条消息称呼对方一次；接着说同一件事、或者对方刚和用户说过话时，不加称呼。"
         + SLACK_WRITING_HINT
         + "结果里的 openCards 是还在等用户的卡：这一轮做的事处理了其中哪张，就用 mark_channel_card_handled 结束它。"
@@ -294,10 +306,12 @@ export function createChannelActionTools(deps: UiActionToolDeps): ToolDefinition
         card_id: Type.Optional(Type.Integer({ minimum: 1, description: "这条消息做的是哪张卡上的事（卡在另一个对话里时填）" })),
         ticket_id: Type.Optional(Type.Integer({ minimum: 1, description: "替哪张工单问的（对外提问时填）" })),
         decision_id: Type.Optional(Type.Integer({ minimum: 1, description: "问的是这张工单上的哪个决定请求（和 ticket_id 一起填）" })),
+        confirm_target: confirmTarget,
         reason,
       }),
       execute: async (_id, params: {
         conversation: string; text: string; words: "user" | "assistant"; card_id?: number; ticket_id?: number; decision_id?: number; reason: string;
+        confirm_target?: boolean;
       }) => {
         if (params.decision_id !== undefined && params.ticket_id === undefined) throw new Error("填了 decision_id 就要一起填 ticket_id");
         return performLeadUiAction(deps, {
@@ -305,6 +319,7 @@ export function createChannelActionTools(deps: UiActionToolDeps): ToolDefinition
           action: "send_message",
           input: {
             text: params.text, words: params.words, ...(params.card_id !== undefined ? { cardId: params.card_id } : {}),
+            ...(params.confirm_target ? { targetChecked: true } : {}),
             ...(params.ticket_id !== undefined
               ? { question: { ticketId: params.ticket_id, ...(params.decision_id !== undefined ? { decisionId: params.decision_id } : {}) } }
               : {}),

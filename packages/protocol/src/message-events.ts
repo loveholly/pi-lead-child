@@ -227,6 +227,19 @@ export const MessageReceivedPayloadSchema = Type.Object({
   objects: Type.Optional(Type.Array(Type.Object({
     kind: Type.Literal("pull_request"), owner: Type.String(), repo: Type.String(), number: Type.Integer({ minimum: 1 }),
   }), { maxItems: 8 })),
+  // 回复的落点（工单 #589）：thread 为 true 时这条消息在一个 thread 里，false 时在主对话里，来源说不出时没有。
+  // siblings：同一个对话（主对话和各个 thread）里别的没结束的卡，每张写明在哪里、回复落在哪里、对方最后一句话（外部的原话）。
+  // 记消息事件时拼好；工单 #589 以前的消息事件没有这两项。
+  thread: Type.Optional(Type.Boolean()),
+  siblings: Type.Optional(Type.Array(Type.Object({
+    cardId: Id,
+    conversation: Type.String({ minLength: 1 }),
+    thread: Type.Boolean(),
+    sender: Type.String(),
+    at: Nullable(Type.String()),
+    messageEvent: Nullable(Id),
+    text: Type.String(),
+  }), { maxItems: 4 })),
 });
 export type MessageReceivedPayload = Static<typeof MessageReceivedPayloadSchema>;
 
