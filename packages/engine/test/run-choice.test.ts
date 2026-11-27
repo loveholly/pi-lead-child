@@ -1,7 +1,7 @@
 // 一个 Run 用哪个模型和 effort（run-choice.ts）。回归：以前每个启动路径都写
 // `explicit ?? items.requested_model ?? 写死的默认值`，核查请求会拿到执行者的模型。
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { tempDir } from "@pi-lead-child/core/testing";
 import { addActivity, createItem, createRun, getItem, getRun, openDb, setReviewerSetting, transition, updateRun } from "@pi-lead-child/store";
 
@@ -131,5 +131,52 @@ describe("a newer choice of model and effort beats an older session", () => {
     })).toBe("haiku");
     expect(runEffortFor(db, { itemId, role: "executor", purpose: "execution", runtime: "claude", model: "haiku", resumedFrom: later }))
       .toBe("high");
+  });
+});
+
+// 工单 #373：不点名模型和强度时先用配置的默认值（PLC_<RUNTIME>_MODEL / _EFFORT，daemon 从 config.json 写入），没配置才交给 CLI。
+describe("configured default model and effort", () => {
+  afterEach(() => {
+    delete process.env.PLC_CODEX_MODEL;
+    delete process.env.PLC_CODEX_EFFORT;
+    vi.restoreAllMocks();
+  });
+  const bare = { requested_runtime: null, requested_model: null } as const;
+
+  it("uses the configured default and logs which one it used", () => {
+    process.env.PLC_CODEX_MODEL = "model-from-config";
+    process.env.PLC_CODEX_EFFORT = "medium";
+    const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const { db, itemId } = setup("plc-run-choice-default-");
+    const model = runModelFor({ role: "executor", runtime: "codex", item: bare, logDefault: true });
+    const effort = runEffortFor(db, { itemId, role: "executor", purpose: "execution", runtime: "codex", model, logDefault: true });
+    expect(model).toBe("model-from-config");
+    expect(effort).toBe("medium");
+    expect(log.mock.calls.flat().join("\n")).toContain("using configured default model-from-config");
+  });
+
+  it("leaves it to the CLI and logs that when nothing is configured", () => {
+    const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const { db, itemId } = setup("plc-run-choice-nodefault-");
+    const model = runModelFor({ role: "executor", runtime: "codex", item: bare, logDefault: true });
+    const effort = runEffortFor(db, { itemId, role: "executor", purpose: "execution", runtime: "codex", model, logDefault: true });
+    expect(model).toBeUndefined();
+    expect(effort).toBeUndefined();
+    expect(log.mock.calls.flat().join("\n")).toContain("leaving it to the CLI");
+  });
+
+  it("does not apply the default effort to a model that is not the configured one", () => {
+    process.env.PLC_CODEX_MODEL = "model-from-config";
+    process.env.PLC_CODEX_EFFORT = "medium";
+    const { db, itemId } = setup("plc-run-choice-other-");
+    expect(runEffortFor(db, { itemId, role: "executor", purpose: "execution", runtime: "codex", model: "another-model" })).toBeUndefined();
+  });
+
+  it("an explicit model and effort win over the default", () => {
+    process.env.PLC_CODEX_MODEL = "model-from-config";
+    process.env.PLC_CODEX_EFFORT = "medium";
+    const { db, itemId } = setup("plc-run-choice-explicit-");
+    expect(runModelFor({ explicit: "picked", role: "executor", runtime: "codex", item: bare })).toBe("picked");
+    expect(runEffortFor(db, { explicit: "high", itemId, role: "executor", purpose: "execution", runtime: "codex", model: "picked" })).toBe("high");
   });
 });

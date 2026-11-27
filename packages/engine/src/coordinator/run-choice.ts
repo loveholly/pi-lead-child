@@ -5,7 +5,7 @@
 // 现在所有启动路径都走这里的同一条规则。
 import type { Item, Run, RuntimeId } from "@pi-lead-child/core";
 import type { Db } from "@pi-lead-child/store";
-import { defaultRuntimeModel, resolveRuntimeModel } from "@pi-lead-child/runtime";
+import { defaultRuntimeEffort, defaultRuntimeModel, resolveRuntimeModel } from "@pi-lead-child/runtime";
 
 export interface RunModelInput {
   /** 这次明确选的模型：Lead、用户、恢复或派发请求给的。 */
@@ -22,6 +22,8 @@ export interface RunModelInput {
   reviewer?: RunReviewerProfile | null;
   /** 执行者最近一次换的模型和强度（runProfileChoice）。续接的 session 比它早时，不沿用 session 原来的模型。 */
   choice?: RunProfileChoice | null;
+  /** 真的要启动 Run 的路径传 true：落到默认值时记一行日志，说明用的是配置里的还是交给 CLI。显示用的查询不传。 */
+  logDefault?: boolean;
 }
 
 /**
@@ -72,7 +74,13 @@ export function runModelFor(input: RunModelInput): string | undefined {
     && (!input.item.requested_runtime || input.item.requested_runtime === input.runtime)
     ? input.item.requested_model
     : null;
-  const chosen = explicit || reviewerModel || resumed || itemModel || defaultRuntimeModel(input.runtime);
+  const configured = explicit || reviewerModel || resumed || itemModel ? undefined : defaultRuntimeModel(input.runtime);
+  const chosen = explicit || reviewerModel || resumed || itemModel || configured;
+  if (input.logDefault && !(explicit || reviewerModel || resumed || itemModel)) {
+    console.error(configured
+      ? `[run-choice] ${input.runtime} ${input.role}: no model given, using configured default ${configured} (PLC_${input.runtime.toUpperCase()}_MODEL / config.json runtimes.defaults)`
+      : `[run-choice] ${input.runtime} ${input.role}: no model given and no configured default, leaving it to the CLI`);
+  }
   return resolveRuntimeModel(input.runtime, chosen ?? null);
 }
 
@@ -86,6 +94,8 @@ export interface RunEffortInput {
   resumedFrom?: (Pick<Run, "runtime" | "effort"> & { id?: number }) | null;
   /** 同 RunModelInput.reviewer：核查 Run 在 runtime 一致时用它的推理强度。 */
   reviewer?: RunReviewerProfile | null;
+  /** 同 RunModelInput.logDefault。 */
+  logDefault?: boolean;
 }
 
 /**
@@ -95,6 +105,20 @@ export interface RunEffortInput {
  * 执行者换过模型和强度以后（runProfileChoice），比那次早的 Run 不再算：续接的 session 和上一个 Run 都用换之前的强度。
  */
 export function runEffortFor(db: Db, input: RunEffortInput): string | undefined {
+  const found = recordedEffortFor(db, input);
+  if (found) return found;
+  // 都没有时用配置的默认强度。它是给配置的默认模型选的：这次的模型不一样时不用（和上面的规则一致）。
+  const configured = defaultRuntimeEffort(input.runtime);
+  const fallback = configured && sameModel(input.runtime, null, input.model) ? configured : undefined;
+  if (input.logDefault) {
+    console.error(fallback
+      ? `[run-choice] ${input.runtime} ${input.role}: no effort given, using configured default ${fallback}`
+      : `[run-choice] ${input.runtime} ${input.role}: no effort given and no configured default, leaving it to the CLI`);
+  }
+  return fallback;
+}
+
+function recordedEffortFor(db: Db, input: RunEffortInput): string | undefined {
   const explicit = input.explicit?.trim();
   if (explicit) return explicit;
   // 设置里的强度是给设置里的模型选的。这次的模型不一样（例如设置是 opus/max，这次点名 sonnet）时不用它（审查 L7）。

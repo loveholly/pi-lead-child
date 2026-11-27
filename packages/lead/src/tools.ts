@@ -81,8 +81,6 @@ import { resolveRuntimeModel } from "@pi-lead-child/runtime";
 import {
   currentModelCatalog,
   formatModelCatalogDetail,
-  formatModelCatalogForLead,
-  formatRuntimeCatalogForLead,
   freshModelCatalog,
   ModelChoiceError,
   persistSelectedRuntime,
@@ -728,10 +726,10 @@ export function spawnItemChild(
       fromModel: reviewer.replaced.model, toModel: reviewer.model, reason: reviewer.replaced.reason, actor: "system",
     });
   }
-  const spec = runModelFor({ explicit: explicitModel, role, runtime: runtimeId, item: t, reviewer });
+  const spec = runModelFor({ explicit: explicitModel, role, runtime: runtimeId, item: t, reviewer, logDefault: true });
   const effort = runEffortFor(deps.db, {
     explicit: opts.effort, itemId: t.id, role, purpose: role === "reviewer" ? "review" : t.purpose ?? "execution",
-    runtime: runtimeId, model: spec, reviewer,
+    runtime: runtimeId, model: spec, reviewer, logDefault: true,
   });
   const runtime = deps.childPi ? undefined : (deps.runtimeRegistry ?? createDefaultRuntimeRegistry()).get(runtimeId);
   // 健康账本（工单 03）：这条路径不经过派发队列，所以在这里过同一个 gate。
@@ -896,7 +894,7 @@ export function routeTicketMessageToAgentRun(
   deps: LeadDeps,
   args: {
     itemId: number; message: string; actor?: "user" | "lead"; source?: string;
-    // Lead 重发一条工单对话时可以换 runtime、模型和 effort（recover_ticket_run）。null 表示不指定，由 CLI 决定。
+    // Lead 重发一条工单对话时可以换 runtime、模型和 effort（recover_ticket_run）。null 和不给一样：先取配置的默认值，没配置才由 CLI 决定。
     runtime?: RuntimeId; model?: string | null; effort?: string | null;
   },
 ): TicketAgentRunRoute {
@@ -927,14 +925,15 @@ export function routeTicketMessageToAgentRun(
     : null;
   // 工单对话接着来源 Run 的 session 时，沿用它的模型和 effort（run-choice.ts）；不拿执行者的模型给 reviewer。
   const reviewer = reviewerProfileFor(deps.db, item.id, role, { profile: (candidate) => childRuntimeProfile(deps, candidate) });
-  const model = args.model !== undefined
-    ? args.model ?? undefined
+  // null 和没给一样：恢复路径换 runtime 时清掉了旧模型（runtime-recovery.ts），这时也要走 runModelFor，取配置的默认模型并记日志（工单 #373）。
+  const model = args.model != null
+    ? args.model
     : runModelFor({
-      role, runtime: runtimeId, item, resumedFrom: resumeRun ?? undefined, reviewer, choice: runProfileChoice(deps.db, item.id, role),
+      role, runtime: runtimeId, item, resumedFrom: resumeRun ?? undefined, reviewer, choice: runProfileChoice(deps.db, item.id, role), logDefault: true,
     });
-  const effort = args.effort !== undefined
-    ? args.effort ?? undefined
-    : runEffortFor(deps.db, { itemId: item.id, role, purpose, runtime: runtimeId, model, resumedFrom: resumeRun ?? undefined, reviewer });
+  const effort = args.effort != null
+    ? args.effort
+    : runEffortFor(deps.db, { itemId: item.id, role, purpose, runtime: runtimeId, model, resumedFrom: resumeRun ?? undefined, reviewer, logDefault: true });
   const runtime = deps.childPi ? undefined : (deps.runtimeRegistry ?? createDefaultRuntimeRegistry()).get(runtimeId);
   // 健康账本（工单 03）：工单对话也不在不可用的 profile 上创建 Run。直接告诉发消息的人原因，
   // 不再发一条通知：这次故障已经通知过用户一次。
@@ -1494,15 +1493,13 @@ const RELATION_TYPES = TICKET_RELATION_INPUT_TYPES;
 const RELATION_COMMENT_PATTERN =
   /\b(parent_of|child_of|depends_on|blocks|implements|implemented_by|duplicates|duplicated_by|supersedes|superseded_by|relates_to)\b[\s\S]*#?\d+/i;
 
-// 选型菜单：进 spawn_child 和 create_task 的工具描述。以前这里写死了 openai/gpt-5.4-mini 和 gpt-5.5（缺省）；
-// 2026-10 Codex 订阅账号不再支持 gpt-5.5，照着菜单派出去的核查全部失败（工单 #66）。现在是本机模型目录的摘要，
-// 目录来自各 CLI 自己（engine 的 model-catalog.ts）。PLC_MODEL_MENU 是用户的显式覆盖，照常生效。
-function modelMenu(db: Db): string {
-  return process.env.PLC_MODEL_MENU ?? [
-    formatModelCatalogForLead(currentModelCatalog(db)),
-    "完整目录（每个模型的 effort 档位和说明）用 get_model_catalog 读。只用目录里有的模型名，不要编。",
-  ].join("\n");
-}
+// 派活工具的说明里不放本机目录（工单 #373）。以前这里把 runtime 的健康状态和模型目录拼进 spawn_child、create_task 的说明，
+// 目录一刷新、可执行文件探活结果一变，工具定义就变，整段请求的提示缓存作废（#371 核实：14 次整段前缀没命中）。
+// 现在说明是固定的一段字；要看目录，Lead 调 get_runtime_health、get_model_catalog，目录进工具的返回结果，不进定义。
+const DISPATCH_CATALOG_POINTER =
+  "本机有哪些 runtime、哪些能用，调 get_runtime_health 看；每个模型的名字和 effort 档位，调 get_model_catalog 看。"
+  + "只用目录里有的模型名，不要编。编码任务优先 Codex / Claude Code。任何 runtime 都能当核查员：能跑命令的优先；"
+  + "不能跑命令的核查员只读代码和交付记录，证据里会写明没有实际运行。核查员不可用时系统自动换下一个，也可以用 ticket_action 的 change_reviewer 换。";
 
 // suggest_route 的工单上下文：标题和正文摘录。给 reviewer 选型时，再写上执行者最近用的 runtime 和模型，
 // 让判断能避开同一个 runtime 或模型系列。
@@ -1625,7 +1622,6 @@ const SCHEDULE_CHANGED_EVENT = {
 
 export function createLeadTools(deps: LeadDeps): ToolDefinition<any>[] {
   const { db } = deps;
-  const runtimeCatalogText = formatRuntimeCatalogForLead(resolveLeadCatalog(deps));
   const coordinator = createCoordinator({ db });
   const memory = deps.memory ?? new NotesMemory(db, null);
   // 按轮次计数。闭包而不是查库：activities 没有轮次列，而"同一轮"正是这道闸门的语义。
@@ -1976,7 +1972,7 @@ export function createLeadTools(deps: LeadDeps): ToolDefinition<any>[] {
       description:
         "创建任务工单。仅当需要委派 child 执行（出现第二个执行主体）时创建；快问快答不建单。" +
         "建单之前先读 skill ticket-planning：用原工单还是新建、要不要拆子工单、怎样关联。" +
-        "runtime/model/effort 从本机目录选择，不要省略成默认 Pi。\n" + runtimeCatalogText + "\n" + modelMenu(db) + "\n" +
+        "runtime/model/effort 从本机目录选择，不要省略成默认 Pi。\n" + DISPATCH_CATALOG_POINTER + "\n" +
         "核查和执行一起定：verification 选谁核查交付；要独立核查时，reviewer 选核查员（runtime、模型、推理强度）。"
         + "读 brief 和用户的原话来选：例如「严禁调用 codex」就不要选 codex 当核查员。默认选和执行者不同的 runtime 或模型系列；"
         + "不给 reviewer 时系统这样选，只剩和执行者同一种时用它，并在核查员一行写明。\n" +
@@ -2018,8 +2014,8 @@ export function createLeadTools(deps: LeadDeps): ToolDefinition<any>[] {
         runtime: Type.Optional(Type.Union([
           Type.Literal("pi"), Type.Literal("codex"), Type.Literal("claude"),
         ])),
-        model: Type.Optional(Type.String({ description: "模型名，只用模型目录里有的；省略时由 CLI 用自己的配置" })),
-        effort: Type.Optional(Type.String({ description: "推理强度，从这个模型在目录里的档位选；省略时由 CLI 决定" })),
+        model: Type.Optional(Type.String({ description: "模型名，只用模型目录里有的；省略时用本机配置的默认模型（config.json 的 runtimes.defaults），没配置才由 CLI 决定" })),
+        effort: Type.Optional(Type.String({ description: "推理强度，从这个模型在目录里的档位选；省略时用本机配置的默认强度，没配置才由 CLI 决定" })),
         budget: Type.Optional(Type.Number({ description: "token 预算上限" })),
         verification: Type.Optional(Type.Union([
           Type.Literal("independent_reviewer"), Type.Literal("lead_static"), Type.Literal("user"),
@@ -2029,7 +2025,7 @@ export function createLeadTools(deps: LeadDeps): ToolDefinition<any>[] {
         })),
         reviewer: Type.Optional(Type.Object({
           runtime: Type.Union([Type.Literal("pi"), Type.Literal("codex"), Type.Literal("claude")]),
-          model: Type.Optional(Type.String({ description: "模型名，只用模型目录里有的；省略时由 CLI 用自己的配置" })),
+          model: Type.Optional(Type.String({ description: "模型名，只用模型目录里有的；省略时用本机配置的默认模型（config.json 的 runtimes.defaults），没配置才由 CLI 决定" })),
           effort: Type.Optional(Type.String({ description: "推理强度，从这个模型在目录里的档位选" })),
           reason: Type.Optional(Type.String({ description: "为什么选它，一句话，例如「brief 要求不用 codex」" })),
         }, {
@@ -3077,13 +3073,13 @@ export function createLeadTools(deps: LeadDeps): ToolDefinition<any>[] {
         + "任何 runtime 都能当核查员，不能跑命令的核查员只读代码，证据里会写明没有实际运行。"
         + "工作区由系统决定：workdir 在 git 仓库里时，执行者在工单自己的隔离 worktree 里工作，核查者只读地看同一个 worktree；"
         + "要用用户的 checkout 先调 provision_workspace(mode='shared', reason)。\n"
-        + runtimeCatalogText + "\n" + modelMenu(db),
+        + DISPATCH_CATALOG_POINTER,
       parameters: Type.Object({
         ticket_id: Type.Number(),
         runtime: Type.Optional(Type.Union([
           Type.Literal("pi"), Type.Literal("codex"), Type.Literal("claude"),
         ], { description: "执行宿主；从本机目录选择，省略时按健康度选择而不会默认落到 Pi" })),
-        model: Type.Optional(Type.String({ description: "模型名，只用模型目录里有的；省略时由 CLI 用自己的配置" })),
+        model: Type.Optional(Type.String({ description: "模型名，只用模型目录里有的；省略时用本机配置的默认模型（config.json 的 runtimes.defaults），没配置才由 CLI 决定" })),
         effort: Type.Optional(Type.String({
           description: "推理强度，从这个模型在目录里的档位选；省略时沿用这张工单上一次同类 Run 的选择，再没有就由 CLI 决定",
         })),

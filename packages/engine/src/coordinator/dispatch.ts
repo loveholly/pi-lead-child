@@ -258,11 +258,11 @@ export function createDispatcher(
     const reviewerChoice = input.role === "reviewer" ? getReviewerSetting(db, item.id) : null;
     const model = runModelFor({
       explicit: input.model, role: input.role, runtime, item, resumedFrom, reviewer: reviewerChoice,
-      choice: runProfileChoice(db, item.id, input.role),
+      choice: runProfileChoice(db, item.id, input.role), logDefault: true,
     });
     const effort = runEffortFor(db, {
       explicit: input.effort, itemId: input.itemId, role: input.role, purpose: input.purpose, runtime, model, resumedFrom,
-      reviewer: reviewerChoice,
+      reviewer: reviewerChoice, logDefault: true,
     });
     const result = db.prepare(
       `INSERT INTO dispatch_requests
@@ -593,9 +593,11 @@ export function createDispatcher(
     const reviewer = reviewerProfileFor(db, item.id, row.role, { profile: runtimeProfile });
     const model = runModelFor({
       explicit: row.model, role: row.role, runtime, item, resumedFrom, reviewer, choice: runProfileChoice(db, item.id, row.role),
+      logDefault: true,
     });
     const effort = runEffortFor(db, {
       explicit: row.effort, itemId: row.item_id, role: row.role, purpose: row.purpose, runtime, model, resumedFrom, reviewer,
+      logDefault: true,
     });
     return { runtime, model, effort };
   };
