@@ -46,6 +46,31 @@ describe("buildReviewerPrompt", () => {
     expect(p).toContain("有一条不通过时总结论只能是 fail");
     expect(p).toContain("系统只看这个字段，不看证据里的字眼");
   });
+
+  // #534：核查员不再整套重跑执行 agent 跑过的测试。
+  it("tells the reviewer to read the executor's results first and rerun only related or doubtful test files", () => {
+    const p = buildReviewerPrompt({ id: 5, title: "t" });
+    expect(p).toContain("先读执行 agent 交回的测试命令和结果");
+    expect(p).toContain("只重跑两类测试文件");
+    expect(p).toContain("结果可疑、缺失、或和改动对不上的那几个");
+    expect(p).toContain("不整套重跑，不跑全量");
+    expect(p).toContain("沿用它的结果，不重跑");
+    expect(p).toContain("每个测试文件最多跑一次");
+    expect(p).toContain("带 timeout");
+    expect(p).toContain("再用 grep 找失败和汇总行");
+    // 旧规则「改了依赖或底层代码时才跑全量」已去掉。
+    expect(p).not.toContain("这时才跑全量");
+  });
+
+  it("tells the reviewer to run no tests for docs, comments and wording only changes", () => {
+    const p = buildReviewerPrompt({ id: 5, title: "t" });
+    expect(p).toContain("只改了文档、PR 描述、注释、文案这类不影响运行的内容：不跑测试");
+  });
+
+  it("requires the report to name the reruns and the reused executor results", () => {
+    const p = buildReviewerPrompt({ id: 5, title: "t" });
+    expect(p).toContain("重跑了哪些测试文件、为什么重跑；哪些沿用了执行 agent 的结果");
+  });
 });
 
 describe("spawn_child role=reviewer", () => {
