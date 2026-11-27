@@ -832,7 +832,8 @@ export class LaunchedProcess extends EventEmitter implements RuntimeProcess {
 
   // 启动目录由 daemon 新建时（removeDirOnClose），先等垫片退出，再删除目录，最后发 close。
   // 所以等 close 的一方（测试、adapter）看到 close 时，目录已经不在了。
-  // 起因（#592）：以前 close 之后立刻删除目录，那时垫片可能刚写完退出记录，还在关闭控制 socket（删除 control.sock）。
+  // 起因（#592）：以前 close 之后立刻删除目录，那时垫片可能刚写完退出记录，还在关闭控制 socket（删除 ctl.sock）：
+  // launcher-shim.mjs 的 finish 先 writeExitRecord，再 release → closeControl。
   // Linux 上 Node 24 的 rmSync 用 libstdc++ 的 remove_all：遍历时一个条目被别人删掉（ENOENT），remove_all 就停下，
   // 剩下的条目和目录本身都没删，Node 却把 ENOENT 当成成功，不报错。目录就这样留下了。
   private closeAfterCleanup(code: number | null, signal: NodeJS.Signals | null): void {
