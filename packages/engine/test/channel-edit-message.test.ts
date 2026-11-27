@@ -33,13 +33,12 @@ describe("editing a message in a conversation", () => {
     await hub.receive("slack", slack.dm("U0NINA", "demo 在哪"));
     await hub.idle();
     await hub.sendMessage("slack:@U0NINA", { text: "晚点发你", words: "user", forUser: true, by });
-    // 回复在那条消息下面的 thread 里（2026-11-02）：整段私信里是根消息，thread 里有回复。
+    // 往对话（`:main`）发的消息落在主时间线，不进根消息下面的 thread（工单 #500）；回复消息事件才回到 thread（2026-11-02）。
     const read = await hub.readConversation("slack:@U0NINA", 10);
-    expect(read.messages.map((message) => [message.role, message.ref])).toEqual([["them", slack.messages[0]!.ts]]);
-    const thread = await hub.readConversation(read.messages[0]!.thread!.objectKey, 10);
-    expect(thread.messages.map((message) => [message.role, message.ref])).toEqual([
+    expect(read.messages.map((message) => [message.role, message.ref])).toEqual([
       ["them", slack.messages[0]!.ts], ["assistant", slack.sent("D0NINA")[0]!.ts],
     ]);
+    expect(read.messages.every((message) => !message.thread)).toBe(true);
   });
 
   it("rewrites a message that Lead sent, with the same kind of signature as a new message", async () => {

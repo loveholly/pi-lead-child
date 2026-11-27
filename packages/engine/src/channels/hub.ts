@@ -1337,6 +1337,8 @@ export class ChannelHub {
     options: {
       revokeWindowMs: number; resume?: boolean; outgoing?: OutgoingReply; resolution?: { by: string; action: string };
       holdSince?: { seq: number } | { at: number };
+      // 发到这里，不用卡的 replyTarget（往 `:main` 发消息：主时间线，不进卡所在的 thread）。给了时也不改写卡上的「正在处理」。
+      target?: Record<string, string>;
     },
   ): Promise<ChannelOutboundOutcome | null> {
     if (this.sending.has(card.id)) return null;
@@ -1362,7 +1364,7 @@ export class ChannelHub {
       } : null);
       if (!outgoing) return null;
       // 用回复改写这张卡上还没被改写过的「正在处理」，不另发一条（用户 2026-10-22）。来源不能改写时照常另发。
-      const replaces = adapter.capabilities.edit ? this.openStatusMessage(card.id) : null;
+      const replaces = adapter.capabilities.edit && !options.target ? this.openStatusMessage(card.id) : null;
       // 助手写的正文（代你发的、你照草稿发的）发出去以前把邮箱脱敏（落地计划 A7）。你自己改过的文字原样发。
       const masked = outgoing.by === "auto" || outgoing.fromDraft ? maskOutgoing(outgoing) : { ...outgoing, masked: 0 };
       if (masked.masked) this.log(`[channels] ${adapter.id}: masked ${masked.masked} email address(es) in the reply on card #${card.id}`);
@@ -1370,6 +1372,7 @@ export class ChannelHub {
         by: outgoing.by, key: outgoing.key, text: clipEventText(masked.text, CHANNEL_CARD_TEXT_MAX + 200),
         ...(masked.parts ? { parts: clipParts(masked.parts) } : {}),
         ...(replaces ? { replaces } : {}),
+        ...(options.target ? { target: options.target } : {}),
         fromDraft: outgoing.fromDraft, status: "pending", remoteRef: {}, at: this.now().toISOString(),
         failures: 0, nextAttemptAt: null, error: null,
       };
@@ -1384,7 +1387,7 @@ export class ChannelHub {
       const perform = (replaces: Record<string, string> | null | undefined) => this.outbox.perform(adapter, context!, {
         key: sent.key, purpose, cardId: claimed.id,
         request: {
-          action: replaces ? "edit" : "reply", objectKey: claimed.objectKey, target: replaces ?? claimed.replyTarget, text: sent.text,
+          action: replaces ? "edit" : "reply", objectKey: claimed.objectKey, target: replaces ?? sent.target ?? claimed.replyTarget, text: sent.text,
           ...(sent.parts ? { parts: sent.parts } : {}),
         },
       });
@@ -2018,7 +2021,7 @@ export class ChannelHub {
    * since：这条回复排上的位置（ownReplySince）。用户本人在这以后在这个对话里亲手回过时不发：回复只放到卡上，held 是 true。
    */
   private async leadReply(
-    adapter: ChannelAdapter, card: ChannelCard, text: string, since: { seq: number } | { at: number },
+    adapter: ChannelAdapter, card: ChannelCard, text: string, since: { seq: number } | { at: number }, target?: Record<string, string>,
   ): Promise<{ card: ChannelCard; reasons: string[]; held: boolean }> {
     // 派了活还没交回：子 agent 的结果交回以后由出站检验定代你回还是交给你，「正在处理」已经告诉了对方。现在回会让卡提前结束。
     const task = this.awaitingTask(card.id);
@@ -2028,7 +2031,7 @@ export class ChannelHub {
     const latest = getChannelCard(this.db, card.id)!;
     const draft = latest.draft!;
     const outcome = await this.sendReply(adapter, latest, "auto_reply", {
-      revokeWindowMs: AUTHORITY_REVOKE_WINDOW_MS, holdSince: since,
+      revokeWindowMs: AUTHORITY_REVOKE_WINDOW_MS, holdSince: since, ...(target ? { target } : {}),
       outgoing: {
         key: `answer:card:${latest.id}:seq:${draft.forSeq}`, by: "auto", fromDraft: true,
         ...autoReplyDisclosure(this.assistantFor(adapter), this.ownerNameFor(adapter), draft.text),
@@ -2216,6 +2219,9 @@ export class ChannelHub {
     const key = `message:${place.objectKey}:${randomUUID()}`;
     const sent = { conversation: conversationId, label: place.label, objectKey: place.objectKey, text: message.text, outcome: "sent" as const };
     const waiting = getOpenChannelCard(this.db, place.objectKey);
+    // 发到哪里（工单 #500）：回复一条消息事件（event）回到那条消息的 thread，用卡的 replyTarget。其余按对话编号发：
+    // `:main` 发到主时间线（没有 thread_ts），`<频道>:<ts>` 发进那个 thread。卡还是跟着结束，只是不用卡里的 thread。
+    const target = input.event === undefined ? place.target : undefined;
     let card: ChannelSentMessage["card"] = null;
     if (waiting && !this.seenBy(waiting, input.seenBefore)) {
       card = { id: waiting.id, state: waiting.state, note: `卡 #${waiting.id} 在你这一轮开始之后又来了新消息，没有结束；先告诉用户` };
@@ -2224,7 +2230,7 @@ export class ChannelHub {
       if (this.sending.has(waiting.id) || waiting.sent?.status === "pending") {
         throw new ChannelActionError("conflict", `卡 #${waiting.id} 正在发别的回复，等它发完再回`);
       }
-      const replied = await this.leadReply(adapter, waiting, text, since ?? { seq: waiting.lastSeq });
+      const replied = await this.leadReply(adapter, waiting, text, since ?? { seq: waiting.lastSeq }, target);
       if (replied.held) {
         return {
           ...sent, outcome: "drafted", reasons: replied.reasons,
@@ -2239,7 +2245,7 @@ export class ChannelHub {
     } else if (waiting) {
       // 这条消息就是你对这张卡的回复：走卡的发送（改写「正在处理」、卡「已回复」、事件处理掉）。
       const outcome = await this.sendReply(adapter, waiting, "user_reply", {
-        revokeWindowMs: 0,
+        revokeWindowMs: 0, ...(target ? { target } : {}),
         outgoing: { key, text: message.text, ...(message.parts ? { parts: message.parts } : {}), fromDraft: false, by: "user" },
         resolution: { by: input.by, action: "send_message" },
       });

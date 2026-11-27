@@ -248,6 +248,8 @@ export interface ChannelCardSent {
   status: "pending" | "sent" | "failed" | "retracted";
   // 改写的那条状态消息（「正在处理」，用回复覆盖它，落地计划 A3）。另发一条的回复没有这一项；改写失败以后清成 null。
   replaces?: Record<string, string> | null;
+  // 发到哪里，盖过卡自己的 replyTarget（往 `:main` 发消息时是没有 thread_ts 的主时间线）。没有这一项时用卡的 replyTarget。重试时照样用它。
+  target?: Record<string, string> | null;
   remoteRef: Record<string, string>;
   at: string;
   failures: number;
