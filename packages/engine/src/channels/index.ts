@@ -18,6 +18,7 @@ export * from "./memory.js";
 export * from "./intake.js";
 export * from "./intake-llm.js";
 export * from "./reply-check.js";
+export * from "./reply-target.js";
 export * from "./reply-gate.js";
 export * from "./reply-decision.js";
 export * from "./confidence-model.js";

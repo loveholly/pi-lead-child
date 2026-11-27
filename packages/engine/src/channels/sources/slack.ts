@@ -2362,6 +2362,12 @@ export function createSlackChannelAdapter(options: SlackChannelOptions): Channel
       return slackMessageLink(workspaceUrl ?? null, objectKey, ref);
     },
 
+    // 道的位置（工单 #589）：slack:<对话>:main 是主对话，slack:<对话>:<根的 ts> 是其中的 thread，group 是 slack:<对话>。
+    conversationPlace(objectKey: string): { group: string; thread: boolean } | null {
+      const match = /^slack:([A-Z0-9]+):(main|\d+\.\d+)$/.exec(objectKey);
+      return match ? { group: `${SLACK_SOURCE}:${match[1]}`, thread: match[2] !== "main" } : null;
+    },
+
     // 消息附带的文件（2026-11-02）：files.info 问下载地址，再带用户令牌下载。要 files:read（可选的权限，缺了只是看不到文件）。
     async readFile(ref: string, readOptions: { maxBytes: number }, context: ChannelAdapterContext): Promise<ChannelFile> {
       if (!SLACK_FILE_ID.test(ref)) throw new ChannelFileNotFoundError(`不是 Slack 的文件编号：${ref}`);

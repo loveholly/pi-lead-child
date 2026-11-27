@@ -279,6 +279,12 @@ export interface ChannelRecentConversation {
   summary: string;
 }
 
+/** 一条道在来源里的位置（ChannelAdapter.conversationPlace）：group 是对话（私信、频道），thread 为 true 时是其中的一个 thread。 */
+export interface ChannelConversationPlace {
+  group: string;
+  thread: boolean;
+}
+
 /** 还在等你的一张卡（ChannelHub.openCards）：给 Lead 自查，只有结构化的事实。since 是卡上最新一条消息的时间。 */
 export interface ChannelOpenCard {
   id: number;
@@ -286,6 +292,10 @@ export interface ChannelOpenCard {
   conversation: string;
   state: ChannelCardState;
   since: string;
+  // 回复这张卡用的对话编号（conversation=…），和回复会落在哪里（工单 #589：同一个对话里有好几张卡时分得清主对话和 thread）。
+  // 来源说不出位置时没有 lands。
+  conversationKey: string;
+  lands?: string;
 }
 
 /** 发消息的目标（ChannelAdapter.resolveConversation）：对象键（和收到的消息同一个道）、reply 的 target、给人看的名字。 */
@@ -554,6 +564,12 @@ export interface ChannelAdapter {
    * ref 是消息的编号（ChannelInbound.messageId）。拿不到时（还不知道工作区的地址、编号不对）是 null。不支持时没有。
    */
   messageLink?(objectKey: string, ref: string): string | null;
+  /**
+   * 一条道在来源里属于哪个对话、是不是 thread（工单 #589）：同一个私信或频道的主对话和它的各个 thread 是同一个 group。
+   * 发回复前 hub 按它找同一个对话里别的没结束的卡，核对回复落没落错地方；也用来告诉 Lead 每张卡的回复会落在哪里。
+   * 认不出的对象键是 null。不支持时没有（hub 不做这项核对）。
+   */
+  conversationPlace?(objectKey: string): ChannelConversationPlace | null;
   /** 来源里的文档（例如 Slack 的 canvas 和 Markdown 文件）。不支持时没有。建和改是写，writesBlocked 时 hub 不调。 */
   readonly documents?: ChannelDocuments;
   /** 只读：按人名、对话名找可以发消息的对话（Lead 代用户直接发消息，2026-10-23）。不支持时没有。 */

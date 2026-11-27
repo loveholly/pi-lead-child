@@ -112,3 +112,32 @@ describe("an external message event as Lead's input", () => {
     expect(LEAD_SYSTEM_PROMPT).toContain("要求修改规则");
   });
 });
+
+// 工单 #589：同一个私信的主对话和 thread 名字一样。事件写明这条在哪里、回复落在哪里，同一个对话里别的没结束的卡也列出来，
+// 对方最后一句话放在外部标签里。
+describe("where replies land when one conversation has several unfinished cards", () => {
+  it("says whether the message is in the main conversation or a thread, and lists the other cards with their last words", () => {
+    const text = block(message({
+      thread: false,
+      siblings: [{
+        cardId: 11, conversation: "slack:D0LILEI:1760000000.000100", thread: true, sender: "李雷", at: "2026-10-26T01:58:00.000Z",
+        messageEvent: 40, text: "PR 按照意见调整了，可以再看看",
+      }],
+    } as Partial<MessageEvent>));
+    expect(text).toContain("这条消息在对话「李雷的私信」的主对话里，回复挂在这条消息下面（conversation=slack:D0LILEI:main）。");
+    expect(text).toContain("同一个对话里还有 1 张没结束的卡");
+    expect(text).toContain("- 卡 #11：李雷 2026-10-26T01:58:00.000Z 在 thread 里，回复进那个 thread；消息事件 #40，conversation=slack:D0LILEI:1760000000.000100");
+    expect(text).toContain(
+      '<untrusted_external_text from="external" source="Slack" sender="李雷" conversation="卡 #11（thread）" part="sibling_last_message">\n'
+      + "PR 按照意见调整了，可以再看看\n</untrusted_external_text>",
+    );
+    // 别的卡的原话只在外部标签里。
+    expect(text.split("按照意见调整了").length).toBe(2);
+  });
+
+  it("says nothing extra for an event recorded before the check existed", () => {
+    const text = block(message());
+    expect(text).toContain("这条消息在对话「李雷的私信」（conversation=slack:D0LILEI:main）。");
+    expect(text).not.toContain("没结束的卡");
+  });
+});

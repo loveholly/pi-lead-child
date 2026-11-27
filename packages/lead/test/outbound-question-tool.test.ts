@@ -14,6 +14,7 @@ let deps: LeadDeps;
 let itemId: number;
 let decisionId: number;
 let sent: string[];
+let checked: boolean[];
 
 // send_channel_message 只在接了外部通道时注册（tools.ts 看 deps.channelCards）：这里直接取通道的那一组工具。
 function tool(name: string) {
@@ -27,10 +28,12 @@ beforeEach(() => {
   process.env.PLC_DATA_DIR = dir;
   db = openDb(join(dir, "plc.db"));
   sent = [];
+  checked = [];
   const channelMessages: ChannelMessageService = {
     canSend: () => true,
     send: async (conversationId, input) => {
       sent.push(input.text);
+      checked.push(input.targetChecked === true);
       return { conversation: conversationId, label: "Nina的私信", objectKey: "slack:D0NINA:main", text: input.text, card: null, outcome: "auto_sent" };
     },
     react: async () => { throw new Error("not used"); },
@@ -92,5 +95,16 @@ describe("the wait block when an outbound question runs out of time", () => {
     expect(block).toContain("交给用户");
     expect(block).toContain("不要再催");
     expect(block).not.toContain("决定再等");
+  });
+});
+
+// 工单 #589：回复落点的核对拦下以后，Lead 确认没回错时带 confirm_target=true 重发，系统不再核对。
+describe("send_channel_message after the reply-target check", () => {
+  it("passes confirm_target on as targetChecked, and only when Lead gives it", async () => {
+    await tool("send_channel_message").execute("t", { conversation: "slack:D0NINA:main", text: "收到", words: "assistant", reason: "r" });
+    await tool("send_channel_message").execute("t", {
+      conversation: "slack:D0NINA:main", text: "收到", words: "assistant", reason: "r", confirm_target: true,
+    });
+    expect(checked).toEqual([false, true]);
   });
 });
