@@ -1,9 +1,10 @@
-import { Box, Card, Column, Icon, ListItem, Text } from '@pi-lead-child/components';
+import { Box, Card, Column, Icon, ListItem, Text, openURL } from '@pi-lead-child/components';
 import type { KernelArtifact } from '@pi-lead-child/protocol';
 
 import { useMessages } from '@/i18n';
 import type { ArtifactDownloadState } from '@/state/types';
 
+import type { TicketPullRequest } from './pullRequestLink';
 import { ticketRecordsMessages } from './ticketRecords.messages';
 
 // 工单产物列表。可用的产物可以下载；下载中可以取消，失败可以重试。
@@ -65,6 +66,35 @@ export function ArtifactList({
         );
       })}
     </Column>
+  );
+}
+
+// 工单登记的 PR：产物区里的一行，点一下在 GitHub 上打开。样子和文件产物同一张卡。
+export function PullRequestArtifact({ pullRequest }: { pullRequest: TicketPullRequest }) {
+  const m = useMessages(ticketRecordsMessages).pullRequest;
+  return (
+    <Card
+      testID="ticket-pull-request"
+      aria-label={m.label(pullRequest.name)}
+      minH={60}
+      overflow="hidden"
+      borderColor="border-soft"
+      boxShadow="0 1px 3px rgba(16,24,40,0.04)"
+    >
+      <ListItem
+        testID="ticket-pull-request-open"
+        onPress={() => openURL(pullRequest.url)}
+        mono
+        title={pullRequest.name}
+        subtitle={m.meta}
+        leading={(
+          <Box w={36} h={36} rounded="lg" bg="accent-soft" items="center" justify="center">
+            <Icon name="arrow-up-right" color="accent" size={17} />
+          </Box>
+        )}
+        trailing={<Text size="label" weight="bold" tone="accent">{m.open}</Text>}
+      />
+    </Card>
   );
 }
 

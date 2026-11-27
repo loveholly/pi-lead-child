@@ -18,6 +18,7 @@ import {
   type TicketProjectScope,
   type TicketRailState,
 } from './model';
+import { ticketPullRequest } from '@/features/tickets/pullRequestLink';
 import { waitedText } from './waitedText';
 import { railMessages } from './rail.messages';
 import { milestoneChip } from './timelineModel';
@@ -99,6 +100,8 @@ function TicketRow({ ticket, selected, onSelect }: { ticket: Ticket; selected: b
 // 侧栏里的工单卡片：头像、标题、一行说明；执行中的工单多一条进度。
 function TicketRailCard({ ticket, selected, onSelect }: { ticket: Ticket; selected: boolean; onSelect: () => void }) {
   const locale = useLocale();
+  const m = useMessages(railMessages);
+  const pullRequest = ticketPullRequest(ticket.workspace);
   const progressPercent = clampPercent(ticket.progressPercent);
   const hasProgress = ticket.status === 'active' && progressPercent !== undefined;
   // 右边的停留时间：在当前 stage 待了多久。已结束的工单不写。
@@ -149,6 +152,12 @@ function TicketRailCard({ ticket, selected, onSelect }: { ticket: Ticket; select
           </Row>
           <Row mt="text-stack" items="center" gap="inline-item">
             <Text flex={1} minW={0} size="secondary" tone="muted" numberOfLines={1}>{ticketRailCaption(ticket, locale)}</Text>
+            {pullRequest ? (
+              <Box testID={`ticket-pr-chip-${ticket.id}`} px="pill-x" rounded={5} bg="accent-soft" shrink={0}>
+                {/* spacing-exempt: 徽标字号行高 */}
+                <Text size="10" leading={15} weight="bold" color="accent">{m.pullRequestChip(pullRequest.short)}</Text>
+              </Box>
+            ) : null}
             {due ? (
               <Box px="pill-x" rounded={5} bg={due.overdue ? 'danger-soft' : 'warning-soft'}>
                 {/* spacing-exempt: 徽标字号行高 */}

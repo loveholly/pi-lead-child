@@ -18,6 +18,14 @@ function renderWorkbench(width: number) {
 
 afterEach(() => setViewportWidth(0));
 
+// 工单登记了 PR（link_pr，工单 #497）：#493 的 PR 是推到 fork 以后手动开的，面板和产物区都看不到它。
+const WITH_PULL_REQUEST = ticket66({
+  workspace: {
+    id: 7, ownerTicketId: TICKET, mode: 'isolated', kind: 'isolated_child', state: 'review_hold', inherited: false,
+    availableActions: [], pullRequestUrl: 'https://github.com/acme/widgets/pull/85',
+  },
+});
+
 describe('the evidence and records of a ticket', () => {
   it('opens in the Lead conversation column on desktop and keeps the ticket chat open on the right', () => {
     const runtime = renderWorkbench(1280);
@@ -93,5 +101,29 @@ describe('the evidence and records of a ticket', () => {
     expect(within(within(records).getByTestId('attempt-79')).getByText('codex · gpt-6.1-sol · effort high')).toBeTruthy();
     expect(within(within(records).getByTestId('attempt-49')).getByText('claude · opus · effort max')).toBeTruthy();
     expect(within(records).getByTestId('run-log-group-79').textContent).toContain('codex · gpt-6.1-sol · effort high · ');
+  });
+
+  it('lists the ticket\'s pull request among the artifacts and opens it on GitHub', () => {
+    const open = vi.spyOn(window, 'open').mockImplementation(() => null);
+    renderWorkbenchWithTicket(WITH_PULL_REQUEST, { width: 1280 });
+    fireEvent.click(within(openHistory(screen.getByTestId('ticket-thread'))).getByTestId('ticket-records-open'));
+    const records = screen.getByTestId('ticket-records');
+
+    // 页签上的数字算上这个 PR；没有文件产物时也不显示「没有产物」。
+    expect(within(records).getByTestId('ticket-records-tab-artifacts').textContent).toBe('Artifacts 1');
+    fireEvent.click(within(records).getByTestId('ticket-records-tab-artifacts'));
+    const row = within(records).getByTestId('ticket-pull-request');
+    expect(row.textContent).toContain('acme/widgets#85');
+    expect(within(records).queryByText('No artifacts')).toBeNull();
+    fireEvent.click(within(row).getByTestId('ticket-pull-request-open'));
+    open.mockRestore();
+  });
+
+  it('shows no pull request row for a ticket that has none', () => {
+    renderWorkbench(1280);
+    fireEvent.click(within(openHistory(screen.getByTestId('ticket-thread'))).getByTestId('ticket-records-open'));
+    const records = screen.getByTestId('ticket-records');
+    fireEvent.click(within(records).getByTestId('ticket-records-tab-artifacts'));
+    expect(within(records).queryByTestId('ticket-pull-request')).toBeNull();
   });
 });

@@ -113,6 +113,12 @@ export const ticketRecordsMessages = defineMessages({
       downloadDone: 'Download complete',
       label: (action: string, name: string, error: string | null) => `${action} ${name}${error ? `, ${error}` : ''}`,
     },
+    // 工单登记的 PR，列在产物区。
+    pullRequest: {
+      meta: 'GitHub pull request',
+      open: 'Open',
+      label: (name: string) => `Open pull request ${name} on GitHub`,
+    },
     // TicketTiming
     timing: { label: 'Time', notStarted: 'Not started', aria: (value: string) => `Time ${value}` },
     // TimelineRow
@@ -219,6 +225,11 @@ export const ticketRecordsMessages = defineMessages({
       downloadFailed: '下载失败',
       downloadDone: '下载完成',
       label: (action, name, error) => `${action} ${name}${error ? `，${error}` : ''}`,
+    },
+    pullRequest: {
+      meta: 'GitHub 上的 PR',
+      open: '打开',
+      label: (name) => `在 GitHub 上打开 PR ${name}`,
     },
     timing: { label: '耗时', notStarted: '尚未开始', aria: (value) => `耗时 ${value}` },
     approve: '批准',

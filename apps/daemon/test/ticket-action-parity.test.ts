@@ -223,6 +223,8 @@ const CASES: Case[] = [
     fixture: (db, dir) => ({ itemId: deliveredCode(db, dir, "review") }) },
   { action: "set_auto_pr", authority: "lead", fixture: (db) => ({ itemId: ready(db), input: { enabled: false } }) },
   { action: "open_pr", authority: "on_behalf", fixture: (db, dir) => ({ itemId: deliveredCode(db, dir, "done") }) },
+  { action: "link_pr", authority: "lead",
+    fixture: (db, dir) => ({ itemId: deliveredCode(db, dir, "done"), input: { url: "https://github.com/acme/x/pull/1" } }) },
   { action: "abandon", authority: "on_behalf", fixture: (db, dir) => ({ itemId: deliveredCode(db, dir, "done") }) },
   { action: "open_delivery_file", authority: "on_behalf",
     fixture: (db, dir) => ({ itemId: deliveredCode(db, dir, "review"), input: { path: "docs/plan.md" } }) },

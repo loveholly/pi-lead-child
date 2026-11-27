@@ -45,6 +45,8 @@ export function decisionLabel(
   if (byVerdict) return { title: byVerdict, unknownId: null };
   const byAuthority = authorityTitle(decision, payload.authority, leadName, locale);
   if (byAuthority) return { title: byAuthority, unknownId: null };
+  // link_pr 登记的 PR 也写 workspace_pr_opened（带 linked 标记）：不是系统开的，也不一定是草稿。
+  if (decision === 'workspace_pr_opened' && payload.linked === true) return { title: m.linkedPullRequest, unknownId: null };
   const known = knownTitle(decision, leadName, locale);
   if (known) return { title: known, unknownId: null };
   // 用户动作直接用中文记（「开始执行」「停止执行」），不是机器 id。认得的按当前语言写，别的原样显示。

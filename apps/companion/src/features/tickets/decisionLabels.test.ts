@@ -44,6 +44,9 @@ describe('decision titles in the lifecycle', () => {
     expect(decisionLabel('review_requested_by_lead', 'Paimon').title).toBe('Paimon requested an independent review');
     expect(decisionLabel('review_requested_by_lead', 'Jarvis').title).toBe('Jarvis requested an independent review');
     expect(decisionLabel('workspace_pr_opened', 'Paimon').title).toBe('Opened a draft PR');
+    // link_pr 登记的 PR 也写这个 id（带 linked 标记）：标题写登记，不写「开了草稿 PR」。
+    expect(decisionLabel('workspace_pr_opened', 'Paimon', { linked: true }).title).toBe('Linked an existing PR');
+    expect(decisionLabel('workspace_pr_opened', 'Paimon', { linked: true }, 'zh').title).toBe('登记了已有的 PR');
     // 2026-10-21：v51 按新口径重算 token 用量时给工单写的活动。
     expect(decisionLabel('token_usage_recomputed', 'Paimon')).toEqual({ title: 'Calculated the token usage again with the new method', unknownId: null });
   });

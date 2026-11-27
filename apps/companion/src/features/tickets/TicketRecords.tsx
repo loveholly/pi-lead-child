@@ -1,10 +1,11 @@
 import { Box, Button, Column, Row, ScrollArea, SegmentedControl, Text } from '@pi-lead-child/components';
 import { useState } from 'react';
 
-import { ArtifactList } from './ArtifactList';
+import { ArtifactList, PullRequestArtifact } from './ArtifactList';
 import { CheckpointFeed } from './CheckpointFeed';
 import { LogTimeline, RunLogGroups } from './LogTimeline';
 import { PowPanel } from './PowPanel';
+import { ticketPullRequest } from './pullRequestLink';
 import { DetailEmpty, SectionHeader } from './TicketDetailLayout';
 import { TicketHistorySections } from './TicketHistorySections';
 import type { TicketThreadProps } from './TicketThread';
@@ -68,13 +69,14 @@ export function TicketRecords({
     artifactCount: artifacts.length,
     locale,
   }).artifactState;
+  const pullRequest = ticketPullRequest(ticket.workspace);
   const ticketDisplayId = ticket.displayId ?? ticket.id;
   const options: { value: TicketRecordsTab; label: string }[] = [
     { value: 'evidence', label: m.tabs.evidence(evidence.needsAttention) },
     { value: 'progress', label: m.tabs.progress(checkpoints.length) },
     { value: 'runs', label: m.tabs.runs(attempts.length) },
     { value: 'lifecycle', label: m.tabs.lifecycle },
-    { value: 'artifacts', label: m.tabs.artifacts(artifacts.length) },
+    { value: 'artifacts', label: m.tabs.artifacts(artifacts.length + (pullRequest ? 1 : 0)) },
   ];
   return (
     <Column testID="ticket-records" flex={1} minW={0} minH={0} bg="surface">
@@ -168,16 +170,19 @@ export function TicketRecords({
             />
           ) : null}
           {tab === 'artifacts' ? (
-            artifacts.length > 0 && artifactCapability === 'available'
-              ? (
-                <ArtifactList
-                  items={artifacts}
-                  downloadStates={artifactDownloadStates}
-                  onDownload={onDownloadArtifact}
-                  onCancel={onCancelArtifactDownload}
-                />
-              )
-              : <DetailEmpty title={artifactState.title} body={artifactState.body} icon="folder" />
+            <Column gap="stacked-card">
+              {pullRequest ? <PullRequestArtifact pullRequest={pullRequest} /> : null}
+              {artifacts.length > 0 && artifactCapability === 'available'
+                ? (
+                  <ArtifactList
+                    items={artifacts}
+                    downloadStates={artifactDownloadStates}
+                    onDownload={onDownloadArtifact}
+                    onCancel={onCancelArtifactDownload}
+                  />
+                )
+                : pullRequest ? null : <DetailEmpty title={artifactState.title} body={artifactState.body} icon="folder" />}
+            </Column>
           ) : null}
         </Column>
       </ScrollArea>

@@ -23,7 +23,7 @@ import {
 } from "@pi-lead-child/store";
 import type { Item, ItemStage, Workspace } from "@pi-lead-child/core";
 import { readHead } from "@pi-lead-child/core";
-import { redactSecretText } from "@pi-lead-child/protocol";
+import { parseGithubPullRequestUrl, redactSecretText } from "@pi-lead-child/protocol";
 import { abandonIsolatedWorkspace, contentMergedInto, integrateIsolatedWorkspace, withWorkspaceLock } from "./workspace.js";
 import { worktreeBaseBranch } from "./workspace-remote.js";
 import { checkPushAgainstOrigin } from "./push-guard.js";
@@ -35,7 +35,7 @@ import {
 import {
   currentDeliverySnapshot, DELIVERY_MAX_FILES, deliveryDiff, latestDeliveryCaptureFailure, recordedDeliverySnapshot,
 } from "./delivery-snapshot.js";
-import { transitionBy, type ActionAttribution } from "../ticket-actions/attribution.js";
+import { behalfCursor, behalfFields, transitionBy, type ActionAttribution } from "../ticket-actions/attribution.js";
 
 export { deliveryFileHiddenReason, normalizeDeliveryPath, type DeliveryFileStatus };
 
@@ -880,6 +880,32 @@ export async function openDeliveryPullRequest(
   });
 }
 
+/**
+ * 登记一个已经开好的 PR（工单 #497）。这台机器没有 origin 的推送权限时，PR 是分支推到 fork 以后手动开的，
+ * openDeliveryPullRequest 不会写记录，工单就不知道有这个 PR。这里只写一条 workspace_pr_opened（带 linked 标记），
+ * 不推送、不调 gh：交付视图、工单列表和产物区都读这一条。工单已经有别的 PR 时用新的换掉，旧地址记在 replaces 里。
+ */
+export async function linkDeliveryPullRequest(
+  db: Db, itemId: number, input: { url: string; reason: string; by: ActionAttribution },
+): Promise<{ url: string; changed: boolean; replaced: string | null }> {
+  const ref = parseGithubPullRequestUrl(input.url);
+  if (!ref) throw new DeliveryError("invalid_request", "PR 的地址要写成 https://github.com/<owner>/<repo>/pull/<编号>。");
+  return oneAtATime(itemId, async () => {
+    const workspace = requireIsolated(db, itemId);
+    const previous = latestDecision(db, itemId, "workspace_pr_opened", workspace.id)?.url ?? null;
+    if (previous === ref.url) return { url: ref.url, changed: false, replaced: null };
+    const head = await workspaceHead(db, workspace, { timeout: 5_000 }).catch(() => null);
+    addActivity(db, {
+      itemId, actor: input.by.actor, kind: "decision", ...behalfCursor(input.by),
+      payload: {
+        decision: "workspace_pr_opened", workspaceId: workspace.id, branch: workspace.branch, url: ref.url, head,
+        linked: true, ...(previous ? { replaces: previous } : {}), reason: input.reason, ...behalfFields(input.by),
+      },
+    });
+    return { url: ref.url, changed: true, replaced: previous };
+  });
+}
+
 // 推送之前查这条分支和 origin 的默认分支有没有共同历史（push-guard.ts，#288）。不通过时不推、不开 PR：
 // 在工单上记下原因，抛错。谁来告诉 Lead：用户点的按钮由这里叫醒 Lead；Lead 自己调的 open_pr 直接拿到这个报错；
 // 系统自动开、自动更新的由 auto-pull-request.ts 告诉 Lead（同一个提交只告诉一次）。
@@ -991,6 +1017,10 @@ export async function updateDeliveryPullRequest(
     const delivery = await ticketDelivery(db, itemId);
     const url = delivery.workspace?.pullRequestUrl ?? null;
     if (!url) throw new DeliveryError("unavailable", "这张工单还没有 PR。");
+    // 人工登记的 PR 不更新（auto-pull-request.ts 排计划时也跳过）。计划和拿锁之间用户可能刚登记，所以这里再认一次。
+    if (latestDecision(db, itemId, "workspace_pr_opened", workspace.id)?.linked) {
+      throw new DeliveryError("unavailable", "这个 PR 是人工登记的，系统不更新它。");
+    }
     if (delivery.workspace!.uncommittedFiles > 0) {
       throw new DeliveryError("unavailable", `分支上还有 ${delivery.workspace!.uncommittedFiles} 个没提交的文件，先让工单的 agent 提交。`);
     }

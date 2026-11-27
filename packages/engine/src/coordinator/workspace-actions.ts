@@ -7,6 +7,7 @@ import { getItem } from "@pi-lead-child/store";
 import type { Workspace } from "@pi-lead-child/core";
 import { getWorkspace, listWorkspaces, resolveWorkspace } from "@pi-lead-child/store";
 import { BY_USER, behalfCursor, behalfFields, type ActionAttribution } from "../ticket-actions/attribution.js";
+import { deliveryWorkspace, latestDecision } from "./delivery-source.js";
 import { cleanupWorkspace, releaseWorkspace } from "./workspace.js";
 
 export type WorkspaceActionId = "release" | "cleanup";
@@ -33,6 +34,8 @@ export interface WorkspaceControl {
   retainedUntil: string | null;
   inherited: boolean;
   availableActions: WorkspaceActionId[];
+  // 工单登记的 PR 地址（系统开的，或 link_pr 登记的）。没有时不出现。
+  pullRequestUrl?: string;
 }
 
 const RELEASABLE_STATES = ["active", "idle", "review_hold"];
@@ -136,10 +139,14 @@ export function createWorkspaceActionService(db: Db): WorkspaceActionService {
       const availableActions = resolved.inherited
         ? []
         : (["release", "cleanup"] as const).filter((action) => workspaceActionBlocker(db, workspace, action) === null);
+      // PR 记在交付用的那个工作区上（delivery.ts 的 deliveryWorkspace），和交付视图读同一条记录。
+      const delivered = deliveryWorkspace(db, resolved.ownerItemId);
+      const pullRequestUrl = delivered ? latestDecision(db, resolved.ownerItemId, "workspace_pr_opened", delivered.id)?.url : undefined;
       return {
         id: workspace.id, ownerTicketId: resolved.ownerItemId, mode: workspace.mode, kind: workspace.kind,
         state: workspace.state, mergeStatus: workspace.merge_status, retainedUntil: workspace.retained_until,
         inherited: resolved.inherited, availableActions,
+        ...(pullRequestUrl ? { pullRequestUrl } : {}),
       };
     },
   };

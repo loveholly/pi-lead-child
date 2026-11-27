@@ -4,7 +4,7 @@
 // 执行前也查它。所以页面上能点的按钮，点下去不会因为另一套判断被拒（输入本身不对、或者查完以后状态又变了除外）。
 // run 调已有的实现（lifecycle.ts、delivery.ts、change-reviewer.ts、store 的 ticket-relations.ts……），不另写一份。
 import type { Item, Run, RuntimeId } from "@pi-lead-child/core";
-import { canTransitionStage, GrantError, widenRunGrant } from "@pi-lead-child/protocol";
+import { canTransitionStage, GrantError, parseGithubPullRequestUrl, widenRunGrant } from "@pi-lead-child/protocol";
 import {
   activeDelegationPolicy, activeLeadGrant, addActivity, applyRunGrantChange, getLocale, getRunGrant, latestRunGrantOfItem, leadGrantAuthorityLabel,
   RunGrantConflictError, transition,
@@ -18,7 +18,8 @@ import { leadBudgetRaiseBlocker, reportLeadBudgetRaise } from "./budget-raise.js
 import { changeReviewer, reviewerInfo, suspendedReviewRuntime } from "../coordinator/change-reviewer.js";
 import { applyReviewAutomation } from "../coordinator/delegated-review.js";
 import { deliveryFileOpenBlocker, openDeliveryFile } from "../coordinator/delivery-open.js";
-import { abandonDelivery, mergeDelivery, openDeliveryPullRequest, type DeliveryExpectation } from "../coordinator/delivery.js";
+import { abandonDelivery, linkDeliveryPullRequest, mergeDelivery, openDeliveryPullRequest, type DeliveryExpectation } from "../coordinator/delivery.js";
+import { deliveryWorkspace } from "../coordinator/delivery-source.js";
 import { autoPullRequestEnabled, setAutoPullRequest } from "../coordinator/auto-pull-request.js";
 import { createDispatcher } from "../coordinator/dispatch.js";
 import { warmRunWorkspaceFacts } from "../coordinator/workspace-policy.js";
@@ -815,6 +816,25 @@ export const TICKET_ACTIONS: TicketActionCatalog = {
         ...(expected ? { expected } : {}),
       });
       return { delivery, pullRequestUrl };
+    },
+  },
+
+  // 登记已有的 PR（工单 #497）：不推送、不调 gh，只在工单上记下这个 PR 的地址，交付视图、工单列表和产物区就都能看到。
+  // 这台机器推不了 origin 时，PR 是分支推到 fork 以后手动开的，用它补登。已经有 PR 时用新的换掉。
+  link_pr: {
+    id: "link_pr", label: "登记已有的 PR", area: "delivery", scope: "tickets:create",
+    permission: "lead_allowed", external: false, irreversible: false, ownerAction: null,
+    hint: "把一个已经开好的 GitHub PR 登记到这张编码工单上（url 写成 https://github.com/<owner>/<repo>/pull/<编号>）。"
+      + "分支是推到 fork 以后手动开的 PR 时用它，工单面板和详情才看得到这个 PR；它不推送、不开 PR。工单已经有 PR 时用新的换掉。",
+    defaultReason: "用户登记了一个已经开好的 PR",
+    available: (item, env) => deliveryWorkspace(env.db, item.id)
+      ? AVAILABLE : unavailable("这张工单没有单独的分支，没有地方登记 PR。"),
+    run: async ({ db, item, input, by, reason }) => {
+      if (!parseGithubPullRequestUrl(input.url)) {
+        throw new TicketActionError("invalid_input", "link_pr 的输入不对：PR 的地址要写成 https://github.com/<owner>/<repo>/pull/<编号>。");
+      }
+      const linked = await linkDeliveryPullRequest(db, item.id, { url: input.url, reason, by });
+      return { pullRequestUrl: linked.url, changed: linked.changed, replaced: linked.replaced };
     },
   },
 

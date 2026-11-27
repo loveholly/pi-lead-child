@@ -357,6 +357,7 @@ describe("the listing and the run agree", () => {
       case "set_run_profile": return { role: "reviewer", effort: "high" };
       case "change_executor_runtime": return { runtime: "codex" };
       case "set_auto_pr": return { enabled: false };
+      case "link_pr": return { url: "https://github.com/acme/x/pull/1" };
       case "open_delivery_file": return { path: "docs/plan.md" };
       case "edit_acceptance_criteria": return { add: ["空输入返回 400"] };
       case "confirm_criterion":

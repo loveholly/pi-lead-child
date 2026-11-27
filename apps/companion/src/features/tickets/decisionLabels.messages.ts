@@ -101,6 +101,8 @@ export const decisionLabelMessages = defineMessages({
     },
     acceptedWithoutReviewDelegated: (leadName: string) => `No independent review. ${leadName} accepted the ticket for you on the evidence`,
     recordedDecision: 'Recorded a decision',
+    // link_pr 登记的 PR：没有开 PR 这件事，不能写成「开了草稿 PR」。
+    linkedPullRequest: 'Linked an existing PR',
     // 用户的「开始执行」「停止执行」直接用中文记（activityKeys.ts），这里给当前语言的标题。
     startRun: 'Start run',
     stopRun: 'Stop run',
@@ -205,6 +207,7 @@ export const decisionLabelMessages = defineMessages({
     },
     acceptedWithoutReviewDelegated: (leadName) => `没有独立核查，${leadName} 凭证据代为验收`,
     recordedDecision: '记录决策',
+    linkedPullRequest: '登记了已有的 PR',
     startRun: '开始执行',
     stopRun: '停止执行',
     systemRecord: '系统记录',

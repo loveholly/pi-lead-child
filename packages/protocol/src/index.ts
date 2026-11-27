@@ -197,6 +197,8 @@ export const TicketWorkspaceControlSchema = StrictObject({
   retainedUntil: Type.Optional(Type.Union([Type.String(), Type.Null()])),
   inherited: Type.Boolean(),
   availableActions: Type.Array(WorkspaceControlActionIdSchema),
+  // 工单登记的 PR（系统开的，或 link_pr 登记的）：工单列表的卡片用它显示 PR。没有 PR 时不出现。
+  pullRequestUrl: Type.Optional(Type.String()),
 });
 export type TicketWorkspaceControl = Static<typeof TicketWorkspaceControlSchema>;
 

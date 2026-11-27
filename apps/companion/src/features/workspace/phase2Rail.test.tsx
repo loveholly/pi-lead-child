@@ -144,6 +144,22 @@ describe('the ticket tab', () => {
     expect(within(screen.getByTestId('ticket-row-66')).getByText('截止 overdue by 2 days')).toBeTruthy();
   });
 
+  // 工单 #497：登记了 PR 的工单，卡片上有 PR 编号；没有 PR 的不显示。
+  it('marks a ticket that has a pull request with its number', () => {
+    const { runtime } = render();
+    act(() => runtime.control.getState().replaceTickets(tickets.map((item) => item.id === 66 ? {
+      ...item,
+      workspace: {
+        id: 7, ownerTicketId: 66, mode: 'isolated', kind: 'isolated_child', state: 'review_hold', inherited: false,
+        availableActions: [], pullRequestUrl: 'https://github.com/acme/widgets/pull/85',
+      },
+    } : item)));
+    act(() => runtime.workspace.getState().setRailView('tickets'));
+
+    expect(within(screen.getByTestId('ticket-row-66')).getByTestId('ticket-pr-chip-66').textContent).toBe('PR #85');
+    expect(screen.queryByTestId('ticket-pr-chip-72')).toBeNull();
+  });
+
   it('has a search box that finds a ticket by its short title, original title or number', () => {
     const { runtime } = render();
     act(() => runtime.workspace.getState().setRailView('tickets'));

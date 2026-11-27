@@ -79,7 +79,7 @@ export function deliveryWorkspace(db: Db, itemId: number): Workspace | null {
     .sort((left, right) => right.id - left.id)[0] ?? null;
 }
 
-interface DecisionPayload { decision?: string; workspaceId?: number; head?: string | null; target?: string; url?: string }
+interface DecisionPayload { decision?: string; workspaceId?: number; head?: string | null; target?: string; url?: string; linked?: boolean }
 
 // 在 SQL 里按 decision 和工作区过滤，不先取最近 N 条再在代码里找（工单 07 审查 M4）：以前取最近 200 条 decision，
 // 打开文件的记录（delivery_file_opened）多了以后，合并和开 PR 的记录被挤出这个窗口，交付视图上的「合并到哪里」和 PR 链接就没了。

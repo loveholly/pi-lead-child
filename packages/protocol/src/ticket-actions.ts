@@ -28,7 +28,7 @@ export const TICKET_ACTION_IDS = [
   "pause_run", "resume_run", "stop_run", "request_review", "change_reviewer", "retry_review", "widen_grant",
   // 换模型和推理强度、换执行 agent（工单 08，spec 5.3）。
   "set_run_profile", "change_executor_runtime",
-  "complete", "accept_without_review", "rework", "merge", "set_auto_pr", "open_pr", "abandon",
+  "complete", "accept_without_review", "rework", "merge", "set_auto_pr", "open_pr", "link_pr", "abandon",
   "open_delivery_file",
   // 验收标准（工单 05）：编辑、确认一条、取消确认。
   ...ACCEPTANCE_CRITERIA_ACTION_IDS,
@@ -37,6 +37,19 @@ export type TicketActionId = typeof TICKET_ACTION_IDS[number];
 
 export function isTicketActionId(value: string): value is TicketActionId {
   return (TICKET_ACTION_IDS as readonly string[]).includes(value);
+}
+
+// link_pr 只收这一种地址：https://github.com/<owner>/<repo>/pull/<n>。没有查询串、锚点、末尾斜杠，也没有别的路径。
+const GITHUB_PULL_REQUEST_URL = /^https:\/\/github\.com\/([A-Za-z0-9](?:[A-Za-z0-9-]{0,38}))\/([A-Za-z0-9._-]{1,100})\/pull\/([1-9][0-9]{0,8})$/;
+
+export interface GithubPullRequestRef { owner: string; repo: string; number: number; url: string }
+
+/** 把 GitHub PR 的地址拆开。格式不对（别的网站、别的路径、带多余的部分）时返回 null。前后的空白不算。 */
+export function parseGithubPullRequestUrl(value: string): GithubPullRequestRef | null {
+  const url = value.trim();
+  const match = GITHUB_PULL_REQUEST_URL.exec(url);
+  if (!match || match[2] === "." || match[2] === "..") return null;
+  return { owner: match[1]!, repo: match[2]!, number: Number(match[3]), url };
 }
 
 // 谁能做（spec 5.11「Lead 代你做的规则」）：和工单以外的操作共用 ui-actions.ts 的四档（user_only、lead_allowed、delegated、
@@ -163,6 +176,8 @@ export const TICKET_ACTION_INPUT_SCHEMAS = {
   // 交付后自动开草稿 PR 的开关（用户 2026-10-26）。缺省开。
   set_auto_pr: StrictObject({ enabled: Type.Boolean() }),
   open_pr: DeliveryExpectation,
+  // 登记一个已经开好的 PR（例如推到 fork 以后手动开的）。url 只收 https://github.com/<owner>/<repo>/pull/<n>，格式在引擎里校验。
+  link_pr: StrictObject({ url: Type.String({ minLength: 1, maxLength: 300 }) }),
   abandon: DeliveryExpectation,
   // 打开交付里的文件（工单 07，spec 5.4）：path 是交付快照文件列表里的相对路径，sequence 是第几次交付，不给时是最新一次。
   open_delivery_file: StrictObject({

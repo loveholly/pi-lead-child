@@ -65,7 +65,7 @@ export function autoPullRequestEnabled(db: Db, itemId: number): boolean {
 // 这个工作区上最近一条决定（按决定的名字）。
 function latestWorkspaceDecision(
   db: Db, itemId: number, workspaceId: number, names: readonly string[],
-): { head?: string | null } | null {
+): { head?: string | null; linked?: boolean } | null {
   const row = db.prepare(
     `SELECT payload FROM activities
      WHERE item_id=? AND kind='decision' AND json_valid(payload)
@@ -130,6 +130,8 @@ async function planFor(db: Db, itemId: number): Promise<PlanFacts> {
   }
   if (view.integration === "merged" || view.integration === "abandoned") return skip("改动已经收尾。", workspace.id, head);
   if (view.uncommittedFiles > 0) return skip("分支上还有没提交的文件。", workspace.id, head);
+  // link_pr 登记的 PR 多半在 fork 上，系统没有 origin 的推送权限，也没有它的描述：不自动更新（工单 #497）。
+  if (latestWorkspaceDecision(db, itemId, workspace.id, ["workspace_pr_opened"])?.linked) return skip("这个 PR 是人工登记的，系统不自动更新。", workspace.id, head);
   const pushed = latestWorkspaceDecision(db, itemId, workspace.id, ["workspace_pr_opened", "workspace_pr_updated"]);
   if (pushed?.head === head) return skip("PR 已经是最新的。", workspace.id, head);
   return { plan: { action: "update", url: view.pullRequestUrl }, workspaceId: workspace.id, head };

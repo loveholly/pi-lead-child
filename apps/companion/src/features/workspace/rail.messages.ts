@@ -7,6 +7,8 @@ export const railMessages = defineMessages({
     runsRunning: (n: number) => (n === 1 ? '1 ticket is running' : `${n} tickets are running`),
     noRunsRunning: 'No ticket is running',
     settings: 'Settings',
+    // 工单卡片上的小标签：这张工单登记了 PR。
+    pullRequestChip: (short: string) => `PR ${short}`,
     searchPlaceholder: 'Search title, number, project',
     searchLabel: 'Search tickets',
     // 第一次用时的示例：点了填进输入框，发给 Lead。
@@ -21,6 +23,7 @@ export const railMessages = defineMessages({
     runsRunning: (n) => `${n} 张工单在执行`,
     noRunsRunning: '没有工单在执行',
     settings: '设置',
+    pullRequestChip: (short) => `PR ${short}`,
     searchPlaceholder: '搜索标题、编号、项目',
     searchLabel: '搜索工单',
     starterCommands: (index) => [
