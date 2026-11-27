@@ -82,7 +82,11 @@ const parallel = process.env.PLC_TEST_SERIAL !== "1" && !inSandbox;
 export default defineConfig({
   test: {
     // PLC_SHADOW_GATHER_MS=0：测试里普通的后台事件不等合批窗口（lead_shadow 的 gatherSeconds）。测合批的测试自己设。
-    env: { PLC_DESKTOP_NOTIFY: "off", PLC_GATEWAY_PORT: "0", PLC_LEAD_DRAIN_MS: "50", PLC_OPEN_FILES: "off", PLC_SHADOW_GATHER_MS: "0" },
+    // PLC_SHADOW_MESSAGE_QUIET_MS=0：外部消息交给 shadow 以前不等对方接着发（工单 #588）。测等待的测试自己设。
+    env: {
+      PLC_DESKTOP_NOTIFY: "off", PLC_GATEWAY_PORT: "0", PLC_LEAD_DRAIN_MS: "50", PLC_OPEN_FILES: "off", PLC_SHADOW_GATHER_MS: "0",
+      PLC_SHADOW_MESSAGE_QUIET_MS: "0",
+    },
     setupFiles: ["./vitest.setup.ts"],
     // include 写在下面两组里：组继承这里的设置，数组是拼起来的，写在这里两组就都包含全部文件。
     exclude: [...configDefaults.exclude, ".claude/**", "packages/components/**"],

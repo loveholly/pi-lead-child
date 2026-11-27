@@ -24,6 +24,7 @@ import {
   carryOverPendingInbox, countEvents, dueDigestBatch, getEvent, getItem, inboxDue, listEvents, listOpenLeadWaits,
   listWorkspaces, loadLeadEventCursor, markEventsDigested, markInbox, normalizeSeqRanges, pendingApprovals,
   recordSeenDispositions, reminderFireState, reminderIdOfFire, returnInboxToPending, saveLeadEventCursor,
+  getShadowConversation, listShadowWork, markShadowWorkSeen, resetShadowWorkCursors,
   type Db, type EventRecord, type InboxRow, type SeqRange,
 } from "@pi-lead-child/store";
 import {
@@ -31,13 +32,13 @@ import {
   LEAD_INSTALL_CHANGED_KIND, LEAD_WAIT_EXPIRED_KIND, TICKET_BUDGET_CHANGED_KIND, LEAD_WAIT_LIMITS, LEAD_WAIT_SATISFIED_KIND, MEMORY_FACT_CHANGED_KIND, MESSAGE_EVENT_KIND, SIGNAL_RECEIVED_KIND, USER_REQUEST_EXPIRED_KIND,
   OWNER_ACTION_DISOWNED_KIND, OWNER_ACTION_PERFORMED_KIND, PUSHED_SECURITY_ALERT_KINDS, REMINDER_PUSHED_KIND,
   REMINDER_UNACKNOWLEDGED_KIND, reminderNeedsCheck, SYSTEM_TURN_ORIGINS, ticketNeedsUser, ticketNeedsUserLabel,
-  TICKET_REPLY_ACTIONS_KIND, LEAD_QUEUE_EXCERPT_MAX, isSchedulerEventKind, LEAD_SHADOW_HANDLED_KIND, LEAD_SHADOW_RUN_KIND,
+  TICKET_REPLY_ACTIONS_KIND, LEAD_QUEUE_EXCERPT_MAX, isSchedulerEventKind, LEAD_SHADOW_HANDLED_KIND, LEAD_SHADOW_RUN_KIND, messageEventSessionKey,
   type LeadQueueEntry, type SystemTurnOrigin, type TicketSummary,
 } from "@pi-lead-child/protocol";
 import { localIso } from "@pi-lead-child/core";
 import {
   backgroundRecoveredNote, DEFAULT_SITUATION_BUDGET_TOKENS, leadEventBlock, leadInboxEntryEvent, leadInboxEvents, leadMessageEventBlock, leadReminderEventBlock, leadSystemEvent,
-  leadSignalEventBlock, leadWaitEventBlock, renderLeadSituation, ticketRunAnnotation,
+  leadSignalEventBlock, leadWaitEventBlock, renderLeadSituation, renderShadowWorkRecord, ticketRunAnnotation,
   type LeadReminderCardState, type SituationDigestGroup, type SituationRecordGroup,
 } from "@pi-lead-child/lead";
 
@@ -253,6 +254,8 @@ interface RunState {
   inFlight: Map<number, EventRecord>;
   // 这一轮的当前局面里列出或计数过的事件。
   shown: Set<number>;
+  // 这一轮交给 Lead 的工作记录（工单 #588）：会话分组键 → 带到了第几条。这一轮成功以后记成主会话看到了。
+  workSeen?: Map<string, number>;
 }
 
 const INBOX_CORRELATION = /^inbox:(\d+)$/u;
@@ -570,7 +573,16 @@ export class LeadInput {
 
   /** Lead 这一轮拿着的事件的对象（shadow 不动这些对象上的事）。 */
   leadEntities(): Set<string> {
-    return new Set([...(this.run?.inFlight.values() ?? [])].map((event) => event.entityKey));
+    const keys = new Set<string>();
+    for (const event of this.run?.inFlight.values() ?? []) {
+      keys.add(event.entityKey);
+      // 外部消息另加它的会话分组（工单 #588）：同一段对话的消息不一半在主会话、一半在 shadow。
+      if (event.kind === MESSAGE_EVENT_KIND) {
+        const group = messageEventSessionKey(event.payload);
+        if (group) keys.add(group);
+      }
+    }
+    return keys;
   }
 
   /** shadow 交回过这件事：它直接交给 Lead，不再交给 shadow。 */
@@ -641,6 +653,9 @@ export class LeadInput {
     const needsDisposition = new Set<number>();
     const messageIds = new Set<number>();
     const mapId = (id: number, seq: number) => { ids.set(id, [...(ids.get(id) ?? []), seq]); };
+    // 这一批里已经带过工作记录的对话（同一段对话的几条消息只带一次）。
+    const workSeen = this.run?.workSeen ?? new Map<string, number>();
+    if (options.notes && this.run) this.run.workSeen = workSeen;
     // 同一个对话里一起交的几条外部消息（工单 10）：每条都带着一份上下文包（工单 04），内容大半重复，只给最新的那一份。
     const newestContext = new Map<string, number>();
     for (const event of events) {
@@ -661,6 +676,11 @@ export class LeadInput {
         blocks.push(leadMessageEventBlock(event, contextIn === undefined ? {} : { contextIn }));
         needsDisposition.add(event.seq);
         messageIds.add(event.seq);
+        // 交给主会话时带上这段对话的工作记录（工单 #588）：只带它没看过的部分，压缩以后第一次带完整的。
+        if (options.notes) {
+          const record = this.workRecordFor(event, workSeen);
+          if (record) blocks.push(record);
+        }
       } else if (event.kind === SIGNAL_RECEIVED_KIND) {
         // 信号源交来的新内容（2026-11-12）：系统的数据在系统事件里，别人写的话在外部标签里。
         blocks.push(leadSignalEventBlock(event));
@@ -709,6 +729,22 @@ export class LeadInput {
     return { events: delivered, text: blocks.join("\n"), inboxIds, ids, needsDisposition, messageIds };
   }
 
+  // 这条外部消息所在的对话的工作记录（工单 #588，shadow 记的），游标后面新增的部分。seen：这一轮已经带到了哪里。没有新的时是 null。
+  private workRecordFor(event: EventRecord, seen: Map<string, number>): string | null {
+    const key = messageEventSessionKey(event.payload);
+    if (!key) return null;
+    try {
+      const from = seen.get(key) ?? getShadowConversation(this.db, key)?.leadSeenEntry ?? 0;
+      const entries = listShadowWork(this.db, key, from);
+      if (!entries.length) return null;
+      seen.set(key, entries.at(-1)!.id);
+      return renderShadowWorkRecord(entries, { sessionKey: key, mode: from === 0 ? "full" : "new", audience: "lead" });
+    } catch (error) {
+      this.options.log?.(`lead input: work record of ${key} not read: ${error instanceof Error ? error.message : String(error)}`);
+      return null;
+    }
+  }
+
   // 一条到点的提醒现在卡片的状态（工单 07）：推了几次、用户确认了没有、关联的工单。
   private reminderCard(event: EventRecord): LeadReminderCardState {
     const state = reminderFireState(this.db, event);
@@ -734,6 +770,12 @@ export class LeadInput {
   /** Lead 的上下文压缩过了：它不一定还记得上一份当前局面，下一份整段给。 */
   forgetSentSituation(): void {
     this.lastSentStatic = null;
+    // 工作记录的游标也清零（工单 #588）：压缩以后第一次碰到一段对话时，带它完整的工作记录。
+    try {
+      resetShadowWorkCursors(this.db);
+    } catch (error) {
+      this.options.log?.(`lead input: work record cursors not reset: ${error instanceof Error ? error.message : String(error)}`);
+    }
   }
 
   /**
@@ -916,6 +958,14 @@ export class LeadInput {
       return { digested: 0 };
     }
     if (outcome !== "succeeded") return { digested: 0 };
+    // 这一轮带过的工作记录算主会话看到了（工单 #588）。
+    for (const [key, entry] of run.workSeen ?? []) {
+      try {
+        markShadowWorkSeen(this.db, key, entry);
+      } catch (error) {
+        this.options.log?.(`lead input: work record cursor of ${key} not saved: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
     // 整理笔记是内部回合：当前局面里的变化不在这一轮里算处理完，等下一轮普通的 Lead 回合。
     const shown = run.kind === "internal" ? [] : [...run.shown];
     const settledNow = [...run.inFlight.keys(), ...shown];

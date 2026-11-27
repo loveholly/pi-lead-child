@@ -4,6 +4,7 @@ import type { EventRecord } from "@pi-lead-child/store";
 import { shadowObjectKey, shadowRoute, shadowSourceOf, eventShadowFacts, splitForShadow } from "../src/shadow-routing.js";
 import { shadowBucket } from "@pi-lead-child/protocol";
 import { isReminderFireEvent } from "../src/lead-input.js";
+import { readyShadowGroups } from "../src/shadow-conversations.js";
 
 let seq = 0;
 function event(over: Partial<EventRecord> & { payload?: Record<string, unknown> }): EventRecord {
@@ -92,5 +93,59 @@ describe("shadowRoute", () => {
     const b = event({ level: "interrupt" });
     const c = event({ kind: "message.received", entityKey: "slack:C1:main" });
     expect(splitForShadow([a, b, c], facts())).toEqual({ shadow: [a, c], lead: [b] });
+  });
+});
+
+// 工单 #588：外部消息按会话分组键分流（通道适配器给的 session.key），同一段对话永远落在同一边。
+describe("conversation groups (ticket #588)", () => {
+  const message = (entityKey: string, session: Record<string, unknown> | null, receivedAt = "2026-11-19T03:00:00.000Z") => event({
+    kind: "message.received", entityKey, receivedAt,
+    payload: { entry: "external", conversation: { key: entityKey, label: "x" }, ...(session ? { session } : {}) },
+  });
+
+  it("splits a DM's main conversation and its threads by the DM, not by each thread", () => {
+    const main = message("slack:D0ALICE:main", { key: "slack:D0ALICE" });
+    const thread = message("slack:D0ALICE:1700000000.000100", { key: "slack:D0ALICE", thread: "1700000000.000100" });
+    expect(shadowObjectKey(main)).toBe("slack:D0ALICE");
+    expect(shadowObjectKey(thread)).toBe("slack:D0ALICE");
+    // 旧事件没有分组：按它所在的对话。
+    expect(shadowObjectKey(message("slack:C0PROJ:1700000000.000200", null))).toBe("slack:C0PROJ:1700000000.000200");
+    // 份额不到 100 时，同一组的两条落在同一边（以前按对话分，私信主对话和 thread 可能一边一半）。
+    const settings = facts({ shares: { channel: shadowBucket("slack:D0ALICE") + 1 } });
+    expect(shadowRoute(main, settings).shadow).toBe(shadowRoute(thread, settings).shadow);
+  });
+
+  it("leaves a message to the main session while it handles another message of the same group", () => {
+    const thread = message("slack:D0ALICE:1700000000.000100", { key: "slack:D0ALICE", thread: "1700000000.000100" });
+    expect(shadowRoute(thread, facts({ lead: ["slack:D0ALICE"] }))).toEqual({ shadow: false, why: "lead_on_it" });
+    expect(shadowRoute(thread, facts({ lead: ["slack:D0BOB"] })).shadow).toBe(true);
+  });
+});
+
+describe("readyShadowGroups (ticket #588)", () => {
+  const at = (ms: number) => new Date(Date.parse("2026-11-27T10:00:00.000Z") + ms).toISOString();
+  const message = (key: string, receivedMs: number) => event({
+    kind: "message.received", entityKey: `${key}:main`, receivedAt: at(receivedMs),
+    payload: { entry: "external", conversation: { key: `${key}:main`, label: "x" }, session: { key } },
+  });
+  const now = (ms: number) => Date.parse(at(ms));
+
+  it("waits until a group has been quiet, then hands all its messages over together", () => {
+    // 两张截图加一句话：0 秒、3 秒、9 秒到。
+    const events = [message("slack:D0LEILEI", 0), message("slack:D0LEILEI", 3_000), message("slack:D0LEILEI", 9_000)];
+    const early = readyShadowGroups(events, { now: now(12_000), quietMs: 20_000, busy: () => false });
+    expect(early.ready).toEqual([]);
+    expect(early.nextAt).toBe(now(29_000));
+    const late = readyShadowGroups(events, { now: now(29_000), quietMs: 20_000, busy: () => false });
+    expect(late.ready).toEqual([{ key: "slack:D0LEILEI", events }]);
+  });
+
+  it("does not wait forever when someone keeps writing, keeps groups apart, and holds a group with a batch running", () => {
+    const chatty = Array.from({ length: 8 }, (_, index) => message("slack:D0CHAT", index * 10_000));
+    expect(readyShadowGroups(chatty, { now: now(70_000), quietMs: 20_000, busy: () => false }).ready).toHaveLength(1);
+    const two = [message("slack:D0A", 0), message("slack:D0B", 0)];
+    const result = readyShadowGroups(two, { now: now(30_000), quietMs: 20_000, busy: (key) => key === "slack:D0B" });
+    expect(result.ready.map((group) => group.key)).toEqual(["slack:D0A"]);
+    expect(readyShadowGroups(two, { now: now(0), quietMs: 0, busy: () => false }).ready).toHaveLength(2);
   });
 });

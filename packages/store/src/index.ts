@@ -88,6 +88,7 @@ export * from "./agenda-feeds.js";
 export * from "./busy-placement.js";
 export * from "./wake-pace.js";
 export * from "./lead-shadow.js";
+export * from "./shadow-conversations.js";
 export * from "./topics.js";
 export * from "./background-model.js";
 export * from "./lead-call-guards.js";

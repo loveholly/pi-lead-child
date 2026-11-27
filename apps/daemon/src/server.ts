@@ -50,12 +50,16 @@ import { resolveCompactModel } from "@pi-lead-child/protocol";
 import { userMessagePlacement } from "./user-placement.js";
 import { createLeadInput, defaultDigestBatch, isReminderFireEvent, leadEventRoute, type ShadowBatch, type DigestBatchPolicy } from "./lead-input.js";
 import {
-  createShadowSessionFactory, createShadowToolset, ShadowRecorder, shadowBatchText, LEAD_SKILLS_DIR,
-  resolveShadowOutcome, runShadowSession, type ShadowSessionFactory, type LeadShadowParts,
+  createShadowSessionFactory, createShadowToolset, ShadowRecorder, shadowBatchText, LEAD_SKILLS_DIR, planShadowConversation,
+  resolveShadowOutcome, runShadowSession, runShadowTurn, ShadowConversationPool, type ShadowSessionFactory, type ShadowUsage, type LeadShadowParts,
 } from "@pi-lead-child/lead";
-import { LEAD_SHADOW_HANDLED_KIND, LEAD_SHADOW_RUN_KIND, type LeadShadowDto } from "@pi-lead-child/protocol";
+import {
+  readyShadowGroups, recordShadowToolWork, type ShadowBatchHolder, shadowConfigVersion, shadowLedgerUpdate, shadowMessageOrigins, shadowMessageQuietMs,
+  shadowPreludeBlock, shadowWorkRecordBlock, SHADOW_PRELUDE_LIMIT, SHADOW_PRELUDE_WINDOW_MS,
+} from "./shadow-conversations.js";
+import { LEAD_SHADOW_HANDLED_KIND, LEAD_SHADOW_RUN_KIND, messageSessionGroupOf, type LeadShadowDto } from "@pi-lead-child/protocol";
 import type { BackgroundModelState } from "@pi-lead-child/protocol";
-import { getBackgroundModel, getLeadShadow } from "@pi-lead-child/store";
+import { appendShadowWork, getBackgroundModel, getLeadShadow, getShadowConversation, saveShadowConversation } from "@pi-lead-child/store";
 import { compactionEndOutcome, createLeadHealthTracker, isEmptyLengthStop, leadContextFullError } from "./lead-health.js";
 import { leadHealthMessages } from "./lead-health.messages.js";
 import { serverMessages } from "./server.messages.js";
@@ -6035,6 +6039,16 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
   const SHADOW_MAX_RUNS = 3;
   let shadowGatherTimer: { at: number; timer: NodeJS.Timeout } | null = null;
   let shadowTrialRuns = 0;
+  // 外部消息按对话复用会话（工单 #588，lead 的 shadow/conversations.ts）：同一组排队，闲置 5 分钟卸载，文件在 <dataDir>/shadow/sessions。
+  // 测试用 PLC_SHADOW_IDLE_MS 把闲置时长调短。
+  const shadowIdleMs = Number(process.env.PLC_SHADOW_IDLE_MS ?? "");
+  const shadowPool = new ShadowConversationPool({
+    maxRuns: SHADOW_MAX_RUNS, log, ...(Number.isFinite(shadowIdleMs) && shadowIdleMs > 0 ? { idleMs: shadowIdleMs } : {}),
+  });
+  const shadowSessionDir = join(opts.dataDir, "shadow", "sessions");
+  // 每个在内存里的会话这一批的记账（工具建会话时绑上，按批换）：按会话分组键。
+  const shadowHolders = new Map<string, ShadowBatchHolder>();
+  let shadowQuietTimer: { at: number; timer: NodeJS.Timeout } | null = null;
 
   // 合批窗口（lead_shadow 的 gatherSeconds，spec D5）。测试用 PLC_SHADOW_GATHER_MS 设（vitest.config.ts 缺省 0）。
   function shadowGatherMs(settings: LeadShadowDto): number {
@@ -6052,12 +6066,15 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     if (!candidates.length) return;
     const people = candidates.filter((event) => event.kind === MESSAGE_EVENT_KIND);
     const others = candidates.filter((event) => event.kind !== MESSAGE_EVENT_KIND);
-    let ready = people;
+    // 外部消息按对话复用会话（工单 #588）：先看用户自己回过没有，再按组等一会儿，一组一批。
+    if (people.length) dispatchShadowConversations(people, settings);
+    if (leadInput.shadowRuns() >= SHADOW_MAX_RUNS) return;
+    let ready: EventRecord[] = [];
     if (others.length) {
       const arrived = others.map((event) => Date.parse(event.receivedAt)).filter(Number.isFinite);
       const at = (arrived.length ? Math.min(...arrived) : Date.now()) + shadowGatherMs(settings);
       if (Date.now() >= at) {
-        ready = [...people, ...others];
+        ready = others;
       } else if (!shadowGatherTimer || shadowGatherTimer.at !== at) {
         if (shadowGatherTimer) clearTimeout(shadowGatherTimer.timer);
         const timer = setTimeout(() => { shadowGatherTimer = null; dispatchShadow(); }, Math.max(0, at - Date.now()) + 5);
@@ -6083,6 +6100,196 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     shadowTrialRuns += 1;
     const batch = { ...leadInput.renderForShadow(shadow), id: `trial-${Date.now()}` };
     void runShadowBatch(batch, settings, "trial").finally(() => { shadowTrialRuns -= 1; });
+  }
+
+  // 外部消息交给 shadow（工单 #588）。用户在这条消息以后自己在来源里回过话：直接记成用户已自己处理。
+  // 剩下的按会话分组键分组：这一组没有批在跑、最后一条到了等待时长，就交出去，进这一组复用的会话。
+  function dispatchShadowConversations(people: readonly EventRecord[], settings: LeadShadowDto): void {
+    const waiting: EventRecord[] = [];
+    let resolved = false;
+    for (const event of people) {
+      const reply = channelHub?.ownReplyAfterMessage(event.seq) ?? null;
+      if (reply === null || !channelHub) {
+        waiting.push(event);
+        continue;
+      }
+      // 事务在第一个 await 之前跑完：这条消息事件马上有了处置，下面不会再交出去。
+      log(`shadow: message event #${event.seq} skipped, the user replied in the source (event #${reply})`);
+      resolved = true;
+      void channelHub.resolveMessageByOwnReply(event.seq, reply).catch((error) => {
+        log(`shadow: closing message event #${event.seq} as handled by the user failed: ${error instanceof Error ? error.message : String(error)}`);
+      });
+    }
+    if (resolved) leadInput.refresh();
+    const quietMs = shadowMessageQuietMs(opts.dataDir, log);
+    const { ready, nextAt } = readyShadowGroups(waiting, { now: Date.now(), quietMs, busy: (key) => shadowPool.busy(key) });
+    for (const group of ready) {
+      if (leadInput.shadowRuns() >= SHADOW_MAX_RUNS) break;
+      const batch = leadInput.takeForShadow(group.events);
+      if (!batch) continue;
+      publishLeadQueue();
+      void runShadowConversation(group.key, batch, settings);
+    }
+    if (nextAt !== null && (!shadowQuietTimer || shadowQuietTimer.at !== nextAt)) {
+      if (shadowQuietTimer) clearTimeout(shadowQuietTimer.timer);
+      const timer = setTimeout(() => { shadowQuietTimer = null; dispatchShadow(); }, Math.max(0, nextAt - Date.now()) + 5);
+      timer.unref?.();
+      shadowQuietTimer = { at: nextAt, timer };
+    }
+  }
+
+  // 一段对话的一批（工单 #588）：进这一组复用的会话。会话不在内存里时按账本打开文件；配置版本变了或者超过 24 小时没有新消息时，
+  // 用工作记录起一个新会话。复用时先补账本里这段对话的最新状态；频道 thread 新开会话时带前文。
+  async function runShadowConversation(key: string, batch: ShadowBatch & { id: string }, settings: LeadShadowDto): Promise<void> {
+    const parts = shadowParts!;
+    const model = settings.model ?? parseLeadModelSpec(leadModelName).model;
+    const holder: ShadowBatchHolder = shadowHolders.get(key) ?? {
+      recorder: new ShadowRecorder(), messageIds: new Set(), origin: { external: false, timer: null },
+    };
+    const toolsFor = (target: ShadowBatchHolder) => createShadowToolset(parts.tools({ turnOrigin: () => target.origin }), {
+      get recorder() { return target.recorder; },
+      get messageIds() { return target.messageIds; },
+      dryRun: false, userWatching: () => clientCount() > 0,
+      connectionReadOnly: (connection, tool) => parts.connectionReadOnly(connection, tool),
+      onInnerToolStart: (name) => {
+        if (isExternalTextTool(name)) target.origin = withExternalContent(target.origin, { via: "tool", tool: name });
+      },
+      onToolDone: (name, params) => {
+        try {
+          recordShadowToolWork(db, key, name, params);
+        } catch (error) {
+          log(`shadow: work record for ${key} failed: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      },
+      workRecord: {
+        append: (entries) => appendShadowWork(db, key, entries).length,
+        read: () => shadowWorkRecordBlock(db, key) ?? "这段对话还没有工作记录。",
+      },
+      skillsDir: LEAD_SKILLS_DIR,
+    });
+    let outcome: ReturnType<typeof resolveShadowOutcome>;
+    let result: Awaited<ReturnType<typeof runShadowSession>> | null = null;
+    const ids = [...batch.ids.keys()];
+    let recorder = new ShadowRecorder();
+    try {
+      result = await shadowPool.run(key, async (loaded) => {
+        const started = Date.now();
+        const systemPrompt = parts.systemPrompt();
+        const fresh = { recorder: new ShadowRecorder(), messageIds: new Set<number>(), origin: { external: false, timer: null } as ShadowBatchHolder["origin"] };
+        const freshTools = toolsFor(fresh);
+        const configVersion = shadowConfigVersion({ systemPrompt, model, tools: freshTools.map((tool) => tool.name) });
+        let live = loaded && loaded.configVersion === configVersion ? loaded : null;
+        let target = live ? holder : fresh;
+        const row = getShadowConversation(db, key);
+        let opened: "loaded" | "file" | "new" = "loaded";
+        let reason = "";
+        if (!live) {
+          const plan = planShadowConversation({ row, configVersion, now: Date.now() });
+          const tryOpen = async (file: string | null) => {
+            target = fresh;
+            const created = await shadowFactory({ systemPrompt, tools: freshTools, model, persist: { sessionDir: shadowSessionDir, file } });
+            return {
+              session: created.session, configVersion, model: created.model, modelNote: created.note,
+              file: created.session.sessionFile?.() ?? null,
+            };
+          };
+          if (plan.kind === "reuse") {
+            try {
+              live = await tryOpen(plan.file);
+              opened = "file";
+            } catch (error) {
+              log(`shadow: opening the session file of ${key} failed, starting a new one: ${error instanceof Error ? error.message : String(error)}`);
+            }
+          }
+          if (!live) {
+            live = await tryOpen(null);
+            opened = "new";
+            reason = plan.kind === "new" ? plan.reason : "no_file";
+          }
+          saveShadowConversation(db, key, { sessionFile: live.file, configVersion, ...(opened === "new" ? { openedAt: new Date().toISOString() } : {}) });
+          shadowHolders.set(key, target);
+        }
+        // 这一批的记账：工具按 target 取。
+        target.recorder = new ShadowRecorder();
+        target.messageIds = batch.messageIds;
+        target.origin = withExternalEvents({ external: false, timer: null }, batch.events);
+        recorder = target.recorder;
+        const briefing = await shadowConversationBriefing(key, batch, { opened, since: row?.lastMessageAt ?? null });
+        log(`shadow: ${batch.id} (conversation ${key}, ${opened}${reason ? `: ${reason}` : ""}) ${ids.length} item(s) #${ids.join(",#")} with ${live.model}`);
+        const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+        const current = target;
+        const turn = await runShadowTurn({
+          session: live.session,
+          text: shadowBatchText({
+            clock: leadSystemEvent("clock", `当前时间：${localIso(new Date())}，时区 ${tz}`),
+            presence: leadSystemEvent("presence", userPresenceText()),
+            conversation: briefing, events: batch.text, ids,
+          }),
+          finished: () => current.recorder.report !== null,
+          onToolStart: (name) => {
+            if (isExternalTextTool(name)) current.origin = withExternalContent(current.origin, { via: "tool", tool: name });
+          },
+          onCall: (usage, stopReason) => {
+            if (stopReason === "aborted") return;
+            const over = autoBudget.record(uncachedTokens(usage as Parameters<typeof uncachedTokens>[0]));
+            if (over) modelHold.pause(over.until, over.detail);
+          },
+        });
+        saveShadowConversation(db, key, {
+          lastMessageAt: new Date().toISOString(),
+          // 出错的会话不再接着用：下一批用工作记录起一个新会话。
+          ...(turn.error ? { sessionFile: null } : {}),
+        });
+        return {
+          result: { model: live.model, modelNote: live.modelNote, usage: turn.usage, error: turn.error, durationMs: Date.now() - started },
+          keep: turn.error ? null : live,
+        };
+      });
+      outcome = resolveShadowOutcome({
+        ids, report: recorder.report, error: result.error, userActions: recorder.userActions,
+        needsDisposition: (id) => batch.needsDisposition.has(id), disposed: (id) => recorder.disposed.has(id),
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      outcome = resolveShadowOutcome({ ids, report: null, error: message, needsDisposition: () => true, disposed: () => false });
+    }
+    // 交回主会话的事也记进工作记录：主会话处理这段对话时看得到 shadow 查到了什么。
+    try {
+      appendShadowWork(db, key, outcome.escalated.map((entry) => ({ kind: "decision" as const, text: `交给主会话（#${entry.ids.join("、#")}）：${entry.note}` })));
+    } catch (error) {
+      log(`shadow: work record for ${key} failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    settleShadowBatch(batch, "on", outcome, result, recorder, model);
+  }
+
+  // 交给 shadow 时这段对话的说明：每条消息来自哪里；新开会话时带工作记录和频道 thread 的前文；复用时补账本里的最新状态。
+  async function shadowConversationBriefing(
+    key: string, batch: ShadowBatch, input: { opened: "loaded" | "file" | "new"; since: string | null },
+  ): Promise<string> {
+    const blocks: string[] = [];
+    const first = Math.min(...batch.events.map((event) => event.seq));
+    if (input.opened === "new") {
+      const record = shadowWorkRecordBlock(db, key);
+      if (record) blocks.push(record);
+      const prelude = batch.events.map((event) => messageSessionGroupOf(event.payload.session)?.prelude).find(Boolean);
+      if (prelude && channelHub) {
+        try {
+          const messages = await channelHub.historyBefore(prelude.objectKey, prelude.before, {
+            limit: SHADOW_PRELUDE_LIMIT, sinceMs: Date.parse(prelude.at) - SHADOW_PRELUDE_WINDOW_MS,
+          });
+          const block = shadowPreludeBlock({ objectKey: prelude.objectKey, messages });
+          if (block) blocks.push(block);
+        } catch (error) {
+          log(`shadow: no prelude for ${key}: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
+    } else {
+      const update = shadowLedgerUpdate(db, { key, since: input.since, before: first });
+      if (update) blocks.push(update);
+    }
+    const origins = shadowMessageOrigins(batch.events);
+    if (origins) blocks.push(origins);
+    return blocks.join("\n\n");
   }
 
   // 一批：建会话、跑、按结论收尾。on：做完的算处理完，交回的带着说明留给 Lead；trial：只记下来。
@@ -6132,6 +6339,16 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       const message = error instanceof Error ? error.message : String(error);
       outcome = resolveShadowOutcome({ ids, report: null, error: message, needsDisposition: () => true, disposed: () => false });
     }
+    settleShadowBatch(batch, mode, outcome, result, recorder, model);
+  }
+
+  // 一批的收尾（两种会话共用）：记 lead.shadow_handled 和 lead.shadow_run，做完的算处理完，交回的带着说明留给 Lead。
+  function settleShadowBatch(
+    batch: ShadowBatch & { id: string }, mode: "on" | "trial", outcome: ReturnType<typeof resolveShadowOutcome>,
+    result: { model: string; modelNote: string | null; error: string | null; durationMs: number; usage: ShadowUsage } | null,
+    recorder: ShadowRecorder, model: string,
+  ): void {
+    const ids = [...batch.ids.keys()];
     const seqsOf = (entryIds: readonly number[]) => entryIds.flatMap((id) => batch.ids.get(id) ?? []);
     const eventBySeq = new Map(batch.events.map((event) => [event.seq, event] as const));
     try {
@@ -7520,6 +7737,9 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     // 关库之前等影子分诊这一批停下（正在进行的调用被取消），通道的传输停下、这一拍跑完。
     closeStep = "stopping the shadow triage";
     await triageShadow?.stop();
+    // shadow 按对话复用的会话（工单 #588）：关掉内存里的，文件留着，重启以后接着用。
+    shadowPool.disposeAll();
+    if (shadowQuietTimer) clearTimeout(shadowQuietTimer.timer);
     modelSettings.stop();
     if (subscriptions) {
       subscriptions.stop();

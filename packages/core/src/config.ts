@@ -256,6 +256,9 @@ export interface PlcConfigFile {
     models?: string[];
     // Lead 的当前局面（2026-10-19）。idleTicketHours：多久没有动静的工单折叠成一行，缺省 72。
     situation?: { idleTicketHours?: number };
+    // shadow 按对话复用会话（工单 #588）。messageQuietSeconds：外部消息进来以后等多少秒，看对方还有没有接着发，再一起交给 shadow。
+    // 缺省 20（2026-11-27 统计：同一个人在同一段对话里相邻两条消息隔 20 秒以内的占 23%，发完附件 20 秒以内接着发的占 24%）。0 是不等。
+    shadow?: { messageQuietSeconds?: number };
     // 额度按周重置的一类模型（2026-10-19，lead 的 model-failover.ts）：额度用尽后，下一次重置以前跳过模型名里含 match 的模型。
     // 例如 [{ "match": "claude-", "weekday": 1, "time": "16:00" }]：每周一 16:00（本机时区）重置。不写时用这一条。
     quotaResets?: Array<{ match: string; weekday: number; time: string }>;

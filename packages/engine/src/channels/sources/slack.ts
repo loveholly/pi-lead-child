@@ -66,7 +66,7 @@ import type { SystemStandingOrderSeed } from "@pi-lead-child/store";
 import { channelInboundPayload } from "../payload.js";
 import { ChannelFileNotFoundError, ChannelTargetGoneError } from "../types.js";
 import type {
-  ChannelAdapter, ChannelAdapterContext, ChannelConnectionControl, ChannelConversationCandidate, ChannelConversationTarget, ChannelCredential,
+  ChannelAdapter, ChannelAdapterContext, ChannelSessionGroup, ChannelConnectionControl, ChannelConversationCandidate, ChannelConversationTarget, ChannelCredential,
   ChannelDelivery, ChannelFile, ChannelHistoryMessage, ChannelHistoryRequest, ChannelInbound, ChannelMarkLookup, ChannelMemorySpec,
   ChannelOutboundRequest, ChannelOutboundResult, ChannelTransport, ChannelTransportContext, ChannelTransportDeliver,
 } from "../types.js";
@@ -1115,7 +1115,26 @@ function placeOf(channel: string, channelType: string, ts: string, threadTs: str
     thread,
     objectKey: root ? `${SLACK_SOURCE}:${channel}:${root}` : `${SLACK_SOURCE}:${channel}:main`,
     replyTarget,
+    session: slackSessionGroup(channel, direct, thread),
   };
+}
+
+/**
+ * Slack 的会话分组（工单 #588，ChannelSessionGroup）：shadow 按它把同一段对话的消息放进同一个会话。
+ *   私信（含群聊私信）：整个私信一组，私信主对话和私信里的 thread 都在里面；thread 里的消息标明是哪个 thread。
+ *   频道里的 thread：一个 thread 一组；新开会话时带上这个 thread 开始之前主时间线上的消息（prelude）。
+ *   频道主时间线：整个频道一组（所有人的消息一个会话，不按话题分）。
+ */
+export function slackSessionGroup(channel: string, direct: boolean, thread: string | null): ChannelSessionGroup {
+  if (direct) return { key: `${SLACK_SOURCE}:${channel}`, ...(thread ? { thread } : {}) };
+  if (thread) {
+    const at = new Date(Number(thread) * 1000);
+    return {
+      key: `${SLACK_SOURCE}:${channel}:${thread}`,
+      ...(Number.isNaN(at.getTime()) ? {} : { prelude: { objectKey: `${SLACK_SOURCE}:${channel}:main`, before: thread, at: at.toISOString() } }),
+    };
+  }
+  return { key: `${SLACK_SOURCE}:${channel}` };
 }
 
 export function createSlackChannelAdapter(options: SlackChannelOptions): ChannelAdapter {
@@ -1499,6 +1518,7 @@ export function createSlackChannelAdapter(options: SlackChannelOptions): Channel
       audience: input.channelType === "im" ? "direct" : input.channelType === "mpim" ? "group" : "channel",
       // thread 里的回复：被回复的是 thread 的根消息。私信里的根消息在整段私信的道里，频道里的根消息和回复在同一个道里。
       ...(place.thread ? { replyTo: { ref: place.thread, objectKey: place.direct ? `${SLACK_SOURCE}:${input.channel}:main` : place.objectKey } } : {}),
+      session: place.session,
       fields: {
         channelId: input.channel, channelType: input.channelType, ts: input.ts, threadTs: place.thread, echo: input.echo,
         externalShared: info.externalShared, channelName: info.name,
@@ -2330,7 +2350,7 @@ export function createSlackChannelAdapter(options: SlackChannelOptions): Channel
       // 留根消息和最近的回复；整段对话取最近的 limit 条。
       const result = thread
         ? await api("conversations.replies", { channel, ts: thread, limit: REPLIES_PAGE }, context)
-        : await api("conversations.history", { channel, limit }, context);
+        : await api("conversations.history", { channel, limit, ...(request.before ? { latest: request.before, inclusive: false } : {}) }, context);
       const sorted = (Array.isArray(result.messages) ? result.messages as SlackMessage[] : [])
         .filter((message) => isString(message.ts))
         .sort((a, b) => compareSlackTs(a.ts!, b.ts!));

@@ -1472,6 +1472,33 @@ CREATE INDEX IF NOT EXISTS idx_agenda_entries_starts ON agenda_entries(starts_at
 CREATE INDEX IF NOT EXISTS idx_agenda_entries_reminder ON agenda_entries(reminder_item_id) WHERE reminder_item_id IS NOT NULL;
 `;
 
+// shadow 按对话复用的会话（工单 #588，migration v68，shadow-conversations.ts）。
+//   shadow_conversations：一段对话（会话分组键，例如一个 Slack 私信）一行：会话文件在哪里、建会话时的配置版本、最近一条消息的时刻、
+//     主会话已经看到工作记录的哪一条（lead_seen_entry；主会话压缩以后清零，再碰到这段对话时带完整记录）。
+//   shadow_work_entries：每段对话的工作记录，一条一行，只加不删：读过的附件和读出的内容、做过的判断、给出的回复、没处理完的事
+//     （open）和后来处理完的（resolved，ref 指向 open 那一条的编号）。shadow 新开会话、daemon 重启、会话压缩以后都从它接着做。
+export const SHADOW_CONVERSATIONS_SCHEMA = `
+CREATE TABLE IF NOT EXISTS shadow_conversations (
+  session_key      TEXT PRIMARY KEY CHECK (length(session_key) BETWEEN 1 AND 300),
+  session_file     TEXT,
+  config_version   TEXT,
+  opened_at        TEXT,
+  last_message_at  TEXT,
+  lead_seen_entry  INTEGER NOT NULL DEFAULT 0,
+  updated_at       TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS shadow_work_entries (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  session_key  TEXT NOT NULL CHECK (length(session_key) BETWEEN 1 AND 300),
+  kind         TEXT NOT NULL CHECK (kind IN ('attachment','decision','reply','open','resolved')),
+  ref          TEXT CHECK (ref IS NULL OR length(ref) <= 300),
+  text         TEXT NOT NULL CHECK (length(text) BETWEEN 1 AND 8000),
+  event_seq    INTEGER,
+  created_at   TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_shadow_work_entries_key ON shadow_work_entries(session_key, id);
+`;
+
 // 会话卡片上做成了的按钮（工单 #263，protocol 的 surface-actions.ts）：一行是一张卡（render_ui 调用）上的一个 Action 按钮。
 // 按钮的操作成功以后写；同一个按钮再做成一次时更新时刻。卡片打开时按 call_id 读，显示「已完成」。
 // 老库靠 CREATE IF NOT EXISTS 自然获得，无需 migrate。
@@ -2003,6 +2030,7 @@ ${WIDGET_SOURCES_SCHEMA}
 ${SURFACE_ACTIONS_SCHEMA}
 ${AGENDA_ENTRIES_SCHEMA}
 ${TOPICS_SCHEMA}
+${SHADOW_CONVERSATIONS_SCHEMA}
 `;
 
 export const CHECKPOINT_CONTROL_PLANE_SCHEMA = `

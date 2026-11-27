@@ -14,7 +14,8 @@
 // 新的外部通道只写适配器，这一层不用改。这里不出现任何具体来源的名字。
 import {
   abilitiesGrantBound, CHANNEL_RULE_CHANGE_FLAG, DEFAULT_INTENT_GRANT_BOUNDS, GRANT_INTENTS, isChannelRuleChangeKind, MESSAGE_EVENT_VERSION,
-  type GrantIntent, type MessageCeiling, type MessageContext, type MessageInbound, type MessageReceivedPayload, type SenderTrust,
+  type GrantIntent, type MessageCeiling, type MessageContext, type MessageInbound, type MessageReceivedPayload, type MessageSessionGroup,
+  type SenderTrust,
 } from "@pi-lead-child/protocol";
 import type { HandbookDecision } from "./handbook-decision.js";
 
@@ -41,6 +42,8 @@ export interface ExternalMessageInput {
   summary: string;
   // 上下文包（spec D5，context-pack.ts）。没拼成时是 null。
   context?: MessageContext | null;
+  // 会话分组（工单 #588，适配器给的）。没有时不写。
+  session?: MessageSessionGroup | null;
 }
 
 const isGrantIntent = (value: string | null): value is GrantIntent => value !== null && (GRANT_INTENTS as readonly string[]).includes(value);
@@ -101,6 +104,7 @@ export function externalMessageEvent(input: ExternalMessageInput): MessageReceiv
     messages: [...input.messages],
     edits: Math.max(input.messages.length - 1, 0),
     cardId: input.cardId,
+    ...(input.session ? { session: input.session } : {}),
     summary: input.summary,
   };
 }
