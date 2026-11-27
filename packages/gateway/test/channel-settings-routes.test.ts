@@ -44,7 +44,7 @@ afterEach(async () => {
 const view = (): ChannelSourceSettingsView => ({
   source: "chat", label: "Chat", status: saved.PLC_CHAT_ONE ? "connected" : "not_configured",
   account: saved.PLC_CHAT_ONE ? { userId: "U1", userName: "我", teamId: "T1", teamName: "Home" } : null,
-  missingScopes: [], lastError: null, lastConnectedAt: null, manifest: "name: chat\n", setupUrl: "https://chat.example/apps",
+  missingScopes: [], lastError: null, lastConnectedAt: null, noEventsWarning: null, manifest: "name: chat\n", setupUrl: "https://chat.example/apps", setupNote: null,
   secrets: ["PLC_CHAT_ONE", "PLC_CHAT_TWO"].map((name) => ({
     name, label: name, prefix: "", hint: "", present: Boolean(saved[name]), origin: saved[name] ? "vault" as const : null,
   })),

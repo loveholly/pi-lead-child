@@ -16,7 +16,7 @@ import { ChannelSubscriptionsBlock } from './ChannelSubscriptions';
 import { channelsMessages } from './channels.messages';
 import {
   canDisconnect, channelErrorText, channelStatusView, checkRows, emptySecretForm,
-  externalSecretNotes, readOnlyNote, secretPlaceholder, secretRequest, secretStateText, testSummary,
+  externalSecretNotes, readOnlyNote, secretPlaceholder, secretRequest, secretStateText, setupLinkText, testSummary,
   type ChannelStatusTone, type SecretForm,
 } from './channelSettingsModel';
 import { HandbookSection } from './HandbookSection';
@@ -87,6 +87,7 @@ function ChannelSourceCard({ source }: { source: ChannelSourceSettingsDto }) {
       </Row>
       <ChannelConnectionBlock source={source} view={connectionView} />
       {source.missingScopes.length && !signedInMode ? <MissingScopes id={id} scopes={source.missingScopes} /> : null}
+      {source.noEventsWarning && !signedInMode ? <NoEvents id={id} warning={source.noEventsWarning} /> : null}
       {!source.editable ? <ReadOnlySecrets source={source} />
         : signingIn ? null
         : signedInMode ? (
@@ -217,6 +218,17 @@ function MissingScopes({ id, scopes }: { id: string; scopes: readonly string[] }
         {scopes.map((scope) => <Text key={scope} size="code" mono>{`· ${scope}`}</Text>)}
       </Column>
       <Text size="secondary" tone="secondary">{m.missingScopesHelp}</Text>
+    </Card>
+  );
+}
+
+// 连上了很久却一个事件都没收到（2026-11-02）：daemon 给的提醒，来源插件写的该查哪里、怎样验证。
+function NoEvents({ id, warning }: { id: string; warning: string }) {
+  const m = useMessages(channelsMessages);
+  return (
+    <Card testID={`channel-${id}-no-events`} tone="warning" rounded="lg" px="inset-x" py="inset-y" gap="card-row">
+      <Text size="label" weight="semibold">{m.noEventsTitle}</Text>
+      <Text size="secondary" tone="secondary">{warning}</Text>
     </Card>
   );
 }
@@ -428,10 +440,11 @@ function AppSetup({ source }: { source: ChannelSourceSettingsDto }) {
       {source.setupUrl ? (
         <Text size="secondary" tone="secondary">
           {m.setupBefore}
-          <Link testID={`channel-${id}-setup-url`} href={source.setupUrl} size="secondary">{source.setupUrl}</Link>
+          <Link testID={`channel-${id}-setup-url`} href={source.setupUrl} size="secondary">{setupLinkText(source.setupUrl)}</Link>
           {manifest ? m.setupAfterManifest : m.setupAfter}
         </Text>
       ) : null}
+      {source.setupNote ? <Text testID={`channel-${id}-setup-note`} size="secondary" tone="secondary">{source.setupNote}</Text> : null}
       {manifest ? (
         <Row items="center" gap="actions" flexWrap="wrap">
           <Button

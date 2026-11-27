@@ -2,6 +2,7 @@
 // daemon 检查令牌、加密存进保险库、热重连 Slack 的 Socket 连接，状态回到设置页。daemon、store、网关、通道 hub、
 // Slack 插件、真实的 WebClient 都是真的；Slack 是假的（FakeSlack 的 fetch 和假的 SocketModeClient），Lead 的会话是替身。
 //   1. PUT 有效的令牌：不重启就连上，状态 connected，账号正确；bot token 被拒并说明原因；缺权限时列出来，不保存。
+//      连上以后收到第一个事件：kv 里记下「存了令牌以后收到过事件」（以后不提醒检查订阅）。
 //      DELETE：断开，状态 not_configured。
 //   2. 「不是我」：删掉保险库里这个来源的令牌并断开。
 //   3. 保险库优先于 Keychain；只换一个令牌时另一个用 Keychain 的补上，补来的不写进保险库；删掉以后退回 Keychain。
@@ -84,6 +85,11 @@ async function boot(slack: FakeSlack, keychain?: Record<string, string>) {
 
 const vaultRows = () => (db.prepare("SELECT key FROM kv WHERE key LIKE 'secret.channel.%' ORDER BY key").all() as Array<{ key: string }>)
   .map((row) => row.key);
+// 存了令牌以后有没有收到过事件（channel-settings.ts 的 kv 行）。
+const eventsRecord = () => {
+  const row = db.prepare("SELECT value FROM kv WHERE key = 'channel.slack.events'").get() as { value: string } | undefined;
+  return row ? JSON.parse(row.value) as { savedAt: string; firstEventAt: string | null } : null;
+};
 const snapshots = () => (db.prepare(
   "SELECT COUNT(*) AS n FROM gateway_events WHERE event_type='snapshot.required' AND json_extract(payload, '$.resource')='channel-settings'",
 ).get() as { n: number }).n;
@@ -101,7 +107,8 @@ describe("the channel settings through the daemon", () => {
     const slack = new FakeSlack({ self: { id: "U0SELF", name: "Leo" } });
     const { call, slackSettings, responses } = await boot(slack);
     expect(await slackSettings()).toMatchObject({
-      label: "Slack", status: "not_configured", account: null, editable: true, setupUrl: "https://api.slack.com/apps",
+      label: "Slack", status: "not_configured", account: null, editable: true,
+      setupUrl: expect.stringMatching(/^https:\/\/api\.slack\.com\/apps\?new_app=1&manifest_yaml=/),
       manifest: expect.stringContaining("socket_mode_enabled: true"),
       secrets: [{ name: APP, prefix: "xapp-", present: false, origin: null }, { name: USER, prefix: "xoxp-", present: false, origin: null }],
     });
@@ -138,19 +145,25 @@ describe("the channel settings through the daemon", () => {
       status: "connected", lastError: null, lastConnectedAt: expect.any(String), missingScopes: [],
       account: { userId: "U0SELF", userName: "Leo", teamId: "T0HOME", teamName: "Home" },
       secrets: [{ present: true, origin: "vault" }, { present: true, origin: "vault" }],
+      noEventsWarning: null,
     });
+    expect(eventsRecord()).toEqual({ savedAt: expect.any(String), firstEventAt: null });
     expect(listEvents(db, { kind: "owner_action.performed" }).map((event) => event.payload.detail)).toEqual([
       { op: "save", source: "slack", names: [APP, USER] },
     ]);
     // 连上的 Socket 照常收消息。
     slack.push(slack.dm("U0ZHANG", "周五评审的材料收到了吗？"));
     await vi.waitFor(() => expect(daemon!.channels!.listCards()).toHaveLength(1));
+    // 收到了第一个事件：kv 里记下了（以后不提醒检查事件订阅）。
+    await vi.waitFor(() => expect(eventsRecord()).toEqual({ savedAt: expect.any(String), firstEventAt: expect.any(String) }));
+    expect((await slackSettings()).noEventsWarning).toBeNull();
 
     // DELETE：断开，没有配置。
     const removed = await call("DELETE", "/v1/channels/settings/slack");
     expect(removed.status).toBe(200);
     expect(removed.body.source).toMatchObject({ status: "not_configured", account: null, secrets: [{ present: false }, { present: false }] });
     expect(vaultRows()).toEqual([]);
+    expect(eventsRecord()).toBeNull();
     await vi.waitFor(() => expect(slack.socket()).toBeUndefined());
     expect((await slackSettings()).status).toBe("not_configured");
     expect(slack.socketClients).toHaveLength(1);

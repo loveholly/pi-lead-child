@@ -36,7 +36,7 @@ function appSource(overrides: Partial<ChannelSourceSettingsDto> = {}): ChannelSo
       { name: 'PLC_SLACK_APP_TOKEN', label: 'App-Level Token', prefix: 'xapp-', hint: '', present: true, origin: 'vault' },
       { name: 'PLC_SLACK_USER_TOKEN', label: 'User OAuth Token', prefix: 'xoxp-', hint: '', present: true, origin: 'vault' },
     ],
-    manifest: null, setupUrl: null, editable: true, ...overrides,
+    manifest: null, setupUrl: null, setupNote: null, noEventsWarning: null, editable: true, ...overrides,
   };
 }
 
