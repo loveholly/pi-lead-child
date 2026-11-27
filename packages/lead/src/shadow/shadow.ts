@@ -56,6 +56,9 @@ export const SHADOW_ACTION_ALLOWLIST: readonly string[] = [
 export const SHADOW_MORE_TOOL = "more_tools";
 
 export const SHADOW_FINISH_TOOL = "finish_shadow";
+/** 工作记录的两个工具（工单 #588，按对话复用的会话才有）。 */
+export const SHADOW_WORK_UPDATE_TOOL = "update_work_record";
+export const SHADOW_WORK_READ_TOOL = "read_work_record";
 /** 读 Lead 自带的 skill（事件里写着「先读 skill channel-replies」，shadow 会话没有 read）。 */
 export const SHADOW_SKILL_TOOL = "read_skill";
 
@@ -65,7 +68,11 @@ const SHADOW_WRITES: ReadonlySet<string> = new Set(SHADOW_WRITE_TOOLS);
 
 export const SHADOW_SECTION = `## 你现在是 shadow（你的分身）
 这是 shadow 的会话，不是和用户的主会话。你还是你：同一个系统提示词、常设指令、核心记忆和权限规则。不同的是：
-- 你看不到和用户聊过的内容。每一批后台事件开一个新会话，处理完就结束。
+- 你看不到和用户聊过的内容。
+- 外部消息按对话进同一个会话：同一段对话（例如一个人的私信，私信里的 thread 也在内；频道里的一个 thread；一个频道的主时间线）的消息
+  一批接一批地交到这里，前面几批你看过、做过的都在上面，接着做，不要重复回复。别的后台事件（工单、定时器）一批开一个新会话，处理完就结束。
+- 按对话的会话还有 ${SHADOW_WORK_UPDATE_TOOL} 和 ${SHADOW_WORK_READ_TOOL}：这段对话的工作记录，存在账本里，会话压缩、重开以后从它接着做，
+  主会话处理这段对话时也会看到。读了附件，把读出的内容记下（文件编号 → 内容）；做了判断、留了没处理完的事，也记下。回复和处置系统自动记。
 - 你直接有这些工具：${[...SHADOW_CORE_TOOLS, SHADOW_SKILL_TOOL, SHADOW_MORE_TOOL, SHADOW_FINISH_TOOL].join("、")}。
 - 这些在 more_tools 后面，用的时候先 more_tools(name) 看说明，再 more_tools(name, arguments) 调：${SHADOW_EXTRA_TOOLS.join("、")}。
   perform_action 只能做这几个：${SHADOW_ACTION_ALLOWLIST.join("、")}。
@@ -78,7 +85,7 @@ export const SHADOW_SECTION = `## 你现在是 shadow（你的分身）
 1. 能判断、能做完的，自己做完，再用 record_disposition 记下处置：不用管记 no_action；修好了（例如用 recover_ticket_run 换模型重跑）记 handled；以后再看的用 follow_up 设跟进，记 deferred。
 2. 有下面任何一种情况，交给主会话（finish_shadow 的 escalate），不要自己做：
    - 判断要用到和用户聊过的内容：用户最近说过的话、正在讨论的事、之前的安排。常设指令和核心记忆你看得到；看不到的，不要猜。
-   - 要用户做决定或者动手（合并还是放弃、确认、授权、审批），而且用户正在看会话，或者要给他一张选择卡。
+   - 要用户做决定或者动手（合并还是放弃、确认、授权、审批），而且用户正在看会话，或者要给他一张选择卡。外部消息除外，见第 4 条最后一项。
    - 要用户本人确认、授权、审批，或者要给用户看一张卡。
    - 要用这里没有的工具。
    - 拿不准。
@@ -89,8 +96,10 @@ export const SHADOW_SECTION = `## 你现在是 shadow（你的分身）
      用 record_disposition 记 handled 或 no_action，reason 写清楚结果；finish_shadow 的那一句也写清楚。界面的「后台处理了」一栏会显示给用户，主会话下一次开口时也会看到。用户在不在看会话都一样。
    - 用户不在看会话，又必须马上知道、而且要他做什么（登录、授权、付费、审批、你处理不了的失败）：先用 notify_user 推给他，再记 told_user。
    - 要用户做决定、但不急的事：交给主会话，由它在会话里给他选择卡。
-   - 外部消息要用户自己决定或回复的：记 told_user，带你写的给对方的回复草稿，卡留给用户，不用推送，也不用交给主会话。
-5. 对外说话（reply_to_source、send_channel_message、react_channel_message）：和主会话一样，按每条消息的入站评估和交接说明来。
+   - 外部消息要用户自己决定或回复的：记 told_user，带你写的给对方的回复草稿，卡留给用户，不用推送，也不用交给主会话。用户在不在看会话都一样。
+5. 一个会话里有好几条消息时（例如私信主对话和私信里的 thread 交替来）：每次回复、记处置、写草稿，都用它回复的那条消息自己的 event 和
+   conversation（消息事件上写的），落到那条消息自己的卡和回复位置；私信 thread 里的消息回到那个 thread。不要都落到最新的一条上。
+6. 对外说话（reply_to_source、send_channel_message、react_channel_message）：和主会话一样，按每条消息的入站评估和交接说明来。
    说可以直接回的，能答准就直接回；说先给用户看的，回复会留在卡上等用户点发送；说不回的，不回。私信和频道一样。
 
 省着用：每次调用模型都要读一遍上面的全部说明。
@@ -112,10 +121,14 @@ export const SHADOW_OPENING = {
 } as const;
 
 /** 一批事件交给 shadow 的那条消息。ids 是这一批要给结论的编号（事件块里写的 # 编号）。 */
-export function shadowBatchText(input: { clock: string; presence: string; events: string; ids: readonly number[] }): string {
+export function shadowBatchText(input: {
+  clock: string; presence: string; events: string; ids: readonly number[];
+  /** 按对话复用的会话（工单 #588）：这段对话的说明（新开时的工作记录和前文，复用时账本里的最新状态，每条消息来自哪里）。 */
+  conversation?: string | null;
+}): string {
   const ids = input.ids.map((id) => `#${id}`).join("、");
   return [
-    input.clock, input.presence, input.events,
+    input.clock, input.presence, input.conversation ?? "", input.events,
     `<system_event kind="system" source="daemon">\n这一批要你给结论的编号：${ids}。每个编号都要出现在 finish_shadow 的 done 或 escalate 里。\n</system_event>`,
   ].filter(Boolean).join("\n\n");
 }
@@ -150,7 +163,22 @@ export interface ShadowWrapOptions {
   connectionReadOnly?: (connection: string, tool: string) => boolean;
   /** 经 more_tools 调的工具开始时（daemon 据此把读了外部内容的一批标成外部的，和会话里直接调的工具一样）。 */
   onInnerToolStart?: (name: string) => void;
+  /** 一个工具真的执行成功以后（daemon 据此把回复、处置自动记进工作记录）。试运行和被拒绝的不算。 */
+  onToolDone?: (name: string, params: unknown, result: { content: Array<{ type: string; text?: string }> }) => void;
+  /** 这一批是按对话复用的会话（工单 #588），有工作记录：带上 update_work_record 和 read_work_record。 */
+  workRecord?: ShadowWorkRecordAccess;
 }
+
+/** 工作记录的读写（daemon 按这段对话的会话分组键接到账本，store 的 shadow-conversations.ts）。 */
+export interface ShadowWorkRecordAccess {
+  /** 记几条。返回记下了几条。 */
+  append(entries: ReadonlyArray<{ kind: "attachment" | "decision" | "open" | "resolved"; ref?: string | null; text: string }>): number;
+  /** 这段对话的完整工作记录（排好版的文字）。 */
+  read(): string;
+}
+
+const WORK_RECORD_FILE_HINT = "（读完这个附件，用 update_work_record 把读出的内容记下来：attachments 里写文件编号和内容。"
+  + "会话压缩或者重开以后，从工作记录查回，不用再读一次。）";
 
 type AnyResult = { content: Array<{ type: "text"; text: string }>; details: Record<string, unknown> };
 const textResult = (text: string, details: Record<string, unknown> = {}): AnyResult => ({ content: [{ type: "text", text }], details });
@@ -175,9 +203,14 @@ export function shadowRefusal(
     return "用户正在看会话：要对他说的事交给主会话（finish_shadow 的 escalate），不要推送。";
   }
   if (name === "record_disposition" && args.disposition === "told_user") {
-    if (watching) return "用户正在看会话：要对他说的事交给主会话（finish_shadow 的 escalate），不要记 told_user。";
     const ids = Array.isArray(args.event_ids) ? args.event_ids.filter((id): id is number => typeof id === "number") : [];
     const inboxOnes = ids.filter((id) => !options.messageIds.has(id));
+    // 外部消息事件（工单 #588）：用户在不在看会话都一样，带草稿记 told_user，卡留给用户，不交回主会话。
+    // 不是外部消息的、要对用户说的事：用户在看会话时交给主会话；不在时先推送。
+    if (inboxOnes.length && watching) {
+      return "用户正在看会话：不是外部消息的事要对他说，交给主会话（finish_shadow 的 escalate），不要记 told_user。"
+        + "外部消息事件可以单独带草稿记 told_user。";
+    }
     if (inboxOnes.length && options.notified === 0) {
       return "你还没有告诉用户：先用 notify_user 推给他，再记 told_user；不急的事交给主会话（finish_shadow 的 escalate）。";
     }
@@ -188,12 +221,13 @@ export function shadowRefusal(
 /** 给 Lead 的工具套上 shadow 的规则。只留清单里的工具，去掉 codemode 的 exposure（shadow 会话没有 codemode）。 */
 export function wrapShadowTools(tools: readonly ToolDefinition<any>[], options: ShadowWrapOptions): ToolDefinition<any>[] {
   const wanted = new Set(SHADOW_LEAD_TOOL_NAMES);
-  const { recorder } = options;
   return tools.filter((tool) => wanted.has(tool.name)).map((tool) => {
     const { exposure: _exposure, ...rest } = tool as ToolDefinition<any> & { exposure?: unknown };
     return {
       ...rest,
       execute: async (...args: Parameters<typeof tool.execute>) => {
+        // 按对话复用的会话一批接一批地跑（工单 #588）：这一批的记账和规则在调用时现取，不在建工具时取。
+        const recorder = options.recorder;
         const params = args[1];
         const refused = shadowRefusal(tool.name, params, { ...options, notified: recorder.notified });
         if (refused) {
@@ -208,9 +242,16 @@ export function wrapShadowTools(tools: readonly ToolDefinition<any>[], options: 
         recorder.calls.push({ name: tool.name, args: params, dry: false });
         const result = await tool.execute(...args) as AnyResult;
         const failed = (result as { isError?: boolean }).isError === true;
-        if (!failed) noteWrite(recorder, tool.name, params);
+        if (!failed) {
+          noteWrite(recorder, tool.name, params);
+          options.onToolDone?.(tool.name, params, result);
+        }
         const action = userActionOfToolResult(result);
         if (action) recorder.userActions.push(`${tool.name}：${action.title}`);
+        // 读了附件：提醒把读出的内容记进工作记录（按对话复用的会话才有工作记录）。
+        if (!failed && tool.name === "read_channel_file" && options.workRecord) {
+          return { ...result, content: [...result.content, { type: "text" as const, text: WORK_RECORD_FILE_HINT }] };
+        }
         return result;
       },
     } as ToolDefinition<any>;
@@ -228,7 +269,56 @@ export function createShadowToolset(
   const core = new Set<string>(SHADOW_CORE_TOOLS);
   const direct = wrapped.filter((tool) => core.has(tool.name));
   const extra = wrapped.filter((tool) => !core.has(tool.name));
-  return [...direct, createShadowSkillTool(options.skillsDir), createShadowMoreTool(extra, options), createShadowFinishTool(options.recorder)];
+  return [
+    ...direct, createShadowSkillTool(options.skillsDir), createShadowMoreTool(extra, options),
+    ...(options.workRecord ? createShadowWorkRecordTools(options.workRecord) : []),
+    createShadowFinishTool(() => options.recorder),
+  ];
+}
+
+const WorkText = Type.String({ minLength: 1, maxLength: 4_000 });
+
+/**
+ * 工作记录的两个工具（工单 #588，按对话复用的会话才有）。记录在账本里，只加不删：会话压缩、重开、daemon 重启以后从它接着做；
+ * 主会话处理这段对话时也会看到它。回复和处置由系统自动记，这里记系统看不到的：附件里读出的内容、你的判断、没处理完的事。
+ */
+export function createShadowWorkRecordTools(access: ShadowWorkRecordAccess): ToolDefinition<any>[] {
+  return [
+    defineTool({
+      name: SHADOW_WORK_UPDATE_TOOL,
+      label: "Update Work Record",
+      description: "往这段对话的工作记录里加几条（只加不删）。attachments：读过的附件，文件编号和读出的内容（截图里的文字、报错、数字照原样写）；"
+        + "decisions：做过的判断和理由；open：还没处理完的事；resolved：处理完了的 open（写它在记录里的编号，例如 #12）。"
+        + "回复和处置系统会自动记，不用写。",
+      parameters: Type.Object({
+        attachments: Type.Optional(Type.Array(Type.Object({ file: Type.String({ minLength: 1, maxLength: 200 }), content: WorkText }), { maxItems: 10 })),
+        decisions: Type.Optional(Type.Array(WorkText, { maxItems: 10 })),
+        open: Type.Optional(Type.Array(WorkText, { maxItems: 10 })),
+        resolved: Type.Optional(Type.Array(Type.Object({
+          entry: Type.Integer({ minimum: 1, description: "open 那一条在记录里的编号" }), note: Type.Optional(Type.String({ maxLength: 1_000 })),
+        }), { maxItems: 10 })),
+      }),
+      execute: async (_id, params: {
+        attachments?: Array<{ file: string; content: string }>; decisions?: string[]; open?: string[];
+        resolved?: Array<{ entry: number; note?: string }>;
+      }) => {
+        const added = access.append([
+          ...(params.attachments ?? []).map((item) => ({ kind: "attachment" as const, ref: item.file, text: item.content })),
+          ...(params.decisions ?? []).map((text) => ({ kind: "decision" as const, text })),
+          ...(params.open ?? []).map((text) => ({ kind: "open" as const, text })),
+          ...(params.resolved ?? []).map((item) => ({ kind: "resolved" as const, ref: `#${item.entry}`, text: item.note?.trim() || "处理完了" })),
+        ]);
+        return textResult(`记下了 ${added} 条。`);
+      },
+    }),
+    defineTool({
+      name: SHADOW_WORK_READ_TOOL,
+      label: "Read Work Record",
+      description: "读这段对话的完整工作记录：读过的附件和内容、做过的判断、给出的回复、还没处理完的事。会话压缩以后要查以前读过的附件时用它，不用重读。",
+      parameters: Type.Object({}),
+      execute: async () => textResult(access.read()),
+    }),
+  ];
 }
 
 /** more_tools：不常用的工具的入口。只给 name 时返回它的说明和参数；带 arguments 时调用它。 */
@@ -264,8 +354,9 @@ function noteWrite(recorder: ShadowRecorder, name: string, params: unknown): voi
 
 const IdList = Type.Array(Type.Integer({ minimum: 1 }), { minItems: 1, maxItems: 50 });
 
-/** 收尾的工具：这一批每个编号的结论。 */
-export function createShadowFinishTool(recorder: ShadowRecorder): ToolDefinition<any> {
+/** 收尾的工具：这一批每个编号的结论。recorder 可以是取当前这一批的函数（按对话复用的会话一批接一批）。 */
+export function createShadowFinishTool(recorderOf: ShadowRecorder | (() => ShadowRecorder)): ToolDefinition<any> {
+  const current = () => (typeof recorderOf === "function" ? recorderOf() : recorderOf);
   return defineTool({
     name: SHADOW_FINISH_TOOL,
     label: "Finish Shadow",
@@ -283,6 +374,7 @@ export function createShadowFinishTool(recorder: ShadowRecorder): ToolDefinition
       }), { maxItems: 50 }),
     }),
     execute: async (_id, params: ShadowReport) => {
+      const recorder = current();
       recorder.report = { done: params.done ?? [], escalate: params.escalate ?? [] };
       recorder.calls.push({ name: SHADOW_FINISH_TOOL, args: params, dry: false });
       return textResult("收到。这一批结束了。");

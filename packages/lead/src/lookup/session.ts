@@ -25,6 +25,8 @@ export interface LookupSession {
   prompt(text: string): Promise<void>;
   abort(): Promise<void>;
   dispose(): void;
+  /** 存成文件的会话（persist）：会话文件的路径。内存会话没有。 */
+  sessionFile?(): string | undefined;
 }
 
 export interface LookupSessionRequest {
@@ -55,14 +57,18 @@ export async function createIsolatedLookupSession(input: {
   // 工具不听中止、过了宽限还在跑时（tool-abort-guard.ts），它的结果从这里交回。不给时只写日志。
   backgroundJobs?: LeadBackgroundJobs;
   // 第一条 prompt 之前放进会话的消息（pi 的 AgentMessage）。shadow 用它放固定的开头（shadow/session.ts）。
+  // 接着用已有的会话文件（persist.file）时不放：文件里已经有了。
   seedMessages?: unknown[];
+  // 存成文件（工单 #588，shadow 按对话复用会话）：会话文件放在 sessionDir；file 给了时打开它接着用，没给时新建一个。
+  // 存成文件的会话开自动压缩：会话变长时由 pi 压缩，不因为长而重开。不给时是内存会话（不落盘，不续接）。
+  persist?: { sessionDir: string; file?: string | null };
 }): Promise<LookupSession> {
   const cwd = join(input.workDir, "cwd");
   const agentDir = join(input.workDir, "agent");
   mkdirSync(cwd, { recursive: true, mode: 0o700 });
   mkdirSync(agentDir, { recursive: true, mode: 0o700 });
   const settingsManager = SettingsManager.inMemory({
-    compaction: { enabled: false },
+    compaction: { enabled: Boolean(input.persist) },
     retry: { enabled: input.retry ?? true },
   });
   const loader = new DefaultResourceLoader({
@@ -76,8 +82,14 @@ export async function createIsolatedLookupSession(input: {
   await loader.reload();
   const names = input.tools.map((tool) => tool.name);
   // 会话的消息按会话记录重建（pi 的 buildSessionProjection），所以固定的开头写进记录，不直接改 agent 的消息。
-  const sessionManager = SessionManager.inMemory(cwd);
-  for (const message of input.seedMessages ?? []) sessionManager.appendMessage(message as Parameters<typeof sessionManager.appendMessage>[0]);
+  let sessionManager: SessionManager;
+  if (input.persist?.file) {
+    sessionManager = SessionManager.open(input.persist.file, input.persist.sessionDir, cwd);
+  } else {
+    if (input.persist) mkdirSync(input.persist.sessionDir, { recursive: true, mode: 0o700 });
+    sessionManager = input.persist ? SessionManager.create(cwd, input.persist.sessionDir) : SessionManager.inMemory(cwd);
+    for (const message of input.seedMessages ?? []) sessionManager.appendMessage(message as Parameters<typeof sessionManager.appendMessage>[0]);
+  }
   const { session } = await createAgentSession({
     cwd, agentDir,
     model: input.model,
@@ -109,6 +121,7 @@ export async function createIsolatedLookupSession(input: {
     prompt: (text) => session.prompt(text, { expandPromptTemplates: false }),
     abort: () => session.abort(),
     dispose: () => session.dispose(),
+    sessionFile: () => sessionManager.getSessionFile(),
   };
 }
 

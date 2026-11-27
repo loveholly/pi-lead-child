@@ -7,7 +7,7 @@
 //   - createSocketClient：假的 SocketModeClient。push 把一次投递当成 Socket Mode 的 envelope 发给连着的客户端，
 //     记下客户端回的 ack；dropConnection 模拟断线；failNextSocketStart 让下一次连接失败。
 // 实现的 Web API：auth.test、apps.connections.open（只认 app-level token）、users.info、conversations.info（外部共享）、
-// conversations.history、conversations.replies（oldest、limit）、chat.postMessage、chat.delete、chat.update、reactions.add、
+// conversations.history（oldest、latest、limit）、conversations.replies（oldest、limit）、chat.postMessage、chat.delete、chat.update、reactions.add、
 // emoji.list（工作区的自定义 emoji，要 emoji:read；缺省的权限里没有它，和建应用的清单一样是可选的）、
 // files.info（消息里附带的文件，要 files:read；也是可选的权限）。
 // 断线以后的补拉（2026-11-03）用的两个：search.messages（要 search:read，用户令牌缺省没有；会话令牌有用户的全部权限）和
@@ -607,7 +607,11 @@ export class FakeSlack {
       }
       case "conversations.history": {
         const live = this.live();
-        const top = live.filter((message) => message.channel === args.channel && !message.thread_ts && this.after(message, args.oldest));
+        // latest：和真的 Slack 一样只要早于它的（inclusive 缺省是 false，工单 #588 读 thread 开始以前的主时间线）。
+        const before = (message: FakeSlackMessage) => typeof args.latest !== "string"
+          || (args.inclusive === true ? Number(message.ts) <= Number(args.latest) : Number(message.ts) < Number(args.latest));
+        const top = live.filter((message) => message.channel === args.channel && !message.thread_ts && this.after(message, args.oldest)
+          && before(message));
         // 真 Slack 的 thread 根消息带 reply_count（只有根消息，回复不在这里）。
         const replies = (ts: string) => live.filter((reply) => reply.channel === args.channel && reply.thread_ts === ts).length;
         return {

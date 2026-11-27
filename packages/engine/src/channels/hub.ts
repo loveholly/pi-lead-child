@@ -80,7 +80,7 @@ import {
   type ChannelLeadDecision, type ChannelLeadStage,
   type ChannelReplyDecision, type ChannelReplyDraftKind, type ChannelReplyLabel, type ChannelLookupCheckStatus, type ConnectionSource, type GrantIntent,
   type ExternalGrantScope, type GrantReviewEvent, type IntentGrantBound, type LookupSource, isExternalReviewEvent,
-  MESSAGE_CONTEXT_EVENT_KIND, MESSAGE_EVENT_KIND, messageEventConversationKey, type MessageReceivedPayload,
+  MESSAGE_CONTEXT_EVENT_KIND, MESSAGE_EVENT_KIND, messageEventConversationKey, messageSessionGroupOf, type MessageReceivedPayload,
 } from "@pi-lead-child/protocol";
 import { LLM_BACKEND } from "../smart-model/llm.js";
 import type { SmartModel, SmartTextComplete } from "../smart-model/types.js";
@@ -798,6 +798,7 @@ export class ChannelHub {
       ...(item.messageId ? { messageId: item.messageId } : {}),
       ...(item.audience ? { audience: item.audience } : {}),
       ...(item.replyTo ? { replyTo: item.replyTo } : {}),
+      ...(item.session ? { session: item.session } : {}),
       ...(item.starts && item.role === "echo" ? { starts: true } : {}),
       ...(ambient ? { ambient: true } : {}),
       summary: `${item.sender.name}（${SENDER_TRUST_LABELS[item.sender.trust]}）在${item.laneLabel}：${oneLine(item.text, 300)}`,
@@ -1542,6 +1543,7 @@ export class ChannelHub {
       authority: input.action, intent: input.intent, handbook: input.handbook ?? null,
       messageId: typeof event.payload.messageId === "string" ? event.payload.messageId : null,
       messages: merged.seqs, cardId: card.id, summary, context: context?.context ?? null,
+      session: messageSessionGroupOf(event.payload.session),
     });
     const recorded = appendEvent(db, {
       source: "system", sourceRef: messageEventRef(adapter.id, merged.seqs), kind: MESSAGE_EVENT_KIND, entityKey: card.objectKey,
@@ -2488,6 +2490,28 @@ export class ChannelHub {
         ...(message.thread ? { thread: message.thread } : {}),
       })),
     };
+  }
+
+  /**
+   * 一个对话里某一条之前的消息，从旧到新（工单 #588：频道 thread 新开 shadow 会话时，带上这个 thread 开始之前主时间线上的消息）。
+   * objectKey 是来源自己的对话（消息事件 session.prelude 给的），before 是来源里的编号。只留 sinceMs 以后的，最多 limit 条。
+   * 来源不能取历史、没接上、取不到时抛错，错误的话是给人看的原因。原文是不可信的外部文字。
+   */
+  async historyBefore(objectKey: string, before: string, options: { limit: number; sinceMs: number }): Promise<ChannelConversationRead["messages"]> {
+    const source = objectKey.split(":")[0] ?? "";
+    const adapter = this.options.registry.get(source);
+    if (!adapter?.history || !adapter.capabilities.history) throw new ChannelActionError("unavailable", `来源 ${source} 不能读对话的消息`);
+    const context = await this.context(adapter);
+    if (!context) throw new ChannelActionError("unavailable", `来源 ${source} 现在没有接上`);
+    const limit = Math.min(Math.max(Math.floor(options.limit), 1), 50);
+    const messages = await adapter.history({ objectKey, before, limit }, context);
+    return messages
+      .filter((message) => message.ref !== before && Date.parse(message.at) >= options.sinceMs)
+      .slice(-limit)
+      .map((message) => ({
+        at: message.at, ref: message.ref, seq: null, role: message.role, sender: message.sender.name,
+        text: clipEventText(message.text, TEXT_MAX), ...(message.thread ? { thread: message.thread } : {}),
+      }));
   }
 
   /**
@@ -4782,6 +4806,63 @@ export class ChannelHub {
       ? (row: { seq: number }) => row.seq > since.seq
       : (row: { occurredAt: string }) => Date.parse(row.occurredAt) >= since.at;
     return rows.find(after)?.seq ?? null;
+  }
+
+  /**
+   * 用户在这条消息以后自己在来源里说过话（工单 #588）：同一个会话分组里（例如同一个私信，主对话和 thread 都算），晚于这条消息的
+   * 用户本人的话（role 是 self_reply）。有时返回那句话的事件编号，没有时是 null。只看事件日志里的事实。
+   */
+  ownReplyAfterMessage(messageSeq: number): number | null {
+    const event = getEvent(this.db, messageSeq);
+    if (!event || event.kind !== MESSAGE_EVENT_KIND) return null;
+    const payload = event.payload;
+    const first = Array.isArray(payload.messages) && typeof payload.messages[0] === "number" ? payload.messages[0] : null;
+    const source = typeof payload.source === "string" ? payload.source : null;
+    const group = messageSessionGroupOf(payload.session)?.key ?? null;
+    const conversation = messageEventConversationKey(payload);
+    if (first === null || !source || !conversation) return null;
+    const row = this.db.prepare(
+      `SELECT seq FROM events
+       WHERE source = ? AND seq > ? AND json_valid(payload) AND json_extract(payload, '$.role') = 'self_reply'
+         AND (entity_key = ? OR (? IS NOT NULL AND json_extract(payload, '$.session.key') = ?))
+       ORDER BY seq LIMIT 1`,
+    ).get(source, first, conversation, group, group) as { seq: number } | undefined;
+    return row?.seq ?? null;
+  }
+
+  /**
+   * 分给 shadow 之前用户已经自己回过话（工单 #588，ownReplyAfterMessage）：直接记成「用户已自己处理」，不交给 shadow，也不交给 Lead。
+   * 卡上最新的消息不晚于用户那句话时卡结束（别处已处理）；卡上后来又来了消息时卡照旧，只结束这条消息事件。返回结束了的卡（没有时 null）。
+   */
+  async resolveMessageByOwnReply(messageSeq: number, replySeq: number): Promise<ChannelCard | null> {
+    const db = this.db;
+    const event = getEvent(db, messageSeq);
+    if (!event || event.kind !== MESSAGE_EVENT_KIND || event.disposition !== null) return null;
+    const now = this.now();
+    const at = now.toISOString();
+    const source = typeof event.payload.source === "string" ? event.payload.source : "";
+    const detail = { by: "user", via: source, seq: replySeq, reason: "own_reply_before_shadow" };
+    const cardId = typeof event.payload.cardId === "number" ? event.payload.cardId : null;
+    const changed = db.transaction(() => {
+      const card = cardId === null ? undefined : getChannelCard(db, cardId);
+      if (!card || !(CHANNEL_CARD_OPEN_STATES as readonly ChannelCardState[]).includes(card.state) || card.lastSeq > replySeq) {
+        setEventDisposition(db, messageSeq, "resolved_elsewhere", { ...detail, ...(cardId !== null ? { cardId } : {}) }, now);
+        return null;
+      }
+      const updated = updateChannelCard(db, card.id, {
+        state: "resolved_elsewhere", resolvedAt: at, snoozedUntil: null,
+        resolution: { by: "user", action: "replied_in_source", at, detail },
+      }, { at: now })!;
+      this.disposeCardEvents(card, "resolved_elsewhere", { ...detail, cardId: card.id });
+      setEventDisposition(db, messageSeq, "resolved_elsewhere", { ...detail, cardId: card.id }, now);
+      return updated;
+    })();
+    if (!changed) return null;
+    this.closePendingRequest(changed, "user");
+    this.refreshLaneOf(changed);
+    this.cardsChanged([changed.id]);
+    await this.settleStatusNotices(changed.id);
+    return changed;
   }
 
   /**

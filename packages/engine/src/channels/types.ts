@@ -110,6 +110,23 @@ export interface ChannelInbound {
   // 用户在场，要知道，但不用处理：hub 把投递方式封顶在摘要（digest），不开道、不开卡、不问请求 A，所以不会代办或代回；
   // 这个对象已经有道时只进道的上下文。不问紧急程度。投递指令说只记录时照样只记录。
   ambient?: boolean;
+  // 会话分组（工单 #588）：shadow 按它把同一段对话的消息放进同一个会话。不给时按 objectKey 分组。见 ChannelSessionGroup。
+  session?: ChannelSessionGroup;
+}
+
+/**
+ * 会话分组（工单 #588）：shadow（Lead 的分身）按 key 把同一段对话的消息放进同一个会话；分给 shadow 还是主会话也按 key 分，
+ * 同一组永远落在同一边。怎样算一段对话是来源自己的规则（例如私信按整个私信，频道里的 thread 按 thread，频道主时间线按频道），
+ * 只写在适配器里，内核只认 key。
+ */
+export interface ChannelSessionGroup {
+  // 以「来源名:」开头。
+  key: string;
+  // 消息在这一组里的哪个子对话（例如私信里的一个 thread）。交给 shadow 时标明出处。不在子对话里时没有。
+  thread?: string;
+  // 这一组新开会话时要带的前文：在哪个对话、取哪一条（来源里的编号）之前的消息（例如频道 thread 开始之前主时间线上的消息），
+  // at 是那一条的时刻（ISO），按它取前面一段时间内的。不用带时没有。
+  prelude?: { objectKey: string; before: string; at: string };
 }
 
 /**
@@ -307,6 +324,8 @@ export interface ChannelHistoryRequest {
   ref?: string;
   // 最多几条。
   limit: number;
+  // 只取来源里编号在这一条之前的消息（整段对话用，例如一个 thread 开始之前的主时间线，工单 #588）。不给时取最近的。
+  before?: string;
 }
 
 /** 取回来的一条消息。只读，只当上下文用：不开卡，不触发判断。原文是不可信的。 */

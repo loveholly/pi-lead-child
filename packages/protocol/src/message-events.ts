@@ -187,6 +187,29 @@ export const MessageCeilingSchema = Type.Object({
 });
 export type MessageCeiling = Static<typeof MessageCeilingSchema>;
 
+/** 会话分组（工单 #588）：key 以来源名开头；thread 是组里的子对话；prelude 是新开会话时要带的前文在哪里。 */
+export const MessageSessionGroupSchema = Type.Object({
+  key: Type.String({ minLength: 1 }),
+  thread: Type.Optional(Type.String()),
+  prelude: Type.Optional(Type.Object({ objectKey: Type.String({ minLength: 1 }), before: Type.String({ minLength: 1 }), at: Type.String() })),
+});
+export type MessageSessionGroup = Static<typeof MessageSessionGroupSchema>;
+
+/** 读 payload 里的会话分组。没有或者不对时是 null。 */
+export function messageSessionGroupOf(value: unknown): MessageSessionGroup | null {
+  if (!value || typeof value !== "object") return null;
+  const raw = value as Record<string, unknown>;
+  if (typeof raw.key !== "string" || !raw.key) return null;
+  const prelude = raw.prelude && typeof raw.prelude === "object" ? raw.prelude as Record<string, unknown> : null;
+  return {
+    key: raw.key,
+    ...(typeof raw.thread === "string" && raw.thread ? { thread: raw.thread } : {}),
+    ...(prelude && typeof prelude.objectKey === "string" && prelude.objectKey && typeof prelude.before === "string" && prelude.before
+      && typeof prelude.at === "string" && Number.isFinite(Date.parse(prelude.at))
+      ? { prelude: { objectKey: prelude.objectKey, before: prelude.before, at: prelude.at } } : {}),
+  };
+}
+
 const messageEventProperties = {
   version: Type.Literal(MESSAGE_EVENT_VERSION),
   entry: Literals(MESSAGE_ENTRIES),
@@ -211,6 +234,9 @@ const messageEventProperties = {
   edits: Type.Integer({ minimum: 0 }),
   // 外部通道：这条消息所在的会话卡（现有的通道工具按它找，工单 05 换工具）。
   cardId: Type.Optional(Nullable(Id)),
+  // 外部通道：会话分组（工单 #588，通道适配器的 ChannelSessionGroup）。shadow 按 key 把同一段对话的消息放进同一个会话。
+  // 旧事件和不分组的来源没有：按对话分组（messageEventSessionKey）。
+  session: Type.Optional(MessageSessionGroupSchema),
 };
 
 export const MessageEventSchema = Type.Object(messageEventProperties);
@@ -239,5 +265,17 @@ export function messageEventConversationKey(payload: Record<string, unknown>): s
   const replyTo = payload.replyTo && typeof payload.replyTo === "object" ? payload.replyTo as Record<string, unknown> : {};
   const conversation = payload.conversation && typeof payload.conversation === "object" ? payload.conversation as Record<string, unknown> : {};
   if (typeof replyTo.conversation === "string" && replyTo.conversation) return replyTo.conversation;
+  return typeof conversation.key === "string" && conversation.key ? conversation.key : null;
+}
+
+/**
+ * 一条外部通道的消息事件属于哪个会话分组（工单 #588）：payload 的 session.key；没有时（旧事件、不分组的来源）是它所在的对话。
+ * 不是外部通道的消息事件时是 null。
+ */
+export function messageEventSessionKey(payload: Record<string, unknown>): string | null {
+  if (payload.entry !== "external") return null;
+  const group = messageSessionGroupOf(payload.session);
+  if (group) return group.key;
+  const conversation = payload.conversation && typeof payload.conversation === "object" ? payload.conversation as Record<string, unknown> : {};
   return typeof conversation.key === "string" && conversation.key ? conversation.key : null;
 }

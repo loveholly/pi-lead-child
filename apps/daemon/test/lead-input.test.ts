@@ -5,7 +5,7 @@
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
-  addInbox, addLeadFollowUp, addNotification, appendEvent, createItem, escalateOverdueEvents, listInbox, listEvents,
+  addInbox, addLeadFollowUp, addNotification, appendEvent, appendShadowWork, createItem, escalateOverdueEvents, listInbox, listEvents,
   loadLeadEventCursor, openDb, recordDueLeadFollowUps, recordLeadCompactionFailed, recordLeadModelSwitched, transition,
   type Db, type EventRecord,
 } from "@pi-lead-child/store";
@@ -559,5 +559,71 @@ describe("channel lanes in the situation (ticket 11, spec D14)", () => {
     expect(rendered.text).toContain("来源 · 对话 9：一行");
     expect(rendered.text).not.toContain("来源 · 对话 10：一行");
     expect(rendered.text).toContain("（另有 2 条道没有列出）");
+  });
+});
+
+// 工单 #588：主会话处理一段对话的消息时，系统把 shadow 记的这段对话的工作记录放进来。按游标只带新增的部分；
+// 主会话压缩以后（forgetSentSituation），第一次碰到这段对话时带完整的记录。
+describe("the conversation's work record reaches the main session", () => {
+  const message = (db: Db, text: string) => db.transaction(() => appendEvent(db, {
+    source: "system", kind: "message.received", entityKey: "slack:D0LEILEI:main", correlationId: "channel:slack:D0LEILEI:main", level: "tell",
+    payload: {
+      version: 1, entry: "external", source: "slack", sourceLabel: "Slack", conversation: { key: "slack:D0LEILEI:main", label: "李雷的私信" },
+      sender: { id: "U0LEILEI", name: "李雷", trust: "colleague" }, text, external: true, inbound: null, ceiling: null, context: null,
+      replyTo: { conversation: "slack:D0LEILEI:main", message: null }, messages: [], edits: 0, session: { key: "slack:D0LEILEI" },
+      summary: `李雷：${text}`,
+    },
+  }))().event;
+
+  it("adds the full record the first time, then only new entries, and the full record again after a compaction", () => {
+    const db = fresh();
+    const input = createLeadInput({ db });
+    appendShadowWork(db, "slack:D0LEILEI", [
+      { kind: "attachment", ref: "slack:F0001", text: "截图一：登录页提示账号已被冻结" },
+      { kind: "attachment", ref: "slack:F0002", text: "截图二：冻结原因写着风控规则命中" },
+    ]);
+    const first = message(db, "我被加入黑名单了");
+    input.beginRun("events");
+    const one = input.takeMessages({ events: [first] }).text;
+    expect(one).toContain("完整的记录");
+    expect(one).toContain("截图一：登录页提示账号已被冻结");
+    expect(one).toContain("截图二：冻结原因写着风控规则命中");
+    input.endRun("succeeded");
+
+    appendShadowWork(db, "slack:D0LEILEI", [{ kind: "decision", text: "已经让对方提供账号，等回复" }]);
+    const second = message(db, "账号是 alice@example.com");
+    input.beginRun("events");
+    const two = input.takeMessages({ events: [second] }).text;
+    expect(two).toContain("新增的部分");
+    expect(two).toContain("已经让对方提供账号");
+    expect(two).not.toContain("截图一");
+    input.endRun("succeeded");
+
+    // 没有新的：不再带。
+    const third = message(db, "在吗");
+    input.beginRun("events");
+    expect(input.takeMessages({ events: [third] }).text).not.toContain("工作记录");
+    input.endRun("succeeded");
+
+    // 压缩以后：带完整的。
+    input.forgetSentSituation();
+    const fourth = message(db, "还在吗");
+    input.beginRun("events");
+    const four = input.takeMessages({ events: [fourth] }).text;
+    expect(four).toContain("完整的记录");
+    expect(four).toContain("截图一：登录页提示账号已被冻结");
+    input.endRun("succeeded");
+  });
+
+  it("does not move the cursor when the turn fails", () => {
+    const db = fresh();
+    const input = createLeadInput({ db });
+    appendShadowWork(db, "slack:D0LEILEI", [{ kind: "decision", text: "等对方回" }]);
+    input.beginRun("events");
+    input.takeMessages({ events: [message(db, "a")] });
+    input.endRun("failed");
+    input.beginRun("events");
+    expect(input.takeMessages({ events: [message(db, "b")] }).text).toContain("等对方回");
+    input.endRun("succeeded");
   });
 });

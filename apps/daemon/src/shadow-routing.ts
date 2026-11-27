@@ -9,7 +9,7 @@
 //   - 设置里没有交给 shadow 的来源。
 // 剩下的交给 shadow。它在会话里再按 D2 的说法判断：要对话的上下文、用户在看而且要对用户说、要用户本人、拿不准，就交回来。
 import {
-  isUserActionRequest, shadowBucket, LEAD_WAIT_EXPIRED_KIND, LEAD_WAIT_SATISFIED_KIND, MESSAGE_EVENT_KIND,
+  isUserActionRequest, messageEventSessionKey, shadowBucket, LEAD_WAIT_EXPIRED_KIND, LEAD_WAIT_SATISFIED_KIND, MESSAGE_EVENT_KIND,
   type LeadShadowDto, type LeadShadowSource, type UserActionRequest,
 } from "@pi-lead-child/protocol";
 import type { EventRecord } from "@pi-lead-child/store";
@@ -48,7 +48,7 @@ export interface ShadowRouteFacts {
   mustTell: (event: EventRecord) => boolean;
   needsUserAction: (event: EventRecord) => boolean;
   handoffLane: (event: EventRecord) => number;
-  // 主会话这一轮正在处理的对象（它这一轮拿着的事件的 entityKey）。
+  // 主会话这一轮正在处理的对象（它这一轮拿着的事件的 entityKey，外部消息另加它的会话分组键）。
   leadEntities: ReadonlySet<string>;
 }
 
@@ -92,6 +92,9 @@ export function shadowRoute(event: EventRecord, facts: ShadowRouteFacts): Shadow
   if (facts.needsUserAction(event)) return { shadow: false, why: "user_action" };
   if (facts.handoffLane(event) <= 1) return { shadow: false, why: "handoff_for_user" };
   if (facts.leadEntities.has(event.entityKey)) return { shadow: false, why: "lead_on_it" };
+  // 外部消息按会话分组判断（工单 #588）：主会话在处理这段对话的另一条消息时（例如私信 thread 里的一条），这一条也留给它。
+  const group = shadowSessionKey(event);
+  if (group !== null && facts.leadEntities.has(group)) return { shadow: false, why: "lead_on_it" };
   const source = shadowSourceOf(event);
   const share = facts.settings.shares[source];
   if (share <= 0) return { shadow: false, why: "share_off" };
@@ -100,10 +103,22 @@ export function shadowRoute(event: EventRecord, facts: ShadowRouteFacts): Shadow
 }
 
 /**
+ * 外部消息的会话分组键（工单 #588，通道适配器给的 session.key；旧事件按它所在的对话）。不是外部消息时是 null。
+ * shadow 按它把同一段对话的消息放进同一个会话。
+ */
+export function shadowSessionKey(event: Pick<EventRecord, "kind" | "payload">): string | null {
+  if (event.kind !== MESSAGE_EVENT_KIND) return null;
+  return messageEventSessionKey(event.payload);
+}
+
+/**
  * 分流按哪个对象分（用户 2026-11-19：按比例分给 shadow，可以随时调）：工单的事按工单（Run 的事件也归到它的工单），
  * 外部消息按对话，别的按事件的对象。同一个对象永远落在同一边。
  */
-export function shadowObjectKey(event: Pick<EventRecord, "entityKey" | "payload">): string {
+export function shadowObjectKey(event: Pick<EventRecord, "kind" | "entityKey" | "payload">): string {
+  // 外部消息按会话分组（工单 #588）：私信的主对话和私信里的 thread 是同一组，一定落在同一边、进同一个会话。
+  const group = shadowSessionKey(event);
+  if (group !== null) return group;
   const itemId = event.payload.itemId;
   if (typeof itemId === "number" && Number.isInteger(itemId) && itemId > 0) return `ticket:${itemId}`;
   return event.entityKey;
