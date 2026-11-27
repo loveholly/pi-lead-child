@@ -5,11 +5,15 @@
 //   - 补到的消息照常经 hub 的进程内入口，按投递编号去重；频道里只要提到用户的；
 //   - 有上限（时间窗、条数），超过时记日志，并且告诉 Lead 可能没补全；
 //   - Slack 应用方式（Socket Mode）和浏览器会话方式都这样（会话方式的用例在 channel-slack-session.test.ts）。
+// 2026-11-06（#85）：
+//   - 不完整事件写真实的断开、重连时刻和断了几秒，不把补拉读的区间（水位往回留了两分钟余量）说成断线的时段；
+//   - 缺 search:read 这类配置问题只提醒一次，补拉真有缺口时照常提醒；
+//   - 列出私信以后先探哪些有新消息，有新消息的都读（以前只读前 50 个，后面的漏了）；探的调用限速。
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { tempDir } from "@pi-lead-child/core/testing";
 import { getChannelCatchUpMark, getChannelLane, listEvents, openDb, setChannelCatchUpMark, type Db } from "@pi-lead-child/store";
-import { ChannelHub, ChannelRegistry, createSlackChannelAdapter, slackCatchUpWindow, type ChannelAdapter } from "../src/index.js";
+import { ChannelHub, ChannelRegistry, createSlackChannelAdapter, slackCatchUpWindow, type ChannelAdapter, type SlackWebApi } from "../src/index.js";
 import { FAKE_SLACK_USER_SCOPES, FakeSlack } from "../testing/index.js";
 
 const MINUTE = 60_000;
@@ -25,9 +29,11 @@ let clock: Date;
 let adapter: ChannelAdapter;
 let hub: ChannelHub;
 
-function setup(limits?: { windowMs?: number; messages?: number }): void {
+type Limits = { windowMs?: number; messages?: number; probeSpacingMs?: number };
+
+function setup(limits?: Limits, api: SlackWebApi = slack.api): void {
   adapter = createSlackChannelAdapter({
-    api: slack.api, now: () => clock, socket: { createClient: slack.createSocketClient, retryBaseMs: 5, retryMaxMs: 40 },
+    api, now: () => clock, socket: { createClient: slack.createSocketClient, retryBaseMs: 5, retryMaxMs: 40, catchUpSpacingMs: 0 },
     ...(limits ? { catchUp: limits } : {}),
   });
   hub = new ChannelHub({
@@ -40,7 +46,7 @@ function start(): void {
 }
 
 // daemon 重启：停下传输，关掉库，再用同一个库文件建新的 hub 和适配器。
-async function restart(limits?: { windowMs?: number; messages?: number }): Promise<void> {
+async function restart(limits?: Limits): Promise<void> {
   await adapter.transport!.stop();
   await hub.idle();
   db.close();
@@ -180,6 +186,34 @@ describe("the limits of the catch-up", () => {
     expect(notice).toMatchObject({ source: "system", level: "tell" });
     expect(String(notice!.payload.summary)).toContain("3 天");
     expect(logs.join("\n")).toMatch(/catch-up of the gap .* is incomplete/);
+    // daemon 停着的那段不是连接断开：没有断开的时刻，也不编一个。
+    expect(notice!.payload).toMatchObject({ disconnectedAt: null, reconnectedAt: null, disconnectedSeconds: null });
+    expect(String(notice!.payload.summary)).toContain("daemon 启动以后第一次连上");
+  });
+
+  it("writes when the connection really dropped and came back, not the catch-up range with its margin", async () => {
+    await restart({ messages: 1 });
+    start();
+    await marked();
+    // 断开一秒多才重新连上；这期间来了两条私信，只补一条（有缺口，要告诉 Lead）。
+    const release = slack.holdSocketStart();
+    slack.dropConnection();
+    slack.dm("U0LI", "断线时的一");
+    slack.dm("U0LI", "断线时的二");
+    await new Promise((resolve) => setTimeout(resolve, 1_100));
+    release();
+    await vi.waitFor(() => expect(incomplete()).toHaveLength(1));
+    const { payload } = incomplete()[0]!;
+    const down = Date.parse(String(payload.reconnectedAt)) - Date.parse(String(payload.disconnectedAt));
+    expect(down).toBeGreaterThanOrEqual(1_000);
+    expect(payload.disconnectedSeconds).toBe(Math.round(down / 1000));
+    expect(payload.drops).toBe(1);
+    const summary = String(payload.summary);
+    expect(summary).toContain(`断了 ${payload.disconnectedSeconds} 秒`);
+    expect(summary).toContain(`${payload.disconnectedAt} 断开`);
+    // 补拉读的区间照样写，但说明它不是断线的时段。
+    expect(summary).toContain(`补拉读的是 ${payload.from} 到 ${payload.to}`);
+    expect(summary).not.toContain("之间断过线");
   });
 
   it("delivers at most the cap and tells Lead that older messages were left out", async () => {
@@ -204,6 +238,77 @@ describe("the limits of the catch-up", () => {
     await vi.waitFor(() => expect(incomplete()).toHaveLength(1));
     expect(texts("slack.dm.received")).toEqual(["没有搜索权限时的私信"]);
     expect(String(incomplete()[0]!.payload.summary)).toContain("search:read");
+    expect(incomplete()[0]!.payload.setup).toEqual([expect.stringContaining("search:read")]);
+  });
+
+  it("tells Lead about a missing search scope once, and still tells about a real gap", async () => {
+    slack.scopes = slack.scopes.filter((scope) => scope !== "search:read");
+    start();
+    await marked();
+    // 第一次补拉：只有配置问题，提醒一次。
+    slack.dropConnection();
+    slack.dm("U0LI", "第一次断线");
+    await vi.waitFor(() => expect(incomplete()).toHaveLength(1));
+    expect(String(incomplete()[0]!.payload.summary)).toContain("只提醒一次");
+
+    // 再断两次，都只有配置问题：私信照补，不再记事件，日志里写明已经说过。
+    for (const [round, text] of [[2, "第二次断线"], [3, "第三次断线"]] as const) {
+      slack.dropConnection();
+      slack.dm("U0LI", text);
+      await vi.waitFor(() => expect(texts("slack.dm.received")).toContain(text));
+      await vi.waitFor(() => expect(slack.calls.filter((call) => call.method === "search.messages")).toHaveLength(round));
+    }
+    await vi.waitFor(() => expect(logs.filter((line) => line.includes("a setup problem Lead was already told about"))).toHaveLength(2));
+    expect(incomplete()).toHaveLength(1);
+
+    // 真有缺口（列不出私信对话）：照常提醒，原因里也带着配置问题。
+    clock = new Date(START.getTime() + 10 * MINUTE);
+    slack.failNext("users.conversations", "socket hang up");
+    slack.dropConnection();
+    await vi.waitFor(() => expect(incomplete()).toHaveLength(2));
+    expect(incomplete()[1]!.payload.reasons).toEqual([expect.stringContaining("列不出私信对话"), expect.stringContaining("search:read")]);
+  });
+
+  it("reads every direct conversation with new messages, however many there are", async () => {
+    // 82 个私信对话（以前只读排在前面的 50 个）；断线期间只有排在最后的三个人发来私信。
+    const users = Object.fromEntries(Array.from({ length: 80 }, (_, index) => [`U0P${String(index).padStart(2, "0")}`, { name: `同事${index}` }]));
+    slack = new FakeSlack({ scopes: [...FAKE_SLACK_USER_SCOPES, "search:read"], now: () => clock, users });
+    setup({ probeSpacingMs: 0 });
+    start();
+    await marked();
+    slack.dropConnection();
+    for (const user of ["U0P77", "U0P78", "U0P79"]) slack.dm(user, `${user} 断线时的私信`);
+    await vi.waitFor(() => expect(texts("slack.dm.received")).toHaveLength(3));
+    expect(texts("slack.dm.received")).toEqual(["U0P77 断线时的私信", "U0P78 断线时的私信", "U0P79 断线时的私信"]);
+    await vi.waitFor(() => expect(logs.join("\n")).toContain("probed 82 direct conversation(s) for the gap; 79 had nothing new"));
+    // 每个私信探一次（limit 1），有新消息的三个才整段读。
+    const histories = slack.calls.filter((call) => call.method === "conversations.history");
+    expect(histories.filter((call) => call.args.limit === 1)).toHaveLength(82);
+    expect(histories.filter((call) => call.args.limit !== 1).map((call) => call.args.channel)).toEqual(["D0P77", "D0P78", "D0P79"]);
+    expect(incomplete()).toEqual([]);
+  });
+
+  it("paces the probes of direct conversations after a first burst", async () => {
+    const users = Object.fromEntries(Array.from({ length: 30 }, (_, index) => [`U0P${String(index).padStart(2, "0")}`, { name: `同事${index}` }]));
+    slack = new FakeSlack({ scopes: [...FAKE_SLACK_USER_SCOPES, "search:read"], now: () => clock, users });
+    const probedAt: number[] = [];
+    setup({ probeSpacingMs: 40 }, {
+      ...slack.api,
+      call: (method, args, token) => {
+        if (method === "conversations.history" && args.limit === 1) probedAt.push(Date.now());
+        return slack.api.call(method, args, token);
+      },
+    });
+    start();
+    await marked();
+    slack.dropConnection();
+    slack.dm("U0P29", "最后一个人的私信");
+    await vi.waitFor(() => expect(texts("slack.dm.received")).toEqual(["最后一个人的私信"]), { timeout: 3_000 });
+    // 32 个私信：前 20 个连着探，后 12 个每隔约 40 毫秒探一个。
+    expect(probedAt).toHaveLength(32);
+    const paced = probedAt.slice(20);
+    for (let index = 1; index < paced.length; index++) expect(paced[index]! - paced[index - 1]!).toBeGreaterThanOrEqual(30);
+    expect(probedAt.at(-1)! - probedAt[0]!).toBeGreaterThanOrEqual(12 * 40 - 40);
   });
 });
 

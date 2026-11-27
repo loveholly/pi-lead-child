@@ -23,7 +23,7 @@ beforeEach(() => {
   slack = new FakeSlack();
   logs = [];
   statuses = [];
-  adapter = createSlackChannelAdapter({ api: slack.api, socket: { createClient: slack.createSocketClient, retryBaseMs: 5, retryMaxMs: 40 } });
+  adapter = createSlackChannelAdapter({ api: slack.api, socket: { createClient: slack.createSocketClient, retryBaseMs: 5, retryMaxMs: 40, catchUpSpacingMs: 0 } });
   hub = new ChannelHub({
     db, registry: new ChannelRegistry([adapter]), credentials: { credential: async () => slack.credential }, log: (line) => logs.push(line),
   });
@@ -157,7 +157,7 @@ describe("the Socket Mode transport", () => {
     expect(statuses).toEqual([{ state: "connecting" }, { state: "connected" }]);
     slack.dropConnection();
     await vi.waitFor(() => expect(slack.connections).toBe(2));
-    expect(statuses.slice(2)).toEqual([{ state: "connecting" }, { state: "connected" }]);
+    expect(statuses.slice(2)).toEqual([{ state: "connecting", disconnectReason: expect.any(String) }, { state: "connected" }]);
     await adapter.transport!.stop();
 
     // 连不上两次：报一次错误；再试的时候不报「正在连」，直到连上。
