@@ -247,6 +247,64 @@ describe("limits and the conversation summary (spec D5 item 1)", () => {
     expect(asked[0]!.prompt).not.toContain("第 3 条进展");
   });
 
+  // 工单 #584：11-27 的私信里，每多一条消息，更早的那一段就变了，缓存的摘要用不上；模型要 10 到 17 秒，拼包只等 5 秒，
+  // 13 次有 10 次缺了摘要，回复方只看得到最近的 20 条。
+  it("puts the earlier messages back as they are when the summary is not written in time", async () => {
+    const complete = () => new Promise<string>((_, reject) => setTimeout(() => reject(new Error("too slow")), 200));
+    const channels = hub({ contextPack: { timeoutMs: 50, complete: () => complete } });
+    await deliver(channels, slack.dm("U0ETHAN", `明哥，帮我 review 一下这个 PR：${PR}`));
+    for (let index = 1; index <= 22; index += 1) await deliver(channels, slack.selfReply("D0ETHAN", `第 ${index} 条进展`));
+    await deliver(channels, slack.dm("U0ETHAN", "明哥，这个 pr 记得再帮我看看"));
+
+    const context = contextOf(latestMessageEvent())!;
+    expect(context.missing).toContain("summary");
+    // 前面 23 条都在：最早那条带链接的也在，没有一条算丢了。
+    expect(context.conversation.messages).toHaveLength(23);
+    expect(context.conversation.messages[0].text).toContain(PR);
+    expect(context.conversation.omitted).toBe(0);
+    expect(context.conversation.summary).toBeNull();
+  });
+
+  it("uses the last summary right away when the conversation grew, with the messages it does not cover as they are", async () => {
+    let slow = false;
+    const asked: string[] = [];
+    const complete = async (prompt: string, opts: { purpose: string }) => {
+      if (opts.purpose === "message_context") asked.push(prompt);
+      if (slow) return new Promise<string>((_, reject) => setTimeout(() => reject(new Error("too slow")), 200));
+      return JSON.stringify({ topic: "orders 的 review", facts: [`Ethan 请用户 review ${PR}`] });
+    };
+    const channels = hub({ contextPack: { timeoutMs: 100, complete: () => complete } });
+    await deliver(channels, slack.dm("U0ETHAN", `明哥，帮我 review 一下这个 PR：${PR}`));
+    for (let index = 1; index <= 22; index += 1) await deliver(channels, slack.selfReply("D0ETHAN", `第 ${index} 条进展`));
+    await deliver(channels, slack.dm("U0ETHAN", "明哥，这个 pr 记得再帮我看看"));
+    expect(contextOf(latestMessageEvent())!.conversation.omitted).toBe(3);
+
+    // 模型变慢了。对话又多了两条：更早的那一段变成 5 条，上一次的摘要盖住前 3 条。
+    slow = true;
+    await deliver(channels, slack.selfReply("D0ETHAN", "第 23 条进展"));
+    await deliver(channels, slack.dm("U0ETHAN", "在吗？"));
+    const context = contextOf(latestMessageEvent())!;
+    expect(context.missing).not.toContain("summary");
+    expect(context.conversation.summary).toContain(PR);
+    expect(context.conversation.omitted).toBe(3);
+    expect(context.conversation.messages).toHaveLength(22);
+    expect(context.conversation.messages[0]).toMatchObject({ text: "第 3 条进展" });
+    // 新的摘要照样在后台写（下一次用）。
+    expect(asked.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("shows earlier words and pictures from the other person in the pack, and tells Lead to open the pictures", async () => {
+    const channels = hub();
+    const shot = slack.addFile("error.png", "image/png", new Uint8Array([1]));
+    await deliver(channels, slack.dm("U0ETHAN", "登录报错了"));
+    await deliver(channels, slack.dm("U0ETHAN", "", { files: [shot] }));
+    await deliver(channels, slack.dm("U0ETHAN", "怎么办？"));
+    const event = latestMessageEvent();
+    const texts = contextOf(event)!.conversation.messages.map((message: { text: string }) => message.text);
+    expect(texts).toEqual(["登录报错了", `[图片 error.png，文件编号 slack:${shot.id}]`]);
+    expect(event.payload.summary).toContain(`对方刚发了 1 个附件（文件编号 slack:${shot.id}）`);
+  });
+
   it("hands the message to Lead when packing hits its time limit, naming the parts that are missing", async () => {
     const channels = hub({ contextPack: { timeoutMs: 50, objectStatus: () => new Promise<never>(() => {}) } });
     await deliver(channels, slack.dm("U0ETHAN", `明哥，帮我 review 一下这个 PR：${PR}`));

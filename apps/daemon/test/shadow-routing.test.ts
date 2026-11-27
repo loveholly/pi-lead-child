@@ -1,7 +1,7 @@
 // 哪些后台事件交给 shadow（shadow-routing.ts）：代码里的规则，不靠提示词。
 import { describe, expect, it } from "vitest";
 import type { EventRecord } from "@pi-lead-child/store";
-import { shadowObjectKey, shadowRoute, shadowSourceOf, eventShadowFacts, splitForShadow } from "../src/shadow-routing.js";
+import { holdForRunningShadow, shadowObjectKey, shadowRoute, shadowSourceOf, eventShadowFacts, splitForShadow } from "../src/shadow-routing.js";
 import { shadowBucket } from "@pi-lead-child/protocol";
 import { isReminderFireEvent } from "../src/lead-input.js";
 
@@ -92,5 +92,16 @@ describe("shadowRoute", () => {
     const b = event({ level: "interrupt" });
     const c = event({ kind: "message.received", entityKey: "slack:C1:main" });
     expect(splitForShadow([a, b, c], facts())).toEqual({ shadow: [a, c], lead: [b] });
+  });
+});
+
+// 工单 #584：11-27 同一个私信里，对方先发截图、再发一句话，两条消息分到两批 shadow；65 对相邻消息的后一批在前一批结束前就开始了。
+describe("holdForRunningShadow", () => {
+  it("holds new events on an object that a running batch is handling, and lets other objects through", () => {
+    const words = event({ kind: "message.received", entityKey: "slack:D0ETHAN:main" });
+    const other = event({ kind: "message.received", entityKey: "slack:D0NINA:main" });
+    const ticket = event({ entityKey: "run:9", payload: { itemId: 7 } });
+    expect(holdForRunningShadow([words, other, ticket], new Set(["slack:D0ETHAN:main", "ticket:7"]))).toEqual([other]);
+    expect(holdForRunningShadow([words, other], new Set())).toEqual([words, other]);
   });
 });

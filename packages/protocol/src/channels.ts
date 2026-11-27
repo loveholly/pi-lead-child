@@ -65,6 +65,8 @@ export const CHANNEL_EVENT_KINDS = {
   handbookDraftLabeled: "channel.handbook.draft.labeled",
   // 断线、daemon 重启以后的补拉没补全（2026-11-03）：超过时间窗或条数上限，或者调用失败。告诉 Lead 这段时间的消息可能缺。
   catchUpIncomplete: "channel.catch_up.incomplete",
+  // Lead 或分身用 read_channel_file 看过消息附带的一个文件（工单 #584）。交给 Lead 的消息事件按它判断前文里的附件读没读过。
+  fileRead: "channel.file.read",
 } as const;
 
 /**
@@ -339,6 +341,17 @@ export const CHANNEL_KERNEL_EVENT_KINDS: readonly EventKindDefinition[] = [
       summary: Type.String(),
     }),
     description: "断线或者 daemon 重启以后，补拉这段时间里的消息没有补全（超过上限、调用失败）：这段时间里可能有消息没收到。",
+  },
+  {
+    kind: CHANNEL_EVENT_KINDS.fileRead,
+    sources: ["system"],
+    payload: Type.Object({
+      channel: Type.String({ minLength: 1 }),
+      // 文件编号（来源名:编号），和正文里文件标记写的一样。
+      file: Type.String({ minLength: 3 }),
+      summary: Type.String(),
+    }),
+    description: "Lead 或分身用 read_channel_file 看过消息附带的一个文件。同一个文件只记第一次。",
   },
   {
     kind: CHANNEL_EVENT_KINDS.replyNotNeeded,

@@ -11,7 +11,7 @@ import { tempDir } from "@pi-lead-child/core/testing";
 import { MESSAGE_EVENT_KIND } from "@pi-lead-child/protocol";
 import { getChannelCard, listEvents, openDb, type Db } from "@pi-lead-child/store";
 import { AUTHORITY_REFUSAL_TEXT, ChannelHub, ChannelRegistry, createSlackChannelAdapter, type ChannelHubOptions } from "../src/index.js";
-import { agentTaskResult, cardIdOf, FakeAgentTaskDispatcher, FakeSlack, scriptedSmartModel, type ScriptedSmartModel } from "../testing/index.js";
+import { agentTaskResult, cardIdOf, FakeAgentTaskDispatcher, FakeSlack, scriptedSmartModel, type FakeSlackFile, type ScriptedSmartModel } from "../testing/index.js";
 
 let db: Db;
 let slack: FakeSlack;
@@ -194,6 +194,62 @@ describe("B5: whatever could be answered for you goes to Lead first", () => {
     expect(messages().at(-1)!.payload.summary).toContain("read_channel_file");
     expect(listEvents(db, { kind: "channel.authority.decided" }).at(-1)!.payload.action).not.toBe("refuse");
     expect(slack.sent()).toEqual([]);
+  });
+
+  // 工单 #584：对方先连发两张截图，再发一句话。触发消息是文字，「只有附件」的提示不出；Lead 没看图就回了「是哪个系统？」。
+  // 交给 Lead 的消息事件要写明前文里对方刚发的、还没人看过的附件，列出文件编号。看过的、早于时间窗口的不提。
+  describe("unread attachments sent just before the message", () => {
+    const shots = () => [slack.addFile("a.png", "image/png", new Uint8Array([1])), slack.addFile("b.png", "image/png", new Uint8Array([2]))];
+    const sendShots = async (channels: ChannelHub, files: FakeSlackFile[]) => {
+      for (const file of files) {
+        await receive(channels, slack.dm("U0ETHAN", "", { files: [file] }));
+        clock = new Date(clock.getTime() + 20_000);
+      }
+    };
+    const lastSummary = () => messages().at(-1)!.payload.summary as string;
+
+    it("lists the pictures nobody has opened when the words come after them", async () => {
+      const channels = hub(jev({ ask_kind: "other" }));
+      const files = shots();
+      await sendShots(channels, files);
+      const item = await receive(channels, slack.dm("U0ETHAN", "我的账号登不上了，帮忙看看？"));
+      expect(messages().at(-1)!.payload.forSeq).toBe(item.seq);
+      expect(lastSummary()).toContain(`对方刚发了 2 个附件（文件编号 slack:${files[0]!.id}、slack:${files[1]!.id}）`);
+      expect(lastSummary()).toContain("read_channel_file");
+      expect(lastSummary()).not.toContain("这条消息只有附件");
+    });
+
+    it("leaves out pictures Lead has already opened", async () => {
+      const channels = hub(jev({ ask_kind: "other" }));
+      const files = shots();
+      await sendShots(channels, files);
+      channels.markFileRead(`slack:${files[0]!.id}`);
+      channels.markFileRead(`slack:${files[0]!.id}`);
+      await receive(channels, slack.dm("U0ETHAN", "我的账号登不上了，帮忙看看？"));
+      expect(lastSummary()).toContain(`对方刚发了 1 个附件（文件编号 slack:${files[1]!.id}）`);
+      expect(listEvents(db, { kind: "channel.file.read" })).toHaveLength(1);
+      channels.markFileRead(`slack:${files[1]!.id}`);
+      await receive(channels, slack.dm("U0ETHAN", "有空看下吗？"));
+      expect(lastSummary()).not.toContain("对方刚发了");
+    });
+
+    // 不只是「只有附件」的消息：有字也带文件的消息、这条消息自己带的文件都算，任何文件都一样。
+    it("also lists files sent with words, before or in the message itself", async () => {
+      const channels = hub(jev({ ask_kind: "other" }));
+      const [log, shot] = [slack.addFile("app.log", "text/plain", new Uint8Array([1])), slack.addFile("c.png", "image/png", new Uint8Array([2]))];
+      await receive(channels, slack.dm("U0ETHAN", "日志在这里", { files: [log] }));
+      clock = new Date(clock.getTime() + 20_000);
+      await receive(channels, slack.dm("U0ETHAN", "这是报错，帮忙看看？", { files: [shot] }));
+      expect(lastSummary()).toContain(`对方刚发了 2 个附件（文件编号 slack:${log.id}、slack:${shot.id}）`);
+    });
+
+    it("leaves out pictures older than the window", async () => {
+      const channels = hub(jev({ ask_kind: "other" }));
+      await sendShots(channels, shots());
+      clock = new Date(clock.getTime() + 11 * 60_000);
+      await receive(channels, slack.dm("U0ETHAN", "我的账号登不上了，帮忙看看？"));
+      expect(lastSummary()).not.toContain("对方刚发了");
+    });
   });
 
   it("keeps Lead inside the ceiling: a closing gives no work to dispatch, and only a read-only task without a grant intent", async () => {

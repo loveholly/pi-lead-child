@@ -6,7 +6,7 @@ import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-work
 import { tempDir } from "@pi-lead-child/core/testing";
 import {
   createShadowFinishTool, createShadowToolset, SHADOW_CORE_TOOLS, SHADOW_MORE_TOOL, SHADOW_SKILL_TOOL, createShadowSkillTool, createIsolatedLookupSession, SHADOW_FINISH_TOOL, SHADOW_LEAD_TOOL_NAMES, SHADOW_OPENING, ShadowRecorder,
-  shadowBatchText, shadowOpeningMessages, shadowRefusal, renderShadowSystemPrompt, resolveShadowOutcome, runShadowSession, wrapShadowTools,
+  shadowBatchText, shadowFilesRead, shadowHandoffText, shadowOpeningMessages, shadowRefusal, renderShadowSystemPrompt, resolveShadowOutcome, runShadowSession, wrapShadowTools,
   type ShadowSessionFactory, type LookupSession,
 } from "../src/index.js";
 
@@ -272,5 +272,38 @@ describe("runShadowSession", () => {
       request: { systemPrompt: "SYS", tools: [], model: "x/y" }, text: "batch", finished: () => false,
     });
     expect(result.error).toContain("model not found");
+  });
+});
+
+// 工单 #584：shadow 每批是新会话。shadow-56 看了对方的截图，shadow-57 接着处理对方的那句话时看不到图，只从卡的备注里看到截短的结论。
+describe("handing over to the next batch on the same object", () => {
+  it("lists the earlier batches' conclusions and the files they read, and asks to read the files again", () => {
+    const text = shadowHandoffText([
+      { object: "slack:D0NINA:main", batch: "shadow-56", at: "14:46", lines: ["Nina 发了登录页报错的截图，错误码 403"], files: ["slack:F0SHOT1"] },
+      { object: "ticket:7", batch: "shadow-55", at: "14:40", lines: [], files: [] },
+    ]);
+    expect(text).toContain("slack:D0NINA:main：14:46 shadow-56 结论：Nina 发了登录页报错的截图，错误码 403");
+    expect(text).toContain("它看过的文件：slack:F0SHOT1");
+    expect(text).toContain("先用 read_channel_file 再看一次");
+    expect(text).not.toContain("ticket:7");
+    expect(shadowHandoffText([])).toBe("");
+  });
+
+  it("puts the handover after the events in the batch text", () => {
+    const text = shadowBatchText({ clock: "c", presence: "p", events: "事件", ids: [3], handoff: "交接" });
+    expect(text.indexOf("交接")).toBeGreaterThan(text.indexOf("事件"));
+    expect(text.indexOf("交接")).toBeLessThan(text.indexOf("#3"));
+  });
+
+  it("records the files a batch read, but not refused or dry-run calls", () => {
+    const recorder = new ShadowRecorder();
+    recorder.calls.push(
+      { name: "read_channel_file", args: { file: "slack:F0A" }, dry: false },
+      { name: "read_channel_file", args: { file: "slack:F0A" }, dry: false },
+      { name: "read_channel_file", args: { file: "slack:F0B" }, dry: false, refused: "no" },
+      { name: "read_channel_file", args: { file: "slack:F0C" }, dry: true },
+      { name: "read_channel_conversation", args: { conversation: "x" }, dry: false },
+    );
+    expect(shadowFilesRead(recorder)).toEqual(["slack:F0A"]);
   });
 });

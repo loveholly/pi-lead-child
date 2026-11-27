@@ -111,11 +111,42 @@ export const SHADOW_OPENING = {
   assistant: "好。我按 shadow 的规则处理每一批：能做完的做完并记下处置，该交给主会话的交上去，最后用 finish_shadow 交结论。",
 } as const;
 
-/** 一批事件交给 shadow 的那条消息。ids 是这一批要给结论的编号（事件块里写的 # 编号）。 */
-export function shadowBatchText(input: { clock: string; presence: string; events: string; ids: readonly number[] }): string {
+/**
+ * 前面几批 shadow 刚处理过同一个对象（工单 #584）：每批是新会话，上一批看过的文件和它的判断这一批看不到。
+ * 11-27：shadow-56 看了对方的第 1 张截图，shadow-57 接着处理对方的那句话时，只从卡的备注里看到 200 字的结论，没看到图。
+ * at 是那一批结束的时间（本地时间的字），lines 是它给的结论，files 是它用 read_channel_file 看过的文件编号。
+ */
+export interface ShadowHandoff { object: string; batch: string; at: string; lines: string[]; files: string[] }
+
+/** 交接的一段（放在这一批的事件后面）。没有时是空字符串。 */
+export function shadowHandoffText(handoffs: readonly ShadowHandoff[]): string {
+  const rows = handoffs.filter((handoff) => handoff.lines.length || handoff.files.length).map((handoff) => {
+    const lines = handoff.lines.length ? `结论：${handoff.lines.join("；")}` : "没有留下结论";
+    const files = handoff.files.length
+      ? `；它看过的文件：${handoff.files.join("、")}（你这个会话看不到它们的内容，回复要用到时先用 read_channel_file 再看一次）`
+      : "";
+    return `- ${handoff.object}：${handoff.at} ${handoff.batch} ${lines}${files}`;
+  });
+  if (!rows.length) return "";
+  return `<system_event kind="system" source="daemon">\n这一批里的对象，前面几批 shadow 刚处理过。每批是新会话，下面是它们交接给你的：\n${rows.join("\n")}\n</system_event>`;
+}
+
+/** 这一批用 read_channel_file 看过的文件编号（经 more_tools 调的也记在 recorder 里，名字是里面的工具）。被拒的不算。 */
+export function shadowFilesRead(recorder: Pick<ShadowRecorder, "calls">): string[] {
+  const files: string[] = [];
+  for (const call of recorder.calls) {
+    if (call.name !== "read_channel_file" || call.refused || call.dry) continue;
+    const file = (call.args && typeof call.args === "object" ? call.args : {}) as { file?: unknown };
+    if (typeof file.file === "string" && file.file && !files.includes(file.file)) files.push(file.file);
+  }
+  return files;
+}
+
+/** 一批事件交给 shadow 的那条消息。ids 是这一批要给结论的编号（事件块里写的 # 编号）。handoff 是 shadowHandoffText 的一段。 */
+export function shadowBatchText(input: { clock: string; presence: string; events: string; ids: readonly number[]; handoff?: string }): string {
   const ids = input.ids.map((id) => `#${id}`).join("、");
   return [
-    input.clock, input.presence, input.events,
+    input.clock, input.presence, input.events, input.handoff ?? "",
     `<system_event kind="system" source="daemon">\n这一批要你给结论的编号：${ids}。每个编号都要出现在 finish_shadow 的 done 或 escalate 里。\n</system_event>`,
   ].filter(Boolean).join("\n\n");
 }

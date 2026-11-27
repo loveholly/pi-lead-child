@@ -50,7 +50,8 @@ import { resolveCompactModel } from "@pi-lead-child/protocol";
 import { userMessagePlacement } from "./user-placement.js";
 import { createLeadInput, defaultDigestBatch, isReminderFireEvent, leadEventRoute, type ShadowBatch, type DigestBatchPolicy } from "./lead-input.js";
 import {
-  createShadowSessionFactory, createShadowToolset, ShadowRecorder, shadowBatchText, LEAD_SKILLS_DIR,
+  createShadowSessionFactory, createShadowToolset, ShadowRecorder, shadowBatchText, shadowFilesRead, shadowHandoffText, LEAD_SKILLS_DIR,
+  type ShadowHandoff,
   resolveShadowOutcome, runShadowSession, type ShadowSessionFactory, type LeadShadowParts,
 } from "@pi-lead-child/lead";
 import { LEAD_SHADOW_HANDLED_KIND, LEAD_SHADOW_RUN_KIND, type LeadShadowDto } from "@pi-lead-child/protocol";
@@ -175,7 +176,10 @@ import {
   ExposureListener, isWildcardHost, listenWithFallback, resolveGatewayListen, wildcardExposure,
 } from "./gateway-listen.js";
 import { createControlPlaneService, isLeadActivityEvent } from "@pi-lead-child/gateway";
-import { shadowRoute, eventShadowFacts, eventHandoffLane, eventMustBeTold, pendingUserActionOfEvent, splitForShadow } from "./shadow-routing.js";
+import {
+  shadowRoute, eventShadowFacts, eventHandoffLane, eventMustBeTold, holdForRunningShadow, pendingUserActionOfEvent, shadowObjectKey,
+  splitForShadow,
+} from "./shadow-routing.js";
 import { createUserActionService } from "@pi-lead-child/gateway";
 import {
   activeLeadGrant, activePairedUserTurn, grantLeadCapability, revokeLeadCapability,
@@ -3426,6 +3430,8 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
         if (!channelHub) throw new Error("没有接任何外部通道");
         return channelHub.readFile(fileId, maxBytes);
       },
+      // read_channel_file 看过的文件记进事件日志（工单 #584）：交给 Lead 的消息事件按它提示前文里还没看过的附件。
+      markFileRead: (fileId) => channelHub?.markFileRead(fileId),
       // 文件是哪条消息带来的（工单 #231：挂到工单上的附件记来源）。只读账本。
       fileOrigin: (fileId) => channelHub?.fileOrigin(fileId) ?? null,
       // 来源里的文档（2026-11-20：Slack 的 canvas、Markdown 文件）：建、读、改。
@@ -6048,7 +6054,9 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     if (!shadowParts || sched.draining || modelHold.held || !network.online) return;
     const settings = shadowSettings();
     if (settings.mode !== "on" || leadInput.shadowRuns() >= SHADOW_MAX_RUNS) return;
-    const candidates = leadInput.pendingForShadow();
+    // 同一个对象已经有一批在跑：它的新事件等那一批结束（工单 #584），结束时 runShadowBatch 会再派一次。
+    const running = new Set(leadInput.shadowEvents().map(shadowObjectKey));
+    const candidates = holdForRunningShadow(leadInput.pendingForShadow(), running);
     if (!candidates.length) return;
     const people = candidates.filter((event) => event.kind === MESSAGE_EVENT_KIND);
     const others = candidates.filter((event) => event.kind !== MESSAGE_EVENT_KIND);
@@ -6085,6 +6093,50 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     void runShadowBatch(batch, settings, "trial").finally(() => { shadowTrialRuns -= 1; });
   }
 
+  // 前面几批 shadow 刚处理过这一批里的对象（工单 #584）：它们的结论（lead.shadow_handled）和看过的文件（lead.shadow_run 的
+  // filesRead），每个对象最多最近的 3 批。只看 SHADOW_HANDOFF_MS 以内的。
+  const SHADOW_HANDOFF_MS = 30 * 60_000;
+  function shadowHandoffs(events: readonly EventRecord[]): ShadowHandoff[] {
+    const objects = new Set(events.map(shadowObjectKey));
+    if (!objects.size) return [];
+    const since = new Date(Date.now() - SHADOW_HANDOFF_MS).toISOString();
+    const rows = db.prepare(
+      `SELECT seq, occurred_at, payload FROM events WHERE kind = ? AND occurred_at >= ? AND json_valid(payload)
+         AND json_extract(payload, '$.mode') = 'on' ORDER BY seq DESC LIMIT 50`,
+    ).all(LEAD_SHADOW_RUN_KIND, since) as Array<{ seq: number; occurred_at: string; payload: string }>;
+    const lines = db.prepare(
+      `SELECT payload FROM events WHERE kind = ? AND seq < ? AND seq > ? AND json_valid(payload) AND json_extract(payload, '$.batch') = ?`,
+    );
+    const keyOfSeq = db.prepare("SELECT entity_key, payload FROM events WHERE seq = ?");
+    const handoffs: ShadowHandoff[] = [];
+    const perObject = new Map<string, number>();
+    for (const row of rows) {
+      let payload: Record<string, unknown>;
+      try { payload = JSON.parse(row.payload) as Record<string, unknown>; } catch { continue; }
+      const touched = Array.isArray(payload.objects) ? payload.objects.filter((key): key is string => typeof key === "string") : [];
+      const batchId = typeof payload.batch === "string" ? payload.batch : "";
+      const files = Array.isArray(payload.filesRead) ? payload.filesRead.filter((file): file is string => typeof file === "string") : [];
+      for (const object of touched.filter((key) => objects.has(key))) {
+        if ((perObject.get(object) ?? 0) >= 3) continue;
+        perObject.set(object, (perObject.get(object) ?? 0) + 1);
+        // 这一批的结论记在它的 lead.shadow_run 前面（同一个事务），按结论里第一个事件的对象分。
+        const said = (lines.all(LEAD_SHADOW_HANDLED_KIND, row.seq, row.seq - 200, batchId) as Array<{ payload: string }>).flatMap((entry) => {
+          try {
+            const handled = JSON.parse(entry.payload) as { seqs?: unknown; line?: unknown };
+            const first = Array.isArray(handled.seqs) && typeof handled.seqs[0] === "number" ? handled.seqs[0] : null;
+            const event = first === null ? undefined : keyOfSeq.get(first) as { entity_key: string; payload: string } | undefined;
+            const key = event ? shadowObjectKey({ entityKey: event.entity_key, payload: JSON.parse(event.payload) as Record<string, unknown> }) : null;
+            return key === object && typeof handled.line === "string" ? [handled.line] : [];
+          } catch {
+            return [];
+          }
+        });
+        handoffs.push({ object, batch: batchId, at: localIso(new Date(row.occurred_at)), lines: said, files });
+      }
+    }
+    return handoffs.reverse();
+  }
+
   // 一批：建会话、跑、按结论收尾。on：做完的算处理完，交回的带着说明留给 Lead；trial：只记下来。
   async function runShadowBatch(batch: ShadowBatch & { id: string }, settings: LeadShadowDto, mode: "on" | "trial"): Promise<void> {
     const parts = shadowParts!;
@@ -6112,6 +6164,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
           clock: leadSystemEvent("clock", `当前时间：${localIso(new Date())}，时区 ${tz}`),
           presence: leadSystemEvent("presence", userPresenceText()),
           events: batch.text, ids,
+          handoff: mode === "on" ? shadowHandoffText(shadowHandoffs(batch.events)) : "",
         }),
         finished: () => recorder.report !== null,
         onToolStart: (name) => {
@@ -6149,6 +6202,8 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
           source: "lead", kind: LEAD_SHADOW_RUN_KIND, entityKey: "lead:shadow", level: "record",
           payload: {
             batch: batch.id, mode, model: result?.model ?? model, modelNote: result?.modelNote ?? null, error: result?.error ?? null,
+            // 交接给同一个对象的下一批（工单 #584）：这一批的对象和它看过的文件。
+            objects: [...new Set(batch.events.map(shadowObjectKey))], filesRead: shadowFilesRead(recorder),
             durationMs: result?.durationMs ?? null, usage: result?.usage ?? null,
             seqs: batch.events.map((event) => event.seq), ids,
             done: outcome.done, escalated: outcome.escalated,
