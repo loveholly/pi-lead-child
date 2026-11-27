@@ -127,6 +127,19 @@ export function agentMcpServer(): { command: string; args: string[] } {
   };
 }
 
+// 通道派的代查在 Claude Code 里用的工具通道：只有代查的三个工具，经 daemon 里的 task-bridge 转给它们。
+// 和 agentMcpServer 是两个服务器：这个不碰账本，也没有工单的工具。
+export function agentTaskMcpServer(): { command: string; args: string[] } {
+  const built = join(distDir(), "task-mcp-server.mjs");
+  if (!process.env.PLC_DEV && existsSync(built)) {
+    return { command: process.execPath, args: [built] };
+  }
+  return {
+    command: join(projectRoot(), "node_modules", ".bin", "tsx"),
+    args: [packageSource("engine", "agent-tools", "task-mcp-server.ts")],
+  };
+}
+
 export interface CheckpointPolicyConfig {
   dedupeWindowMs: number;
   progressMinIntervalMs: number;

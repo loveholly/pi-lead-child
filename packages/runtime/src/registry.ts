@@ -85,6 +85,52 @@ export function runtimeDisabledReason(runtime: RuntimeId): string {
   return `用户在设置里停用了 ${findRuntimeAdapter(runtime)?.displayName ?? runtime}（设置 → 执行器）。`;
 }
 
+// 通道派的代查（lead 的 agent-task/）能跑在哪些 runtime 上，按优先顺序（工单 #464，2026-11-25；工单 #501，2026-11-26 按评审改回 pi 优先）：
+//   - pi：daemon 进程内的受限会话，模型按 Lead 的便宜模型选。这是缺省，和以前一样；
+//   - claude：Claude Code 命令行的只读形态（claude.ts 的 buildAgentTaskArgs）：没有自带工具，只连代查的三个工具。
+//     只有用户停用了 pi 才用它：缺省换成 Claude Code 会把代查的模型额度换到用户自己的账号，那是产品决定，这里不做。
+// codex 跑不了：它的 exec 一定带 shell 工具，隔离不了（agent-task/runtime.ts 开头）。
+export const AGENT_TASK_RUNTIMES: readonly RuntimeId[] = [piAdapter.id, claudeAdapter.id];
+// 认识 RuntimeStartRequest.agentTask（只读形态、工具通道）的 runtime。别的 runtime 拿不来跑代查：它们会给子 agent 全部自带工具。
+export const AGENT_TASK_TOOL_CHANNEL_RUNTIME: RuntimeId = claudeAdapter.id;
+// 代查落到 Claude Code（pi 被停用）时缺省用的模型和推理强度。调用方没有指定时用它。
+export const AGENT_TASK_CLAUDE_DEFAULTS = Object.freeze({ model: "sonnet", effort: "medium" });
+
+export interface AgentTaskRuntimeChoice {
+  runtime: RuntimeId;
+  // null：由这个 runtime 自己选（进程内的 pi 会话按 Lead 的模型配置选）。
+  model: string | null;
+  effort: string | null;
+}
+
+// 代查没有 runtime 可用：都被用户停用了。派发要明确失败，不能落到停用的那一个。
+export class AgentTaskRuntimeUnavailableError extends Error {
+  constructor(readonly reasons: readonly string[]) {
+    super(`没有可用的 runtime 能跑代查：${reasons.join(" ")}`);
+    this.name = "AgentTaskRuntimeUnavailableError";
+  }
+}
+
+// 选代查的 runtime：按 AGENT_TASK_RUNTIMES 的顺序取第一个没被用户停用的。都停用了就抛错，写明每一个为什么不能用。
+// 调用方没有指定模型和推理强度时，落到 Claude Code 的用 AGENT_TASK_CLAUDE_DEFAULTS；pi 自己选模型。
+// 这里只管用户的停用（设置 → 执行器）；账号故障由 Run 失败时的健康账本处理。
+export function pickAgentTaskRuntime(
+  input: { model?: string; effort?: string } = {},
+  env: RuntimeEnv = process.env,
+): AgentTaskRuntimeChoice {
+  const reasons: string[] = [];
+  for (const runtime of AGENT_TASK_RUNTIMES) {
+    if (isRuntimeDisabled(runtime, env)) {
+      reasons.push(runtimeDisabledReason(runtime));
+      continue;
+    }
+    return runtime === claudeAdapter.id
+      ? { runtime, model: input.model ?? AGENT_TASK_CLAUDE_DEFAULTS.model, effort: input.effort ?? AGENT_TASK_CLAUDE_DEFAULTS.effort }
+      : { runtime, model: null, effort: null };
+  }
+  throw new AgentTaskRuntimeUnavailableError(reasons);
+}
+
 // 选核查员的候选顺序（2026-10-20）：PLC_REVIEW_RUNTIME（设置了的话）→ 能做可执行只读核查的 → 其余，各自按 registry 的顺序
 // （内置是 codex、claude、pi）。executableReadOnlyReview 只影响排序，不再是硬闸：以前只有 codex 能当核查员，用户停用
 // codex 以后核查一直挂着，Lead 和用户都换不了（2026-10-20 用户反馈）。Claude Code 当核查员时只开只读工具，pi 当核查员时

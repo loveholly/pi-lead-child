@@ -646,7 +646,7 @@ export interface DaemonOpts {
   // 测试 daemon 只用 project_repositories，测试也可以直接给。
   lookups?: { candidates?: () => readonly ChannelLookupCandidate[] };
   // 派单器（通道派给子 agent 的工单，agent-tasks.ts）。测试注入假模型的会话、超时和上限。
-  agentTasks?: Pick<AgentTaskDispatcherOptions, "sessionFactory" | "timeoutMs" | "maxDurationMs" | "limits">;
+  agentTasks?: Pick<AgentTaskDispatcherOptions, "sessionFactory" | "env" | "runtimes" | "model" | "effort" | "timeoutMs" | "maxDurationMs" | "limits">;
   // 打开交付里的文件（工单 07）。缺省：engine 的 daemonFileOpener（macOS 上执行 /usr/bin/open；PLC_OPEN_FILES=off 时一律拒绝，
   // 根 vitest 配置设置了它）。要测打开文件的测试注入假的。
   fileOpener?: FileOpener;
@@ -3149,7 +3149,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
   };
   // 派单器（landing.md C1）：通道派给子 agent 的工单。结果交给发起方登记的回调（通道），不叫醒 Lead。
   const agentTasks = createAgentTaskDispatcher({
-    db, dbPath: opts.dbPath, dataDir: opts.dataDir, connections, log,
+    db, dbPath: opts.dbPath, dataDir: opts.dataDir, connections, log, runtimes: runtimeRegistry,
     resolveLocalRepo: (name) => resolveGrantLocalRepo(name),
     ownerName: () => plcConfig.channels?.ownerName?.trim() || null,
     onEvent: (itemId, runId, event) => onChildEvent(itemId, runId, event),

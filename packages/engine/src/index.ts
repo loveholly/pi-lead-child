@@ -1,6 +1,7 @@
 // @pi-lead-child/engine 的公开 API。其他包只能从这里引用本包。
 export * from "./agent-tools/connection-host.js";
 export * from "./agent-tools/definitions.js";
+export * from "./agent-tools/task-bridge.js";
 export * from "./children/manager.js";
 export * from "./coordinator/checkpoints.js";
 export * from "./coordinator/continuation-runner.js";

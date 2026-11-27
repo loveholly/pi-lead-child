@@ -15,12 +15,12 @@ export interface AgentToolBridge {
 }
 
 // 调用方（子 agent）可能等不及先断开：这时不写，写进关掉的 socket 会出 EPIPE。
-function send(socket: Socket, message: unknown): void {
+export function send(socket: Socket, message: unknown): void {
   if (socket.destroyed || !socket.writable) return;
   socket.write(`${JSON.stringify(message)}\n`);
 }
 
-function authorized(received: unknown, expected: string): boolean {
+export function authorized(received: unknown, expected: string): boolean {
   if (typeof received !== "string") return false;
   const left = Buffer.from(received);
   const right = Buffer.from(expected);
@@ -28,11 +28,11 @@ function authorized(received: unknown, expected: string): boolean {
 }
 
 // Unix socket 路径的长度上限：macOS 是 104 字节（含结尾的 NUL），Linux 是 108 字节。取较小的一个。
-const MAX_SOCKET_PATH_BYTES = 103;
+export const MAX_SOCKET_PATH_BYTES = 103;
 
 // socket 放在数据目录里，不放在工单的工作目录里。工作目录可以很长，socket 路径会因此超限，
 // listen 报 EINVAL（run 66）。数据目录由 daemon 决定，路径短而且固定。
-function socketDirOf(dataDir: string): string {
+export function socketDirOf(dataDir: string): string {
   return join(dataDir, "run");
 }
 

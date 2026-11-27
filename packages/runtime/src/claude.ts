@@ -639,6 +639,7 @@ export class ClaudeRuntime implements AgentRuntime {
   // --mcp-config、--allowedTools、--tools 是可变参数的选项，会收取后面所有不以 - 开头的参数。
   // 所以它们后面总是跟另一个选项，提示词跟在只取一个值的选项后面。
   private buildArgs(request: RuntimeStartRequest, mcpConfigPath: string | null): string[] {
+    if (request.agentTask) return this.buildAgentTaskArgs(request, mcpConfigPath);
     // 沙箱（lead-tools-and-routing spec D2）：能写这次运行的工作目录和临时目录，不能读凭证，网络全开，密钥打码。
     // --settings 只取一个值，和用户自己的设置合并。设置里只有路径、域名和密钥的名字，没有值，可以放在命令行上。
     const sandbox = claudeSandboxSettings(sandboxPolicy({
@@ -678,6 +679,39 @@ export class ClaudeRuntime implements AgentRuntime {
     if (request.resumeSessionId) args.push("--resume", request.resumeSessionId);
     // --fork-session：resume 时开一个新的 session id，原 session 不变（Claude Code 2.1.258 的 --help）。
     if (request.resumeSessionId && request.forkSession) args.push("--fork-session");
+    args.push(request.prompt);
+    return args;
+  }
+
+  // 通道派的代查（RuntimeStartRequest.agentTask）：只读形态，和进程内的受限会话一样只有三个工具（lead 的 agent-task/）。
+  // 用 Claude Code 2.1.331 的 --help 核实：
+  //   --restricted        去掉能跑命令的内置工具，不读用户、项目、本地的设置文件（所以用户的 hooks 不会跑）；托管设置照常生效。
+  //                       不用 --safe-mode：它会丢掉 --mcp-config 里的工具通道。
+  //   --strict-mcp-config 只连 --mcp-config 里的服务器，不连用户自己配的。
+  //   --tools ""          一个内置工具都不给（Read、Grep 也没有）。
+  // 没有 Bash，所以没有沙箱的 --settings，也不加载 PLC 内置的 skill。权限用 dontAsk：清单外的工具直接拒绝，没人回答许可请求。
+  // 会话不落盘：代查不续接。--allowedTools 和 --tools 是可变参数的选项，后面总是跟另一个选项。
+  private buildAgentTaskArgs(request: RuntimeStartRequest, mcpConfigPath: string | null): string[] {
+    if (!request.agentTask) throw new Error("agent task arguments need request.agentTask");
+    if (!mcpConfigPath) throw new Error("an agent task needs its tool channel (request.mcpServer)");
+    const args = [
+      ...this.prefixArgs,
+      "-p",
+      "--output-format", "stream-json",
+      "--verbose",
+      "--restricted",
+      "--strict-mcp-config",
+      "--mcp-config", mcpConfigPath,
+      "--allowedTools", `mcp__${TOOL_CHANNEL_SERVER}__*`,
+      "--tools", "",
+      "--disable-slash-commands",
+      "--no-session-persistence",
+      "--system-prompt", request.agentTask.systemPrompt,
+      "--permission-mode", "dontAsk",
+    ];
+    if (request.model) args.push("--model", request.model);
+    const effort = cliEffortValue(request.effort);
+    if (effort) args.push("--effort", effort);
     args.push(request.prompt);
     return args;
   }

@@ -32,6 +32,9 @@ export interface RuntimeStartRequest {
   forkSession?: boolean;
   env: Record<string, string>;
   mcpServer?: { command: string; args: string[]; env?: Record<string, string> };
+  // 通道派的代查（lead 的 agent-task/）：只读形态。CLI 没有自带工具，只连 mcpServer 这一个通道，不加载用户的设置和 hooks，
+  // 系统提示词换成 systemPrompt。目前只有 Claude Code 实现它；不认识这个字段的 adapter 不能拿来跑代查。
+  agentTask?: { systemPrompt: string };
   // 启动垫片放文件的目录（工单 14）。没有给出时，垫片用系统临时目录，进程结束后删除。
   launchDir?: string;
 }

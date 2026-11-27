@@ -8,7 +8,7 @@ import { tempDir } from "@pi-lead-child/core/testing";
 import { DAEMON_EXTERNALS } from "../../../apps/daemon/scripts/externals.js";
 import { AGENT_BINARY, AGENT_LAUNCHER, AGENT_SIGN_ID, AGENT_STAGING } from "../lib/agent-bundle.js";
 import { packRuntime, PLC_WRAPPER, REQUIRED_BUILD_FILES, RUNTIME_ASSET_FILES } from "../lib/pack.js";
-import { hashComponents, hashFiles, type ReleaseManifest, type UpdateManifest } from "../lib/release.js";
+import { HASHED_FILES, hashComponents, hashFiles, type ReleaseManifest, type UpdateManifest } from "../lib/release.js";
 import type { FetchLike } from "../lib/node-dist.js";
 import { CPU, thinMachO } from "./fixtures.js";
 
@@ -237,6 +237,24 @@ describe("packRuntime", () => {
     let fetched = false;
     await expect(pack(repo, join(tempDir("plc-desktop-out-"), "out"), async () => { fetched = true; return new Response(""); }))
       .rejects.toThrow(/缺少构建产物：apps\/daemon\/dist\/assets\/extensions\/ticket-tools\.js/);
+    expect(fetched).toBe(false);
+  });
+
+  // 工单 #464 评审：代查在 Claude Code 里用的 task-mcp-server.mjs 和 mcp-server.mjs 一样，要进打包检查和部署闸门的哈希。
+  // 没有它，构建漏了入口时打包不报错，每条落到 Claude Code 的代查都会因为没交结果而失败。
+  it("lists task-mcp-server.mjs as a required build file and a hashed release file, next to mcp-server.mjs", () => {
+    expect(REQUIRED_BUILD_FILES).toContain("apps/daemon/dist/task-mcp-server.mjs");
+    expect(HASHED_FILES).toContain("apps/daemon/dist/task-mcp-server.mjs");
+    // 构建脚本真的产出它：入口名和清单里的文件名一致。
+    expect(readFileSync(join(import.meta.dirname, "../../../apps/daemon/scripts/build.ts"), "utf8")).toMatch(/"task-mcp-server":\s*packageSource\(/);
+  });
+
+  it("fails before downloading anything when task-mcp-server.mjs is missing from the build", async () => {
+    const repo = fakeRepo();
+    execFileSync("rm", [join(repo, "apps/daemon/dist/task-mcp-server.mjs")]);
+    let fetched = false;
+    await expect(pack(repo, join(tempDir("plc-desktop-out-"), "out"), async () => { fetched = true; return new Response(""); }))
+      .rejects.toThrow(/缺少构建产物：apps\/daemon\/dist\/task-mcp-server\.mjs/);
     expect(fetched).toBe(false);
   });
 });

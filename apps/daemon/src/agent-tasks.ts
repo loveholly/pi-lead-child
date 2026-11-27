@@ -1,6 +1,7 @@
 // 派单器（landing.md 第 3 节 C1，给 B 的接口）：实现 protocol 的 AgentTaskDispatcher。
 //   - dispatch：算权限清单（上限 ∩ Lead 选的范围，protocol 的 computeRunGrant），在同一笔事务里建工单、建 Run、建清单、
-//     写活动；再交给 runItem，runtime 是进程内的子 agent（lead 的 agent-task/：只读形态，工具都经连接中心）。立刻返回。
+//     写活动；再交给 runItem。runtime 先按用户的停用名单选（runtime 包的 pickAgentTaskRuntime）：缺省仍是进程内的 pi 会话，
+//     pi 被停用时才用 Claude Code（sonnet，medium），都停用了就在建工单以前明确失败（工单 #464，#501）。两种都是只读形态，工具都经连接中心（lead 的 agent-task/）。立刻返回。
 //   - 结束：工单按结局进 done 或 cancelled（store 的 transition，不直接改 stage）；结果交给发起方登记的回调（callback.kind），
 //     不叫醒 Lead（purpose=lookup 的 Run 不经过 onChildDone，run-finished.ts 也排除了它）。
 //   - cancel：停掉 Run（记成 stopped），工单进 cancelled，回调 cancelled。超时：停掉 Run（记成 failed），回调 failed。
@@ -13,15 +14,18 @@ import type { Item } from "@pi-lead-child/core";
 import type { ConnectionHub } from "@pi-lead-child/connections";
 import { runItem, liveChildren } from "@pi-lead-child/engine";
 import {
-  agentTaskConnections, agentTaskPrompt, AGENT_TASK_RUNTIME_PROFILE, createAgentTaskRuntime, createLookupSessionFactory,
-  type AgentTaskToolLimits, type LookupSessionFactory,
+  agentTaskConnections, agentTaskPrompt, createAgentTaskRuntime, createClaudeAgentTaskRuntime, createLookupSessionFactory,
+  type AgentTaskRuntime, type AgentTaskToolLimits, type LookupSessionFactory,
 } from "@pi-lead-child/lead";
 import {
   AGENT_TASK_STARTED, AgentTaskRequestSchema, computeRunGrant, DEFAULT_INTENT_GRANT_BOUNDS, describeRunGrant, redactSecretText,
   type AgentTaskAction, type AgentTaskDispatch, type AgentTaskDispatcher, type AgentTaskOutcome, type AgentTaskRequest,
   type GrantLocalRepo, type RunGrant,
 } from "@pi-lead-child/protocol";
-import { runtimeProfileHash, typedFailure } from "@pi-lead-child/runtime";
+import {
+  createDefaultRuntimeRegistry, LOCAL_RUNTIME_ID, pickAgentTaskRuntime, runtimeProfileHash, runtimeProfileOf, typedFailure,
+  type RuntimeEnv, type RuntimeRegistry,
+} from "@pi-lead-child/runtime";
 import {
   addActivity, createItem, createRun, getItem, getRun, getRunGrant, insertRunGrant, listRunWrites, replyStyleText, transition, transitionRunState,
   type Db,
@@ -58,7 +62,17 @@ export interface AgentTaskDispatcherOptions {
   resolveLocalRepo: (name: string) => GrantLocalRepo | null;
   // 用户的名字（子 agent 的提示词用）。
   ownerName: () => string | null;
+  // 进程内 pi 会话的工厂：缺省的代查走它（测试注入假模型）。用户停用了 pi，代查改走 Claude Code，就不用它。
   sessionFactory?: LookupSessionFactory;
+  // 代查用哪个 runtime 看用户的停用名单（PLC_DISABLED_RUNTIMES）。缺省读 daemon 的环境；测试注入自己的表。
+  env?: RuntimeEnv;
+  // 装着 Claude Code 的 registry（pi 被停用时才用到）。缺省是默认配置的 registry（用到时才建）。
+  runtimes?: Pick<RuntimeRegistry, "get">;
+  // 代查落到 Claude Code（pi 被停用）而没有指定时，用 runtime 包的缺省（sonnet，medium）。pi 自己选模型。
+  model?: string;
+  effort?: string;
+  // 测试接缝：Claude Code 的工具桥（缺省是真的 unix socket 桥）。
+  startBridge?: Parameters<typeof createClaudeAgentTaskRuntime>[0]["startBridge"];
   timeoutMs?: number;
   limits?: Partial<AgentTaskToolLimits>;
   maxDurationMs?: number;
@@ -164,6 +178,7 @@ export function createAgentTaskDispatcher(options: AgentTaskDispatcherOptions): 
   const handlers = new Map<string, (outcome: AgentTaskOutcome) => void>();
   const undelivered: AgentTaskOutcome[] = [];
   let closed = false;
+  let fallbackRuntimes: RuntimeRegistry | null = null;
 
   const deliver = (outcome: AgentTaskOutcome): void => {
     const handler = handlers.get(outcome.callback.kind);
@@ -204,7 +219,7 @@ export function createAgentTaskDispatcher(options: AgentTaskDispatcherOptions): 
     if (child && child.runId === entry.runId) await child.handle?.interrupt(message).catch(() => {});
   };
 
-  const finalize = (entry: RunningTask, runtime: ReturnType<typeof createAgentTaskRuntime>, failure: unknown): void => {
+  const finalize = (entry: RunningTask, runtime: AgentTaskRuntime, failure: unknown): void => {
     if (entry.timer) clearTimeout(entry.timer);
     running.delete(entry.runId);
     let outcome: AgentTaskOutcome;
@@ -256,6 +271,24 @@ export function createAgentTaskDispatcher(options: AgentTaskDispatcherOptions): 
       const first = [...Value.Errors(AgentTaskRequestSchema, request)][0];
       throw new Error(`agent task request is invalid: ${first ? `${(first as { instancePath?: string }).instancePath || "/"} ${first.message}` : "?"}`);
     }
+    // 先选 runtime，再写库：用户停用的跳过；都停用了就在这里明确失败，不建工单，也不悄悄落到停用的那个（工单 #464）。
+    // 代查的缺省仍是进程内的 pi 会话；它被停用时才用 Claude Code（sonnet，medium）（工单 #501：不改缺省）。
+    const choice = pickAgentTaskRuntime({
+      ...(options.model ? { model: options.model } : {}), ...(options.effort ? { effort: options.effort } : {}),
+    }, options.env);
+    // 代查的提示词里有对方的话；风格和名字每次派活时现读（设置 → 消息通道，2026-10-28）。
+    const common = { intent: request.intent, ownerName: options.ownerName() ?? "用户", replyStyle: replyStyleText(db) };
+    const limits = {
+      ...(options.limits ? { limits: options.limits } : {}),
+      ...(options.maxDurationMs !== undefined ? { maxDurationMs: options.maxDurationMs } : {}),
+    };
+    const runtime: AgentTaskRuntime = choice.runtime === LOCAL_RUNTIME_ID
+      ? createAgentTaskRuntime({ ...common, connections, sessionFactory, ...limits, now })
+      : createClaudeAgentTaskRuntime({
+        ...common, connections, ...limits, dataDir: options.dataDir, model: choice.model, effort: choice.effort,
+        ...(options.startBridge ? { startBridge: options.startBridge } : {}),
+        inner: (options.runtimes ?? (fallbackRuntimes ??= createDefaultRuntimeRegistry())).get(choice.runtime),
+      });
     const bound = request.bound ?? DEFAULT_INTENT_GRANT_BOUNDS[request.intent];
     const { grant, dropped } = computeRunGrant({ intent: request.intent, scope: request.scope, bound, resolveLocalRepo: options.resolveLocalRepo, locale: "zh" });
     const labels = describeRunGrant(grant);
@@ -268,8 +301,9 @@ export function createAgentTaskDispatcher(options: AgentTaskDispatcherOptions): 
     const { itemId, runId } = db.transaction(() => {
       const itemId = createItem(db, { title: agentTaskTitle(request), brief, createdBy: "system", purpose: "lookup", priority: "normal" });
       const runId = createRun(db, {
-        itemId, role: "executor", purpose: "lookup", runtime: AGENT_TASK_RUNTIME_PROFILE.runtime,
-        runtimeProfileHash: runtimeProfileHash(AGENT_TASK_RUNTIME_PROFILE),
+        itemId, role: "executor", purpose: "lookup", runtime: choice.runtime,
+        ...(choice.model ? { model: choice.model } : {}), ...(choice.effort ? { effort: choice.effort } : {}),
+        runtimeProfileHash: runtimeProfileHash(runtimeProfileOf(runtime)),
       });
       insertRunGrant(db, { itemId, runId, grant, bound, scope: request.scope, dropped, actor: "lead", reason: oneLine(request.request.summary, 300), now: now() });
       // 开跑是系统的动作，和 runItem 给执行 Run 的 ready → active 一样，发生在 Run 建好的同一笔事务里。
@@ -285,13 +319,6 @@ export function createAgentTaskDispatcher(options: AgentTaskDispatcherOptions): 
       });
       return { itemId, runId };
     }).immediate();
-    // 代回复风格（设置 → 消息通道，2026-10-28）：子 agent 的回复草稿按它写。每次派活时现读。
-    const runtime = createAgentTaskRuntime({
-      intent: request.intent, ownerName: options.ownerName() ?? "用户", replyStyle: replyStyleText(db), connections, sessionFactory,
-      ...(options.limits ? { limits: options.limits } : {}),
-      ...(options.maxDurationMs !== undefined ? { maxDurationMs: options.maxDurationMs } : {}),
-      now,
-    });
     const entry: RunningTask = { runId, itemId, callback: request.callback, stop: null, timer: null, done: Promise.resolve() };
     running.set(runId, entry);
     entry.timer = setTimeout(() => { void stopRun(entry, "timeout"); }, timeoutMs);
@@ -302,6 +329,8 @@ export function createAgentTaskDispatcher(options: AgentTaskDispatcherOptions): 
       sessionDir: join(options.dataDir, "sessions", `item-${itemId}`),
       prompt: agentTaskPrompt(request),
       runtime,
+      ...(choice.model ? { model: choice.model } : {}),
+      ...(choice.effort ? { effort: choice.effort } : {}),
       role: "executor",
       purpose: "lookup",
       runId,
@@ -312,7 +341,7 @@ export function createAgentTaskDispatcher(options: AgentTaskDispatcherOptions): 
       () => finalize(entry, runtime, null),
       (error: unknown) => finalize(entry, runtime, error ?? new Error("agent task run failed")),
     );
-    log(`[agent-task] ${request.intent} started on item #${itemId} run #${runId}`);
+    log(`[agent-task] ${request.intent} started on item #${itemId} run #${runId} (${choice.runtime}${choice.model ? `/${choice.model}` : ""})`);
     return { itemId, runId, grant, dropped };
   };
 

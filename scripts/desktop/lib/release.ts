@@ -21,6 +21,7 @@ export const HASHED_FILES = [
   "apps/daemon/dist/coordinatord.mjs",
   "apps/daemon/dist/ops.mjs",
   "apps/daemon/dist/mcp-server.mjs",
+  "apps/daemon/dist/task-mcp-server.mjs",
   "apps/daemon/dist/hindsight.mjs",
   "apps/daemon/dist/idle-compact.mjs",
   "apps/daemon/dist/launcher-shim.mjs",

@@ -13,6 +13,8 @@ import { ConnectionHub, Vault } from "@pi-lead-child/connections";
 import { FAKE_GH_TOKEN, FakeGithub } from "@pi-lead-child/connections/testing";
 import { createIsolatedLookupSession, type LookupSession, type LookupSessionFactory } from "@pi-lead-child/lead";
 import type { AgentTaskOutcome, AgentTaskRequest } from "@pi-lead-child/protocol";
+import { AsyncEventQueue, RuntimeEventSequencer, type AgentRuntime, type RuntimeEvent, type RuntimeStartRequest } from "@pi-lead-child/runtime";
+import type { TaskBridgeTool } from "@pi-lead-child/engine";
 import {
   getItem, getRun, getRunGrant, listActivities, listInbox, listRunToolCalls, openDb, updateRun, type Db,
 } from "@pi-lead-child/store";
@@ -178,5 +180,106 @@ describe("the agent task dispatcher", () => {
     expect(getRun(f.db, dispatched.runId)?.state).toBe("failed");
     expect(recoverAgentTasksAfterRestart(f.db)).toEqual([]);
     void dispatcher.cancel(dispatched.runId).catch(() => {});
+  });
+});
+
+// 代查选 runtime（工单 #464，#501 按评审改回 pi 优先）。缺省仍是进程内的 pi；pi 被停用才落到 Claude Code。Claude Code 是假的 runtime：它经工具桥（内存里的）调 submit_result，和真的 MCP 通道转发的一样。
+// 真实的 task-mcp-server 和 unix socket 桥在 engine 的 task-bridge.test.ts 里测。
+describe("the agent task dispatcher picks its runtime", () => {
+  const SUBMITTED = {
+    found: "yes", answer: "答案", sources: [], checked: ["a"], caveats: [], replyDraft: "draft",
+  };
+
+  function fakeClaude() {
+    const started: RuntimeStartRequest[] = [];
+    let tools = new Map<string, TaskBridgeTool>();
+    const runtime: AgentRuntime = {
+      id: "claude",
+      capabilities: { streaming: true, steering: false, resume: false, interrupt: true, approvals: false, mcp: true, executableReadOnlyReview: true },
+      async start(request) {
+        started.push(request);
+        const queue = new AsyncEventQueue<RuntimeEvent>();
+        const events = new RuntimeEventSequencer(request.runId);
+        queue.push(events.event({ type: "run.started", runtime: "claude", model: request.model ?? null }));
+        const done = (async () => {
+          await tools.get("submit_result")!.call(SUBMITTED, new AbortController().signal);
+          queue.push(events.event({ type: "run.completed", exitCode: 0 }));
+          queue.end();
+        })();
+        return {
+          pid: null, events: queue, interrupt: async () => {},
+          wait: async () => { await done; return { ok: true, exitCode: 0, signal: null, externalSessionId: null, errorCode: null, errorMessage: null }; },
+        };
+      },
+    };
+    const startBridge = async (args: { tools: readonly TaskBridgeTool[] }) => {
+      tools = new Map(args.tools.map((tool) => [tool.name, tool]));
+      return { socketPath: "/fake.sock", token: "fake", close: async () => {} };
+    };
+    return { runtime, started, startBridge };
+  }
+
+  // 没有被调用的会话工厂：用到它就是落到了进程内的 pi。
+  function unusedPiFactory() {
+    const calls: number[] = [];
+    const factory: LookupSessionFactory = async () => { calls.push(1); throw new Error("the in-process pi session must not be used"); };
+    return { factory, calls };
+  }
+
+  async function dispatchOnce(env: Record<string, string>, extra: { model?: string; effort?: string } = {}) {
+    const f = await fixture();
+    const claude = fakeClaude();
+    const pi = unusedPiFactory();
+    const outcomes: AgentTaskOutcome[] = [];
+    const dispatcher = createAgentTaskDispatcher({
+      db: f.db, dbPath: f.dbPath, dataDir: f.dir, connections: f.hub, resolveLocalRepo: () => null, ownerName: () => "Leo",
+      env, sessionFactory: pi.factory, runtimes: { get: () => claude.runtime }, startBridge: claude.startBridge as never, ...extra,
+    });
+    cleanups.push(() => dispatcher.close());
+    dispatcher.onFinished("channel", (outcome) => outcomes.push(outcome));
+    return { f, claude, pi, dispatcher, outcomes };
+  }
+
+  it("keeps running on pi by default and does not touch Claude Code", async () => {
+    const { f, claude, pi, dispatcher } = await dispatchOnce({});
+    const dispatched = await dispatcher.dispatch(REQUEST);
+    await dispatcher.idle();
+    expect(getRun(f.db, dispatched.runId)).toMatchObject({ runtime: "pi", purpose: "lookup" });
+    // 假的会话工厂一被调用就抛错：说明派到了进程内的 pi，没有走 Claude Code。
+    expect(pi.calls).toEqual([1]);
+    expect(claude.started).toEqual([]);
+  });
+
+  it("never dispatches to pi while pi is disabled: runs on Claude Code with sonnet and medium effort", async () => {
+    const { f, claude, pi, dispatcher, outcomes } = await dispatchOnce({ PLC_DISABLED_RUNTIMES: "pi" });
+    const dispatched = await dispatcher.dispatch(REQUEST);
+    await dispatcher.idle();
+    expect(getRun(f.db, dispatched.runId)).toMatchObject({ runtime: "claude", model: "sonnet", effort: "medium", purpose: "lookup" });
+    expect(claude.started).toHaveLength(1);
+    expect(claude.started[0]).toMatchObject({ model: "sonnet", effort: "medium" });
+    expect(claude.started[0]!.agentTask?.systemPrompt).toBeTruthy();
+    expect(pi.calls).toEqual([]);
+    expect(getItem(f.db, dispatched.itemId)?.stage).toBe("done");
+    expect(outcomes).toMatchObject([{ status: "finished", runId: dispatched.runId, result: { found: "yes" } }]);
+  });
+
+  it("keeps a model that was asked for when it falls to Claude Code", async () => {
+    const { f, claude, pi, dispatcher } = await dispatchOnce({ PLC_DISABLED_RUNTIMES: "pi" }, { model: "opus", effort: "high" });
+    const dispatched = await dispatcher.dispatch(REQUEST);
+    await dispatcher.idle();
+    expect(getRun(f.db, dispatched.runId)).toMatchObject({ runtime: "claude", model: "opus", effort: "high" });
+    expect(claude.started).toHaveLength(1);
+    expect(pi.calls).toEqual([]);
+  });
+
+  it("fails the dispatch with a clear error and creates nothing when every runtime is disabled", async () => {
+    const { f, claude, pi, dispatcher } = await dispatchOnce({ PLC_DISABLED_RUNTIMES: "claude,pi" });
+    const count = (table: string) => (f.db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get() as { n: number }).n;
+    const before = { items: count("items"), runs: count("runs") };
+    await expect(dispatcher.dispatch(REQUEST)).rejects.toThrow(/没有可用的 runtime 能跑代查.*Pi agent.*Claude Code/s);
+    expect({ items: count("items"), runs: count("runs") }).toEqual(before);
+    expect(claude.started).toEqual([]);
+    expect(pi.calls).toEqual([]);
+    expect(dispatcher.running()).toEqual([]);
   });
 });
