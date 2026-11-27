@@ -188,6 +188,8 @@ describe("the launch files", () => {
   it("are removed after the run when no launch directory was given", async () => {
     const child = await launch("process.exit(0)", { baseDir: undefined });
     await collect(child);
+    // close 来的时候垫片已经退出，目录已经删除（#592）：垫片退出前还在删除控制 socket，那时删除目录会留下一部分。
+    expect(alive(child.launcher.pid)).toBe(false);
     expect(existsSync(child.launcher.dir)).toBe(false);
   });
 });

@@ -36,6 +36,9 @@ const HANDSHAKE_TIMEOUT_MS = 15_000;
 const READ_CHUNK_BYTES = 256 * 1024;
 const MIN_POLL_MS = 5;
 const MAX_POLL_MS = 100;
+// 删除启动目录之前，最多等垫片退出这么久。垫片写完退出记录以后还要关闭控制 socket（这一步删除 control.sock），
+// 然后才退出，通常只要几毫秒。垫片卡住时，到时间照样删除目录。
+const SHIM_EXIT_WAIT_MS = 5_000;
 // macOS 的 unix socket 路径上限是 104 字节（含结尾的 0）。留一点余量。
 const MAX_SOCKET_PATH_BYTES = 100;
 
@@ -340,7 +343,7 @@ export async function launchProcess(spec: LaunchSpec): Promise<LaunchedProcess> 
   }
   const removeOnExit = [...(spec.removeOnExit ?? []), ...(control.extraDir ? [control.extraDir] : [])];
   const discard = () => {
-    if (ownsBase) rmSync(dir, { recursive: true, force: true });
+    if (ownsBase) removeLaunchDir(dir);
     if (control.extraDir) rmSync(control.extraDir, { recursive: true, force: true });
   };
   shim.stdin!.on("error", () => { /* 垫片提前退出时，握手会报告 */ });
@@ -614,6 +617,7 @@ export class LaunchedProcess extends EventEmitter implements RuntimeProcess {
   // 还没有结束的那一行 stdout 的第一帧的起点。
   private openLineStart: number | null = null;
   private shimExited = false;
+  private readonly shimExitWaiters: Array<() => void> = [];
   private finished = false;
   private detached = false;
   private pollDelay = MIN_POLL_MS;
@@ -637,10 +641,12 @@ export class LaunchedProcess extends EventEmitter implements RuntimeProcess {
     this.pid = options.spawnError ? undefined : options.identity.childPid ?? undefined;
     const shimGone = () => {
       this.shimExited = true;
+      for (const waiter of this.shimExitWaiters.splice(0)) waiter();
       this.wake?.();
     };
     options.shim?.once("exit", shimGone);
-    this.shimExited = options.shimExited === true;
+    this.shimExited = options.shimExited === true
+      || (options.shim !== null && (options.shim.exitCode !== null || options.shim.signalCode !== null));
     this.control = options.spawnError ? null
       : options.control !== undefined ? options.control : new LauncherControl(options.identity);
     if (!options.shim) this.control?.onClose(shimGone);
@@ -669,8 +675,7 @@ export class LaunchedProcess extends EventEmitter implements RuntimeProcess {
       this.stderr.push(null);
       this.stdout.resume();
       this.stderr.resume();
-      this.emit("close", record.errno, null);
-      this.cleanup();
+      this.closeAfterCleanup(record.errno, null);
     });
   }
 
@@ -814,8 +819,7 @@ export class LaunchedProcess extends EventEmitter implements RuntimeProcess {
       const closed = () => {
         open -= 1;
         if (open > 0) return;
-        this.emit("close", record.exitCode, record.signal);
-        this.cleanup();
+        this.closeAfterCleanup(record.exitCode, record.signal);
       };
       for (const stream of [this.stdout, this.stderr]) {
         stream.once("end", closed);
@@ -826,7 +830,46 @@ export class LaunchedProcess extends EventEmitter implements RuntimeProcess {
     });
   }
 
-  private cleanup(): void {
-    if (this.removeDirOnClose) rmSync(this.launcher.dir, { recursive: true, force: true });
+  // 启动目录由 daemon 新建时（removeDirOnClose），先等垫片退出，再删除目录，最后发 close。
+  // 所以等 close 的一方（测试、adapter）看到 close 时，目录已经不在了。
+  // 起因（#592）：以前 close 之后立刻删除目录，那时垫片可能刚写完退出记录，还在关闭控制 socket（删除 ctl.sock）：
+  // launcher-shim.mjs 的 finish 先 writeExitRecord，再 release → closeControl。
+  // Linux 上 Node 24 的 rmSync 用 libstdc++ 的 remove_all：遍历时一个条目被别人删掉（ENOENT），remove_all 就停下，
+  // 剩下的条目和目录本身都没删，Node 却把 ENOENT 当成成功，不报错。目录就这样留下了。
+  private closeAfterCleanup(code: number | null, signal: NodeJS.Signals | null): void {
+    if (!this.removeDirOnClose) {
+      this.emit("close", code, signal);
+      return;
+    }
+    void this.waitForShimExit().then(() => {
+      removeLaunchDir(this.launcher.dir);
+      this.emit("close", code, signal);
+    });
+  }
+
+  private waitForShimExit(): Promise<void> {
+    if (this.shimExited) return Promise.resolve();
+    return new Promise((resolve) => {
+      const done = () => {
+        clearTimeout(timer);
+        resolve();
+      };
+      const timer = setTimeout(done, SHIM_EXIT_WAIT_MS);
+      this.shimExitWaiters.push(done);
+    });
+  }
+}
+
+// 删除启动目录，删完核对一遍：rmSync 在条目同时被删时会只删一部分却不报错（见 closeAfterCleanup）。
+// 删除失败不抛出：这里在事件回调里，抛出会成为未捕获的异常。留下的目录由测试的临时目录检查报告。
+function removeLaunchDir(dir: string): void {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      rmSync(dir, { recursive: true, force: true });
+    } catch (error) {
+      if (attempt === 2) process.emitWarning(`could not remove the launch directory ${dir}: ${String(error)}`);
+      continue;
+    }
+    if (!existsSync(dir)) return;
   }
 }

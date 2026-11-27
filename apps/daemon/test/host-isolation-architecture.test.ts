@@ -73,7 +73,7 @@ const EXCEPTIONS: Record<string, Partial<Record<Kind, { count: number; reason: s
     "sync-child-process": { count: 1, reason: "plc doctor / ops 自检里查执行器的版本：用户手动跑的诊断，不在 Lead 的路径上" },
   },
   "packages/runtime/src/launcher.ts": {
-    "recursive-fs": { count: 3, reason: "垫片的启动目录：几个小文件（控制文件、脚本），Run 结束时删" },
+    "recursive-fs": { count: 2, reason: "垫片自己新建的启动目录（removeLaunchDir，只有调用方没给 launchDir 时才有：测试和 CLI；daemon 的 children/manager.ts 总给 launchDir，不走这里）和 /tmp 下的控制 socket 目录（一个 socket）。都只有几个小文件，在垫片退出后才删。不用 core 的 removeTree：它拒绝 /tmp/plc-* 这种只有两层的路径" },
   },
   "packages/runtime/src/claude.ts": {
     "recursive-fs": { count: 1, reason: "Claude 执行器的临时设置目录：一个文件" },
