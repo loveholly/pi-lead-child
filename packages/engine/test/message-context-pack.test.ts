@@ -55,9 +55,28 @@ describe("the limit on a conversation's recent messages", () => {
     expect(packed).toEqual({ messages, omitted: 0, summary: null });
   });
 
-  it("still marks the earliest messages as left out when the summary could not be written", async () => {
-    const packed = await packConversation(range(22), async () => null);
-    expect(packed).toMatchObject({ omitted: 2, summary: null });
-    expect(packed.messages).toHaveLength(20);
+  // 工单 #584：摘要没写成时（模型要 10 到 17 秒，拼包只等 5 秒），以前只放最近的 20 条，更早的全丢了。
+  it("puts the latest of the earlier messages back as they are when the summary could not be written", async () => {
+    const short = await packConversation(range(22), async () => null);
+    expect(short).toEqual({ messages: range(22), omitted: 0, summary: null });
+    const long = range(50);
+    const packed = await packConversation(long, async () => null);
+    // 再放一份上限（20 条或 4000 字），更早的 10 条才算没放进来。
+    expect(packed).toEqual({ messages: long.slice(10), omitted: 10, summary: null });
+  });
+
+  it("uses a summary of the first earlier messages and puts the rest back as they are", async () => {
+    const messages = range(25);
+    const packed = await packConversation(messages, async () => ({ text: "前 3 条的摘要", covered: 3 }));
+    expect(packed).toEqual({ messages: messages.slice(3), omitted: 3, summary: "前 3 条的摘要" });
+  });
+
+  it("keeps the thread root in front when earlier messages come back", async () => {
+    const roots = [message(0, "根消息", { root: true })];
+    const rest = range(30);
+    const packed = await packConversation([...roots, ...rest], async () => null);
+    expect(packed.messages[0]).toEqual(roots[0]);
+    expect(packed.messages.slice(1)).toEqual(rest);
+    expect(packed.omitted).toBe(0);
   });
 });

@@ -546,6 +546,8 @@ export interface ChannelAdapter {
   history?(request: ChannelHistoryRequest, context: ChannelAdapterContext): Promise<ChannelHistoryMessage[]>;
   /**
    * 只读：取消息附带的一个文件（例如截图）。ref 是正文里文件标记的文件编号去掉「来源名:」。超过 maxBytes 时抛错。
+   * 文件标记在正文里一个文件一行，以「文件编号 <来源名>:<编号>]」结尾，例如「[图片 a.png，文件编号 slack:F0123]」：
+   * hub 按它提示 Lead 前文里还没看过的文件（工单 #584），所以有 readFile 的来源都按这个格式写。
    * 编号不对、找不到时抛 ChannelFileNotFoundError；别的原因（缺权限、下载失败）抛错，错误的话是给人看的原因。不支持时没有。
    */
   readFile?(ref: string, options: { maxBytes: number }, context: ChannelAdapterContext): Promise<ChannelFile>;

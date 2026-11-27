@@ -563,6 +563,11 @@ export class LeadInput {
     return this.renderTaken(events.slice(0, 30), new Map(), { steered: false, notes: false, mark: false });
   }
 
+  /** shadow 正在处理的事件（几批合在一起）。 */
+  shadowEvents(): EventRecord[] {
+    return [...this.shadows.values()].flatMap((inFlight) => [...inFlight.values()]);
+  }
+
   /** shadow 在跑几批。 */
   shadowRuns(): number {
     return this.shadows.size;

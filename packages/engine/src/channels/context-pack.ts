@@ -3,7 +3,8 @@
 // 一共五项：
 //   1. 这个对话最近的消息：事件日志里这个对话的消息（别人的、用户本人的、替用户发的，按消息编号应用改和删），加上道的起点
 //      （thread 的根消息和它之前的几条，开道时补的）。最多 20 条或 4000 字（fitConversation），更早的交给记忆沉淀的整理器
-//      写成对话摘要（memory.ts 的 summarizeChannelMessages）。摘要按对话缓存在 kv 里，更早的那一段没变时不再问模型。
+//      写成对话摘要（memory.ts 的 summarizeChannelMessages）。摘要按对话缓存在 kv 里，更早的那一段没变时不再问模型；
+//      对话后来又多了几条时，照用上一次的摘要，没盖到的几条原样放（工单 #584）。摘要没写成时，更早的消息里最近的再原样放一份上限。
 //   2. 同一件事在别的对话里的消息，三个条件：同一个人（7 天内）；用户最近 30 分钟说的，而且提到同一个对象或者这条消息的发信人
 //      （只是时间近不算，工单 #286）；提到同一个对象（7 天内）。
 //      满足的条件多的、新的在前。时间按来源给的消息时间（occurred_at），和这条消息的时间比：两边是同一个时钟。
@@ -146,14 +147,30 @@ export function fitConversation<T extends { text: string; root?: boolean }>(
   return { kept: [...roots, ...rest.slice(start)], older: rest.slice(0, start) };
 }
 
-/** 第 1 项：放得下的原样放，更早的换成对话摘要（summarize 写；写不成时是 null，omitted 照样写明换掉了几条）。 */
+/** 对话摘要盖到了更早的消息里的前几条（covered）。 */
+export interface ConversationSummary {
+  text: string;
+  covered: number;
+}
+
+/**
+ * 第 1 项：放得下的原样放，更早的换成对话摘要。摘要只盖到更早的消息里的前 covered 条时（上一次写的摘要，对话后来又多了几条），
+ * 没盖到的原样放回来。摘要没写成时（工单 #584：模型要 10 到 17 秒，拼包只等 5 秒），更早的消息里最近的再原样放一份上限，
+ * 回复方不只看得到最近一段；还放不下的才算换掉了（omitted）。
+ */
 export async function packConversation<T extends { text: string; root?: boolean }>(
-  messages: readonly T[], summarize: (older: T[]) => Promise<string | null>,
+  messages: readonly T[], summarize: (older: T[]) => Promise<ConversationSummary | string | null>,
   limits: { messages: number; chars: number } = MESSAGE_CONTEXT_LIMITS,
 ): Promise<{ messages: T[]; omitted: number; summary: string | null }> {
   const { kept, older } = fitConversation(messages, limits);
   if (!older.length) return { messages: kept, omitted: 0, summary: null };
-  return { messages: kept, omitted: older.length, summary: await summarize(older) };
+  const written = await summarize(older);
+  const summary = typeof written === "string" ? { text: written, covered: older.length } : written;
+  const covered = summary ? Math.min(Math.max(Math.trunc(summary.covered), 0), older.length) : 0;
+  const back = fitConversation(older.slice(covered), limits).kept;
+  const roots = kept.filter((message) => message.root);
+  const recent = kept.filter((message) => !message.root);
+  return { messages: [...roots, ...back, ...recent], omitted: older.length - back.length, summary: summary?.text ?? null };
 }
 
 // ── 拼上下文包 ────────────────────────────────────────────────────────────────────────
@@ -241,12 +258,20 @@ async function packWithin(deps: ContextPackDeps, input: ContextPackInput, clock:
         return [] as const;
       })
     : Promise.resolve([] as const);
-  const conversation = await packConversation(all, async (older) => {
+  const conversation = await packConversation(all, async (older): Promise<ConversationSummary | null> => {
+    // 上一次写的摘要盖到了更早的消息的前几条（对话后来多了几条，工单 #584）：照用它，没盖到的原样放回来，
+    // 新的摘要在后台写，下一次用。不用等模型，摘要不会因为拼包的时间上限缺席。
+    const stale = safely("summary", null, () => cachedSummary(deps, input, older));
+    if (stale && stale.covered === older.length) return stale;
     const written = conversationSummary(deps, input, older);
     deps.later(() => written, `conversation summary for ${input.conversation.key}`);
+    if (stale) return stale;
     const summary = await within(written).catch(() => null);
-    if (summary === LATE || summary === null) missing.add("summary");
-    return summary === LATE ? null : summary;
+    if (summary === LATE || summary === null) {
+      missing.add("summary");
+      return null;
+    }
+    return { text: summary, covered: older.length };
   });
   if ((await statusesDone) === LATE) missing.add("objects");
   const recalled = await recallDone;
@@ -488,9 +513,29 @@ function threadMessages(
 }
 
 // 对话摘要：记忆沉淀的整理器写，按对话缓存（更早的那一段没变时不再问模型）。没有模型、到了每天的上限、写不成时是 null。
+// 摘要盖到的最后一条消息怎样认：时间和开头的话。
+const summaryMark = (message: MessageContextMessage | undefined) => `${message?.at ?? ""}:${message?.text.slice(0, 80) ?? ""}`;
+const summaryFingerprint = (older: readonly MessageContextMessage[]) => `${older.length}:${summaryMark(older.at(-1))}`;
+
+/**
+ * 缓存里能用的对话摘要（工单 #584）。缓存按更早的那一段整段认：对话每多一条，就有一条消息从最近的 20 条里挤进更早的一段，
+ * 整段就变了，以前每次都要重新问模型，拼包等不到（11-27 的私信里 13 次有 10 次缺了摘要）。这里也认前缀：缓存的摘要盖的
+ * 正好是更早的一段的前 covered 条（条数一样，最后一条的时间和话一样），而且没盖到的几条放得下一份上限。都不是时是 null。
+ */
+function cachedSummary(deps: ContextPackDeps, input: ContextPackInput, older: readonly MessageContextMessage[]): ConversationSummary | null {
+  const cached = readKv(deps.db, `${SUMMARY_PREFIX}${input.conversation.key}`) as { fingerprint?: unknown; text?: unknown; covered?: unknown } | null;
+  if (!cached || typeof cached.text !== "string") return null;
+  if (cached.fingerprint === summaryFingerprint(older)) return { text: cached.text, covered: older.length };
+  const covered = typeof cached.covered === "number" ? cached.covered : null;
+  if (covered === null || covered < 1 || covered >= older.length) return null;
+  if (cached.fingerprint !== summaryFingerprint(older.slice(0, covered))) return null;
+  const gap = older.slice(covered);
+  if (fitConversation(gap).older.length) return null;
+  return { text: cached.text, covered };
+}
+
 async function conversationSummary(deps: ContextPackDeps, input: ContextPackInput, older: readonly MessageContextMessage[]): Promise<string | null> {
-  const last = older.at(-1);
-  const fingerprint = `${older.length}:${last?.at ?? ""}:${last?.text.slice(0, 80) ?? ""}`;
+  const fingerprint = summaryFingerprint(older);
   const cacheKey = `${SUMMARY_PREFIX}${input.conversation.key}`;
   const cached = readKv(deps.db, cacheKey) as { fingerprint?: unknown; text?: unknown } | null;
   if (cached?.fingerprint === fingerprint && typeof cached.text === "string") return cached.text;
@@ -513,7 +558,7 @@ async function conversationSummary(deps: ContextPackDeps, input: ContextPackInpu
       return null;
     }
     const text = clip(facts.facts.length ? `${facts.topic}：${facts.facts.join("；")}` : `${facts.topic}（没有要记的事实）`, SUMMARY_MAX);
-    writeKv(deps.db, cacheKey, { fingerprint, text, at: deps.now().toISOString() });
+    writeKv(deps.db, cacheKey, { fingerprint, covered: older.length, text, at: deps.now().toISOString() });
     return text;
   } catch (error) {
     deps.log(`[channels] conversation summary for ${input.conversation.key} failed: ${timing.cause() === "timeout" ? "timed out" : errorText(error)}`);

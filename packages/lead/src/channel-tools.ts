@@ -68,6 +68,8 @@ export interface LeadChannelCards {
   }>;
   // 取消息附带的一个文件（2026-11-02：别人发来的截图）：从来源里现取，内容不可信。fileId 是正文里文件标记的文件编号。
   readFile?(fileId: string, maxBytes: number): Promise<{ id: string; name: string; mimeType: string; size: number; data: Uint8Array }>;
+  // 记下 read_channel_file 看过了这个文件（工单 #584）：交给 Lead 的消息事件按它提示前文里还没看过的附件。
+  markFileRead?(fileId: string): void;
   // 来源里的文档（2026-11-20：canvas、Markdown 文件）：建、读、改。document 是「来源名:编号」。没有接文档的来源时没有。
   createDocument?(input: {
     source?: string | null; kind: string; title: string; markdown: string; conversation?: string | null;
@@ -324,6 +326,7 @@ export function createChannelCardTools(cards: LeadChannelCards | undefined, db?:
       execute: async (_id, params: { file: string }) => {
         try {
           const file = await readFile.call(cards, params.file, FILE_MAX_BYTES);
+          cards.markFileRead?.call(cards, params.file);
           const type = file.mimeType.split(";")[0]!.trim().toLowerCase();
           const facts = { file: file.id, name: file.name, mimeType: type, size: file.size };
           if (IMAGE_TYPES.has(type)) {

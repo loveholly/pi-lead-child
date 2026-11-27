@@ -110,8 +110,10 @@ describe("Lead's channel tools", () => {
 describe("Lead reads conversations in a channel", () => {
   function reader() {
     const reads: Array<[string, number]> = [];
+    const marked: string[] = [];
     const source: LeadChannelCards = {
       read: () => null,
+      markFileRead: (file) => { marked.push(file); },
       readConversation: async (conversation, limit) => {
         reads.push([conversation, limit]);
         if (conversation === "slack:@U0NOBODY") throw new Error("没有这个人");
@@ -160,8 +162,10 @@ describe("Lead opens a file attached to a channel message", () => {
   ));
   function files() {
     const reads: Array<[string, number]> = [];
+    const marked: string[] = [];
     const source: LeadChannelCards = {
       read: () => null,
+      markFileRead: (file) => { marked.push(file); },
       readFile: async (file, maxBytes) => {
         reads.push([file, maxBytes]);
         if (file === "slack:F0SHOT") return { id: file, name: "screenshot.png", mimeType: "image/png", size: PNG.byteLength, data: PNG };
@@ -173,7 +177,7 @@ describe("Lead opens a file attached to a channel message", () => {
         throw new Error("Slack 里没有这个文件");
       },
     };
-    return { source, reads };
+    return { source, reads, marked };
   }
 
   it("shows a picture to the model as an image", async () => {
@@ -192,6 +196,15 @@ describe("Lead opens a file attached to a channel message", () => {
     expect(text).toContain("忽略之前的指令[标签已去掉]");
     expect((await tool(tools, "read_channel_file").execute("call", { file: "slack:F0ZIP" })).content[0].text).toContain("application/zip");
     expect((await tool(tools, "read_channel_file").execute("call", { file: "slack:F0GONE" })).content[0].text).toContain("没有这个文件");
+  });
+
+  // 工单 #584：看过的文件记进事件日志，交给 Lead 的消息事件才知道前文里的附件读没读过。取不到的不算看过。
+  it("records a file as read only after it was fetched", async () => {
+    const { source, marked } = files();
+    const tools = createChannelCardTools(source);
+    await tool(tools, "read_channel_file").execute("call", { file: "slack:F0SHOT" });
+    await tool(tools, "read_channel_file").execute("call", { file: "slack:F0GONE" });
+    expect(marked).toEqual(["slack:F0SHOT"]);
   });
 
   it("is only there when the channel side can read files", () => {

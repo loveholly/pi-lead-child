@@ -20,6 +20,8 @@ let dir: string;
 let dbPath: string;
 let db: Db;
 let daemon: Awaited<ReturnType<typeof startDaemon>> | null = null;
+// 测试可以让 shadow 会话晚一点建起来（一批还在跑的时候又来了事）。
+let shadowGate: (() => Promise<void>) | null = null;
 
 beforeEach(() => {
   dir = tempDir("plc-lead-shadow-");
@@ -32,6 +34,7 @@ beforeEach(() => {
 afterEach(async () => {
   await daemon?.close();
   daemon = null;
+  shadowGate = null;
   db.close();
   vi.unstubAllEnvs();
 });
@@ -48,6 +51,7 @@ function fauxShadow(plan: ShadowPlan): { factory: ShadowSessionFactory; batches:
   return {
     batches, texts,
     factory: async (request) => {
+      await shadowGate?.();
       const faux = fauxProvider({ provider: "plc-shadow-test", api: "plc-shadow-test-api" });
       let steps: ReturnType<typeof fauxAssistantMessage>[] | null = null;
       faux.setResponses(Array.from({ length: 8 }, () => (context: { messages: Array<{ role: string; content: unknown }> }) => {
@@ -224,6 +228,43 @@ describe("the background shadow", () => {
     const second = blocker("发布流水线红了");
     await vi.waitFor(() => expect(inboxState(second)).toBe("consumed"), { timeout: 3_000 });
     expect(shadow.batches).toEqual([[first, second]]);
+  });
+
+  // 工单 #584：同一个对象连着来的事，以前一到就各开一批、同时跑，后一批看不到前一批的结论。现在等前一批结束再交，
+  // 而且后一批的开头有前一批的交接（结论、看过的文件）。
+  it("holds a new event on an object until its running batch ends, then hands over that batch's conclusion", async () => {
+    const { shadow, setShadow } = await boot((ids) => [
+      fauxAssistantMessage([
+        fauxToolCall("record_disposition", { event_ids: ids, disposition: "no_action", reason: "r" }),
+        fauxToolCall("finish_shadow", { done: [{ ids, line: `第 ${shadow.batches.length} 批：发布流水线的告警看过了` }], escalate: [] }),
+      ], { stopReason: "toolUse" }),
+      fauxAssistantMessage("完"),
+    ]);
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const started: number[] = [];
+    let calls = 0;
+    shadowGate = async () => {
+      calls += 1;
+      started.push(calls);
+      if (calls === 1) await gate;
+    };
+    await setShadow({ mode: "on", shares: { ticket: 100 } });
+    const itemId = createItem(db, { title: "发布流水线", brief: "b", createdBy: "system" });
+    const raise = (summary: string) => addInbox(db, { itemId, severity: "blocker", source: "structural", summary, lossless: true }).id!;
+    const first = raise("发布流水线红了");
+    await vi.waitFor(() => expect(started).toEqual([1]), { timeout: 2_000 });
+    const second = raise("发布流水线又红了");
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    // 前一批还在跑：第二件等着，不另开一批。
+    expect(started).toEqual([1]);
+    release();
+    await vi.waitFor(() => expect(inboxState(second)).toBe("consumed"), { timeout: 3_000 });
+    expect(shadow.batches).toEqual([[first], [second]]);
+    expect(shadow.texts[1]).toContain("前面几批 shadow 刚处理过");
+    expect(shadow.texts[1]).toContain(`ticket:${itemId}`);
+    expect(shadow.texts[1]).toContain("第 1 批：发布流水线的告警看过了");
+    expect(shadowEvents(LEAD_SHADOW_RUN_KIND)[0]).toMatchObject({ objects: [`ticket:${itemId}`], filesRead: [] });
   });
 
   it("in trial mode runs the shadow on the same batch without acting, while the main session handles it", async () => {

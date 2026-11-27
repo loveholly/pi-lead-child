@@ -26,6 +26,8 @@ description: 处理外部通道（例如 Slack）的消息之前读：交给你�
 - 要确认 Slack 里的上下文（这件事聊到哪了、对方前面说了什么、某个频道或 thread 里的讨论）时，用 read_channel_conversation 读这个对话最近的消息；不知道是哪个对话时，用 list_channel_conversations 看最近有动静的对话，或者用 find_channel_conversations 按名字找。不要说「没有 Slack 连接，没法看」。
 - 要改用户或者你以前在来源里发的消息（例如写错了、要补一句）时，先用 read_channel_conversation 找到那条消息的 ref，再用 perform_action（target_type=channel_conversation，action=edit_message）改它。别人的消息改不了。来源不让改时，另发一条更正。
 - 消息正文里有文件标记（例如「[图片 screenshot.png，文件编号 slack:F0123]」）时，对方发了图片或文件。要知道里面是什么时，用 read_channel_file 看它（file 填标记里的文件编号）。不要说看不到图片。
+- 对方常常先连发几张图或文件，再发一句话（例如先发两张截图，再说「我的账号登不上了」）。回复以前，先看前文里对方刚发的、还没读过的附件，图片和文件都算：事件里写着「对方刚发了 N 个附件（文件编号 …）」时，先用 read_channel_file 一个一个看过，再回。
+- 上下文包里的消息不一定是整段对话：写着「更早的 N 条消息没有放进来」或者缺了 summary 时，回复要用到前面的内容就先用 read_channel_conversation 读这个对话。
 - 对方问的是用户的助手本身（PLC：怎样装、怎样配 Slack 连接、要不要自己建 app、某个设置在哪）时，答案在 PLC 自己的代码和文档里（docs/，设置页建应用的清单在 packages/engine/src/channels/sources/slack-settings.ts）。先查，再按查到的写草稿，不要说不知道接入方式。问到 Slack、GitHub 这些平台本身怎样工作时，先查官方文档。
 
 ## 2. 每条交给你的消息都要定下来

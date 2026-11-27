@@ -127,3 +127,14 @@ export function splitForShadow(events: readonly EventRecord[], facts: ShadowRout
   for (const event of events) (shadowRoute(event, facts).shadow ? shadow : lead).push(event);
   return { shadow, lead };
 }
+
+/**
+ * 交给 shadow 以前：同一个对象（shadowObjectKey）已经有一批在跑时，它的新事件先等着，那一批结束再交（工单 #584）。
+ * 以前外部消息一到就单独开一批，几批同时跑：同一个对话里连发的消息分到不同的会话，后一批看不到前一批看过的图，
+ * 连前一批的结论（它结束时才写）也没有。等前一批结束，后一批至少能拿到它的结论和看过的文件（shadowHandoffText）。
+ */
+export function holdForRunningShadow<T extends Pick<EventRecord, "entityKey" | "payload">>(
+  events: readonly T[], running: ReadonlySet<string>,
+): T[] {
+  return events.filter((event) => !running.has(shadowObjectKey(event)));
+}

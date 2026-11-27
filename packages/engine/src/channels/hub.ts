@@ -2509,6 +2509,61 @@ export class ChannelHub {
     }
   }
 
+  /**
+   * 记下 Lead 或分身用 read_channel_file 看过一个文件（工单 #584）。交给 Lead 的消息事件按它判断前文里的附件读没读过。
+   * 同一个文件只记第一次。记不下时只写日志：不影响 Lead 看文件。
+   */
+  markFileRead(fileId: string): void {
+    const bar = fileId.indexOf(":");
+    if (bar <= 0) return;
+    const channel = fileId.slice(0, bar);
+    try {
+      this.db.transaction(() => appendEvent(this.db, {
+        source: "system", sourceRef: `channel-file-read:${fileId}`, kind: CHANNEL_EVENT_KINDS.fileRead,
+        entityKey: `channel:${channel}`, level: "record", occurredAt: this.now().toISOString(),
+        payload: { channel, file: fileId, summary: `看过了文件 ${fileId}` },
+      }))();
+    } catch (error) {
+      this.log(`[channels] could not record that ${fileId} was read: ${errorText(error)}`);
+    }
+  }
+
+  /**
+   * 对方刚发的、还没有人用 read_channel_file 看过的文件编号（工单 #584：对方先连发两张图，再发一句话，Lead 只看到这句话就回了）。
+   * 看同一个对话里这条消息以前 CHANNEL_UNREAD_ATTACHMENT_WINDOW_MS 以内别人发的消息，不管是只有附件、还是有字也有附件；
+   * 加上这条消息自己带的文件（只有附件的消息另有一句提示，不再列）。任何来源、任何文件都一样：认的是正文里的文件标记。
+   */
+  private unreadAttachmentsBefore(adapter: ChannelAdapter, event: EventRecord): string[] {
+    if (!event.entityKey) return [];
+    const at = Date.parse(event.occurredAt);
+    if (Number.isNaN(at)) return [];
+    const rows = this.db.prepare(
+      `SELECT occurred_at, payload FROM events
+        WHERE source = ? AND entity_key = ? AND seq < ? AND json_valid(payload)
+          AND json_extract(payload, '$.role') = 'message' AND instr(payload, '文件编号') > 0
+        ORDER BY seq DESC LIMIT 20`,
+    ).all(adapter.id, event.entityKey, event.seq) as Array<{ occurred_at: string; payload: string }>;
+    const files: string[] = [];
+    const add = (text: unknown) => {
+      for (const file of fileIdsIn(typeof text === "string" ? text : "")) if (!files.includes(file)) files.push(file);
+    };
+    for (const row of rows.reverse()) {
+      const when = Date.parse(row.occurred_at);
+      if (Number.isNaN(when) || at - when > CHANNEL_UNREAD_ATTACHMENT_WINDOW_MS) continue;
+      try {
+        add((JSON.parse(row.payload) as Record<string, unknown>).text);
+      } catch {
+        continue;
+      }
+    }
+    if (event.payload.attachmentsOnly !== true) add(event.payload.text);
+    if (!files.length) return [];
+    const read = this.db.prepare(
+      `SELECT 1 FROM events WHERE kind = ? AND json_valid(payload) AND json_extract(payload, '$.file') = ? LIMIT 1`,
+    );
+    return files.filter((file) => !read.get(CHANNEL_EVENT_KINDS.fileRead, file));
+  }
+
   /** 有文档的来源和它们各有哪几种文档（Lead 的文档工具用）。 */
   documentKinds(): Array<{ source: string; kinds: Readonly<Record<string, string>> }> {
     return this.options.registry.list()
@@ -4182,6 +4237,7 @@ export class ChannelHub {
           reason: (action?.reason ?? `收件判断没有做成（${result.error ? clipEventText(redactSecretText(result.error), 120) : "快模型不可用"}）`)
             + (action?.kind === "react" ? `（建议 :${action.emoji}:）` : "")
             + (event.payload.attachmentsOnly === true ? "（这条消息只有附件：先用 read_channel_file 看内容再判断）" : "")
+            + unreadAttachmentsNote(this.unreadAttachmentsBefore(adapter, event))
             + (result.fallback && result.reason ? `（决策模型没有回答，由 LLM 判断：${clipEventText(redactSecretText(result.reason), 160)}）` : ""),
         }, context);
       } finally {
@@ -5286,4 +5342,19 @@ export function createChannelHub(options: ChannelHubOptions): ChannelHub {
 function isStringRecord(value: unknown): value is Record<string, string> {
   return typeof value === "object" && value !== null && !Array.isArray(value)
     && Object.values(value).every((entry) => typeof entry === "string");
+}
+
+// 交给 Lead 的消息事件看前文里多久以内的附件（工单 #584）：对方连发几张图再说一句话，通常在几分钟里。
+export const CHANNEL_UNREAD_ATTACHMENT_WINDOW_MS = 10 * 60_000;
+
+// 正文里文件标记的文件编号，例如「[图片 a.png，文件编号 slack:F0123]」里的 slack:F0123。来源插件都按这个格式写文件标记
+// （types.ts 的 readFile），文件编号是「来源名:编号」。
+function fileIdsIn(text: string): string[] {
+  return [...text.matchAll(/文件编号 ([^\s\]，]+)\]/g)].map((match) => match[1]!);
+}
+
+// 前文里还没看过的附件的提示：列出文件编号，Lead 和分身照着用 read_channel_file 看。
+function unreadAttachmentsNote(files: string[]): string {
+  if (!files.length) return "";
+  return `（对方刚发了 ${files.length} 个附件（文件编号 ${files.join("、")}），还没有人看过：先用 read_channel_file 一个一个看过再回）`;
 }
