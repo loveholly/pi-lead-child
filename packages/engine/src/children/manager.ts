@@ -27,7 +27,7 @@ import { stopReattachedLauncher, type AttachableLaunch } from "@pi-lead-child/ru
 import type { Item, Run, RunPurpose, RuntimeId, Workspace } from "@pi-lead-child/core";
 import type { RpcClient } from "@pi-lead-child/runtime";
 import { createLearningService } from "../coordinator/learning.js";
-import { awaitWorktreeDependencies } from "../coordinator/worktree-dependencies.js";
+import { DEPENDENCY_STATUS_FILE, EXISTING_NODE_MODULES, peekWorktreeDependencies, readDependencyStatus, reinstallCommand } from "../coordinator/worktree-dependencies.js";
 import { fetchOrigin, refreshFreshWorktree } from "../coordinator/workspace-remote.js";
 import { createCoordinator } from "../coordinator/service.js";
 import { executionPlanPromptSection } from "../coordinator/execution-plan.js";
@@ -299,6 +299,74 @@ const SANDBOX_GIT_NOTE = "\nYour commands run in a sandbox without git credentia
   + "After delivery the system pushes the branch and opens a draft pull request. If something is still missing, say exactly what "
   + "with ticket_update; do not ask the user to run git in a terminal.";
 
+// 执行者不等依赖，所以提示要说清它们现在的状态（2026-11-25）。状态文件由 worktree-dependencies.ts 在准备做完时写到 worktree 的
+// git 目录里。
+// 同一时间只有一方写 node_modules（PR #85 评审第 1 条，2026-11-26）：准备最长可能要「安装 10 分钟 + 每个 node_modules 克隆 20 分钟」，
+// 比这条命令能等的 10 分钟长。所以命令等到时限还没有状态文件时，输出 waiting:，让执行者再跑一遍；只有 failed:、none: 才让它自己装
+// （那时 daemon 已经不写了）。等了很久（WAITING_RUNS_BEFORE_BLOCKED 轮）还是 waiting:，说明准备卡住了：让执行者报阻塞，不去装。
+const WAITING_RUNS_BEFORE_BLOCKED = 6;
+const WAITING_MESSAGE = "waiting: the system is still installing the dependencies in this worktree. Run this same command again. "
+  + "Do not install the dependencies yourself while it says waiting.";
+
+// 依赖是按 worktree 起点的锁文件装的（#499）。执行者合并或 rebase 别的分支、锁文件变了以后，node_modules 就旧了，
+// 会缺包（#498 缺 @anthropic-ai/claude-agent-sdk）。装的时候不跑安装脚本，所以原生包（better-sqlite3）要单独补编译。
+// 只在 daemon 已经装完（ready）时写这条：daemon 还在装（preparing / waiting）时执行者不能写 node_modules（PR #85 评审第 1 条）。
+// #502：以前提示只写「npm ci --ignore-scripts，然后 npm rebuild better-sqlite3」两步，且只在依赖「已装好」和「还在准备」时出现；
+// 执行者在「装失败、超时、没准备」时只看到「自己装」，装完不会补编译。现在所有要自己装的地方都给同一条完整命令（reinstallCommand）。
+function lockfileChangeNote(reinstall: string | null): string {
+  if (!reinstall) return "";
+  return " They match the lockfile as it was when this worktree was created. If you merge or rebase and the lockfile changes, "
+    + `run \`${reinstall}\` again (it installs from the lockfile and rebuilds the native packages that an install without scripts leaves unbuilt) `
+    + "instead of adding single packages with --no-save.";
+}
+
+/** 执行者等依赖用的命令。loops、seconds 只有测试会改小。 */
+export function waitForDependenciesCommand(loops = 300, seconds = 2): string {
+  return `f=$(git rev-parse --git-path ${DEPENDENCY_STATUS_FILE}); for i in $(seq 1 ${loops}); do [ -e "$f" ] && break; sleep ${seconds}; done; cat "$f" 2>/dev/null || echo "${WAITING_MESSAGE}"`;
+}
+
+export function dependenciesNote(worktreePath: string): string {
+  const state = peekWorktreeDependencies(worktreePath);
+  const reinstall = reinstallCommand(worktreePath);
+  const install = reinstall
+    ? `install them here yourself with \`${reinstall}\``
+    : "install them here yourself (use the package manager the lockfile names)";
+  const lockfileNote = lockfileChangeNote(reinstall);
+  if (state?.state === "done") {
+    const { result } = state;
+    if (result.error) return ` Dependencies: the background preparation failed (${result.error}); ${install} when you need to build or run tests.`;
+    // 原生包：安装脚本没跑，系统也不在沙箱外补编译（rebuild 会跑 node_modules 里的脚本，PR #85 评审第 3 条）：写明缺了什么，
+    // 以及执行者要在沙箱里跑的那条命令。
+    const notBuilt = result.rebuildError
+      ? ` Warning: a native package is not built (${result.rebuildError}); `
+        + (result.rebuildCommand
+          ? `run \`${result.rebuildCommand}\` in the sandbox before you run tests.`
+          : "rebuild it yourself in the sandbox before you run tests.")
+      : "";
+    if (result.installedWith) return ` Dependencies are ready (installed with \`${result.installedWith}\`).${notBuilt}${lockfileNote}`;
+    // 已经有 node_modules 的旧工作区：依赖是好的，缺原生程序时只提示，不在沙箱外补（#502）。
+    if (result.skipped === EXISTING_NODE_MODULES) return ` Dependencies are ready (node_modules was already in this worktree).${notBuilt}${lockfileNote}`;
+    if (result.cloned.length) return ` Dependencies are ready (cloned from the user's checkout: ${result.cloned.join(", ")}).`;
+    const why = result.fallbackReason ? `; installing with the package manager did not work: ${result.fallbackReason}` : "";
+    return ` Dependencies were not prepared (${result.skipped ?? "nothing to prepare"}${why}); ${install} when you need to build or run tests.`;
+  }
+  if (state?.state === "preparing") {
+    return " Dependencies (for example node_modules) are still being prepared in the background; the run did not wait for them, so start on the work now. "
+      + `Before you run tests, a build or a type-check, wait for them with this command: \`${waitForDependenciesCommand()}\`. `
+      + "Its output starts with \"ready:\" when they can be used. "
+      + `If it starts with "failed:" or "none:", ${install} when you need to build or run tests. `
+      + "If it starts with \"waiting:\", the system is still writing node_modules: run the command again and do not install, "
+      + "because two writers at once break node_modules. "
+      + `If it still says "waiting:" after ${WAITING_RUNS_BEFORE_BLOCKED} runs (about an hour), the preparation is stuck: `
+      + "report the ticket as blocked with ticket_update and say so; still do not install.";
+  }
+  // daemon 重启后内存里没有记录：这个 worktree 以前准备过的话，状态文件还在，照它写。
+  const earlier = readDependencyStatus(worktreePath);
+  if (earlier?.startsWith("ready:")) return ` Dependencies are ready (${earlier.slice("ready:".length).trim()}).${lockfileNote}`;
+  if (earlier) return ` Dependencies were not prepared (${earlier}); ${install} when you need to build or run tests.`;
+  return ` Dependencies (for example node_modules) are not installed in this worktree: ${install} when you need to build or run tests.`;
+}
+
 function workspaceSection(db: Db, itemId: number, workspace: Workspace, role: "executor" | "reviewer"): string {
   const section = workspaceSectionBody(db, itemId, workspace, role);
   return isDisposableCheckout(workspace) ? section : `${section}${SANDBOX_GIT_NOTE}`;
@@ -321,8 +389,8 @@ function workspaceSectionBody(db: Db, itemId: number, workspace: Workspace, role
       + `on branch ${workspace.branch ?? "n/a"} (base ${workspace.base_ref ?? "n/a"}). The user's own checkout is not touched. `
       + "Commit your work on this branch. After the ticket is accepted, the branch is merged into the user's checkout "
       + "when the user agrees; nothing you leave uncommitted is merged. "
-      + "Do not switch branches, do not push, and do not edit outside this worktree. Dependencies (for example "
-      + "node_modules) are not installed in a new worktree: install them here when you need to build or run tests.";
+      + "Do not switch branches, do not push, and do not edit outside this worktree."
+      + dependenciesNote(workspace.path);
   }
   const reason = sharedWorkspaceReason(db, workspace);
   return `\n## Coding workspace\nWorkspace #${workspace.id} is the shared checkout at ${workspace.path}`
@@ -895,8 +963,8 @@ async function runItemLifecycle(
       });
     }
     if (toolBridge) secretValues = secretEnvValues({ ...process.env, ...opts.env, PLC_AGENT_TOOL_TOKEN: toolBridge.token });
-    // 新建的隔离 worktree 在后台克隆依赖（coordinator/worktree-dependencies.ts）：先等它做完，执行者一开始就能跑测试。
-    if (!adopt) await unlessShuttingDown(awaitWorktreeDependencies(workdir));
+    // 新建的隔离 worktree 在后台准备依赖（coordinator/worktree-dependencies.ts）：执行者不等它（2026-11-25，#465 克隆等了 6 分钟以上），
+    // 建好 worktree 就启动；提示里写了依赖状态和等它的命令（workspaceSection）。
     runtimeStarting = true;
     handle = adopt ? await runtime.attach!({
       itemId, runId, role, purpose, workdir, model,

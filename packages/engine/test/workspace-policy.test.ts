@@ -16,6 +16,7 @@ import {
   prepareRunWorkspace, requestSharedWorkspace, setDeploymentRepositoriesForTesting, setPullRequestReviewTarget,
 } from "../src/coordinator/workspace-policy.js";
 import { sweepWorkspaces } from "../src/coordinator/workspace.js";
+import { awaitWorktreeDependencies, forgetWorktreeDependenciesForTests } from "../src/coordinator/worktree-dependencies.js";
 import { forgetGitFacts, setGitFactsLog } from "../src/coordinator/git-facts.js";
 import { parseRepositorySpec, recordTicketRepository, startRepositoryClone } from "../src/coordinator/repository-checkout.js";
 
@@ -243,6 +244,174 @@ describe("the system decides that a ticket is a coding ticket", () => {
 
 // 2026-11-03：一张大仓库（6,863 个文件）工单开跑时，git worktree add 在 daemon 的主线程上同步跑了约 19 秒。
 // 这段时间 Slack 收不到 pong，判定连接已断；Companion 网页端也掉线重连；Lead 的 spawn_child 一直等着。
+// 2026-11-25：#465 的执行者等了 6 分钟以上的依赖克隆，一行都没开始做。现在建好 worktree 就启动，提示里写依赖状态。
+describe("the executor does not wait for dependencies", () => {
+  const savedBunInstall = process.env.BUN_INSTALL;
+  afterEach(() => {
+    if (savedBunInstall === undefined) delete process.env.BUN_INSTALL;
+    else process.env.BUN_INSTALL = savedBunInstall;
+    forgetWorktreeDependenciesForTests();
+  });
+
+  function bunRepo(body: string): string {
+    writeFileSync(join(repo, "package.json"), JSON.stringify({ name: "demo", private: true }));
+    writeFileSync(join(repo, "bun.lock"), "{}\n");
+    git(repo, "add", ".");
+    git(repo, "commit", "-qm", "bun project");
+    const home = join(dir, "bun-home");
+    mkdirSync(join(home, "bin"), { recursive: true });
+    writeFileSync(join(home, "bin", "bun"), `#!/bin/sh\n${body}\n`);
+    chmodSync(join(home, "bin", "bun"), 0o755);
+    process.env.BUN_INSTALL = home;
+    return home;
+  }
+
+  it("starts the runtime while bun install is still running, and tells the executor how to wait", async () => {
+    const gate = join(dir, "gate");
+    bunRepo(`while [ ! -e ${gate} ]; do sleep 0.05; done\nmkdir -p node_modules/from-bun`);
+    const itemId = genericTicket();
+    // 以前 runItem 会等依赖准备完才启动 runtime：bun 在等 gate，这一行就永远不返回。
+    const { request } = await run(itemId);
+    expect(request.prompt).toContain("still being prepared in the background");
+    expect(request.prompt).toContain("git rev-parse --git-path plc-deps-status");
+    expect(request.prompt).toContain("install them here yourself");
+    expect(request.prompt).not.toContain("are not installed in this worktree");
+    writeFileSync(gate, "");
+    const result = await awaitWorktreeDependencies(request.workdir);
+    expect(result?.installedWith).toContain("bun install --frozen-lockfile");
+    const statusFile = join(git(request.workdir, "rev-parse", "--absolute-git-dir"), "plc-deps-status");
+    expect(readFileSync(statusFile, "utf8")).toMatch(/^ready: installed with bun install/);
+  }, 30_000);
+
+  // #499：依赖按 worktree 起点的锁文件装；执行者合并别的分支后锁文件变了，node_modules 就旧了（#498 缺 claude-agent-sdk）。
+  it("tells the executor to install again from the lockfile after a merge changes it, rather than patching single packages", async () => {
+    bunRepo("mkdir -p node_modules/from-bun");
+    const itemId = genericTicket();
+    const first = await run(itemId);
+    await awaitWorktreeDependencies(first.request.workdir);
+    const second = await run(itemId);
+    expect(second.request.prompt).toContain("Dependencies are ready (installed with `bun install");
+    expect(second.request.prompt).toContain("If you merge or rebase and the lockfile changes");
+    // bun 没有 rebuild 命令：给的是它自己的安装命令，不是 npm 的。
+    expect(second.request.prompt).toContain("run `bun install --frozen-lockfile --ignore-scripts` again");
+    expect(second.request.prompt).not.toContain("npm rebuild");
+  }, 30_000);
+
+  // #502：执行者照提示重装以后 better-sqlite3 也要能用。提示给的是一条完整命令（安装加补编译），
+  // 而且在「还在准备」「装失败」「没准备」这些要自己装的地方都一样，不只在锁文件变了的那一句里。
+  describe("the reinstall command in an npm repository that uses better-sqlite3", () => {
+    const savedPath = process.env.PATH;
+    afterEach(() => { process.env.PATH = savedPath; });
+    const COMMAND = "npm ci --prefer-offline --ignore-scripts --no-audit --no-fund && npm rebuild better-sqlite3";
+
+    function npmRepo(npmBody: string): void {
+      writeFileSync(join(repo, "package.json"), JSON.stringify({ name: "demo", private: true }));
+      writeFileSync(join(repo, "package-lock.json"), JSON.stringify({ lockfileVersion: 3, packages: { "node_modules/better-sqlite3": { version: "1.0.0" } } }));
+      git(repo, "add", ".");
+      git(repo, "commit", "-qm", "npm project");
+      const bin = join(dir, "npm-bin");
+      mkdirSync(bin, { recursive: true });
+      writeFileSync(join(bin, "npm"), `#!/bin/sh\n${npmBody}\n`);
+      chmodSync(join(bin, "npm"), 0o755);
+      process.env.PATH = `${bin}:${process.env.PATH}`;
+    }
+
+    it("gives one command that installs and rebuilds while the dependencies are still being prepared", async () => {
+      const gate = join(dir, "npm-gate");
+      npmRepo(`while [ ! -e ${gate} ]; do sleep 0.05; done\nmkdir -p node_modules/from-npm`);
+      const itemId = genericTicket();
+      const { request } = await run(itemId);
+      expect(request.prompt).toContain("still being prepared in the background");
+      // 只在 failed:/none: 时才自己装；daemon 还在写 node_modules，所以这时不提「锁文件变了就重装」（PR #85 评审第 1 条）。
+      expect(request.prompt).toContain(`If it starts with "failed:" or "none:", install them here yourself with \`${COMMAND}\``);
+      expect(request.prompt).not.toContain("If you merge or rebase and the lockfile changes");
+      writeFileSync(gate, "");
+      await awaitWorktreeDependencies(request.workdir);
+      // daemon 装完以后才给重装的建议，用同一条完整命令。
+      const after = await run(itemId);
+      expect(after.request.prompt).toContain("Dependencies are ready");
+      expect(after.request.prompt).toContain(`run \`${COMMAND}\` again`);
+    }, 30_000);
+
+    it("gives the same command when the background preparation failed", async () => {
+      npmRepo("exit 1");
+      const itemId = genericTicket();
+      const first = await run(itemId);
+      await awaitWorktreeDependencies(first.request.workdir);
+      const { request } = await run(itemId);
+      expect(request.prompt).toContain(`install them here yourself with \`${COMMAND}\``);
+    }, 30_000);
+  });
+
+  it("tells the executor to install the dependencies itself when the preparation already failed", async () => {
+    bunRepo("exit 1");
+    const itemId = genericTicket();
+    const first = await run(itemId);
+    await awaitWorktreeDependencies(first.request.workdir);
+    // 同一张工单的下一个 Run 复用 worktree，这时准备已经做完：提示写结果，不再写「还在准备」。
+    const second = await run(itemId);
+    expect(second.request.prompt).toContain("Dependencies were not prepared");
+    expect(second.request.prompt).toContain("install them here yourself");
+    expect(second.request.prompt).not.toContain("still being prepared");
+  }, 30_000);
+
+  // PR #85 评审第 1 条（2026-11-26）：等待命令超时就让执行者自己装，daemon 却还在往同一个 node_modules 里写。
+  // 现在只有 daemon 写：准备没做完时，等待命令输出的是「再等一轮」，只有 failed:/none: 才让执行者自己装。
+  it("never tells the executor to install while the daemon is still writing node_modules", async () => {
+    const gate = join(dir, "gate");
+    bunRepo(`while [ ! -e ${gate} ]; do sleep 0.05; done\nmkdir -p node_modules/from-bun`);
+    const itemId = genericTicket();
+    const { request } = await run(itemId);
+    const prompt = request.prompt;
+    // 提示里的等待命令，只把等的时间缩短。
+    const command = /wait for them with this command: `([^`]+)`/.exec(prompt)?.[1];
+    expect(command).toBeTruthy();
+    const quick = command!.replace("seq 1 300", "seq 1 2").replace("sleep 2", "sleep 0.1");
+    const wait = (): string => execFileSync("bash", ["-c", quick], { cwd: request.workdir, encoding: "utf8" }).trim();
+
+    // bun 还在装（卡在 gate 上）：等待命令超时。它的输出不能是让执行者自己装的那几种。
+    const stillRunning = wait();
+    expect(stillRunning).toMatch(/^waiting:/);
+    expect(stillRunning).toMatch(/Run this same command again/);
+    expect(stillRunning).not.toMatch(/^(failed|none|timed out):/);
+    expect(existsSync(join(request.workdir, "node_modules", "from-bun"))).toBe(false);
+    // 提示只在 failed:/none: 时让执行者自己装；waiting 时让它再等，等了很久就报阻塞，不去装。
+    expect(prompt).toMatch(/If it starts with "failed:" or "none:", install them here yourself/);
+    expect(prompt).toMatch(/If it starts with "waiting:".*do not install/s);
+    expect(prompt).toContain("ticket_update");
+    expect(prompt).not.toMatch(/"timed out:"/);
+
+    writeFileSync(gate, "");
+    await awaitWorktreeDependencies(request.workdir);
+    expect(wait()).toMatch(/^ready: installed with bun install/);
+  }, 30_000);
+
+  // PR #85 评审第 3 条：daemon 重启后内存里没有记录，但状态文件还在，提示要照它写。
+  it("tells the executor the dependencies are ready after a daemon restart, from the status file", async () => {
+    bunRepo("mkdir -p node_modules/from-bun");
+    const itemId = genericTicket();
+    const first = await run(itemId);
+    await awaitWorktreeDependencies(first.request.workdir);
+    forgetWorktreeDependenciesForTests(); // daemon 重启：pending / settled 都空了
+    const second = await run(itemId);
+    expect(second.request.prompt).toContain("Dependencies are ready");
+    expect(second.request.prompt).toContain("installed with bun install");
+    expect(second.request.prompt).not.toContain("are not installed in this worktree");
+  }, 30_000);
+
+  // PR #85 评审第 3 条：没有可克隆的依赖时，提示要带包管理器装失败的原因。
+  it("gives the reason the package manager failed when nothing could be prepared", async () => {
+    bunRepo("echo 'registry unreachable' >&2\nexit 1");
+    const itemId = genericTicket();
+    const first = await run(itemId);
+    await awaitWorktreeDependencies(first.request.workdir);
+    const second = await run(itemId);
+    expect(second.request.prompt).toContain("Dependencies were not prepared");
+    expect(second.request.prompt).toContain("installing with the package manager did not work");
+    expect(second.request.prompt).toContain("registry unreachable");
+  }, 30_000);
+});
+
 describe("preparing a new worktree does not stop the daemon", () => {
   let savedPath: string | undefined;
   afterEach(() => {

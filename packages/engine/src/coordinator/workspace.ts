@@ -474,8 +474,8 @@ function startIsolatedWorkspace(
       throw new Error(`workspace #${workspace.id} has incompatible git provenance`);
     }
     if (workspace.state === "active" || workspace.state === "idle" || workspace.state === "review_hold") {
-      // 以前建的 worktree 可能还没有依赖：补上（已经有时什么也不做）。
-      prepareDependencies(db, workspace, repoRoot);
+      // 以前建的 worktree 可能还没有依赖：已经有时只检查原生程序；没有时 daemon 不在沙箱外装（reused），让执行者在沙箱里装。
+      prepareDependencies(db, workspace, repoRoot, true);
       return { workspace, repoRoot, checkout: false };
     }
     if (workspace.state === "failed" || workspace.state === "blocked") {
@@ -533,18 +533,25 @@ function failProvisioning(db: Db, itemId: number, workspace: Workspace, error: u
 
 // 在后台把用户 checkout 的依赖克隆进 worktree（worktree-dependencies.ts）。执行者启动前会等它（children/manager.ts）。
 // 做完记一条活动：克隆了哪些、没做的原因或者出错的原因。
-function prepareDependencies(db: Db, workspace: Workspace, source: string): void {
+function prepareDependencies(db: Db, workspace: Workspace, source: string, reused = false): void {
   if (!existsSync(workspace.path)) return;
-  void startWorktreeDependencies(source, workspace.path, (result) => {
-    if (!result.cloned.length && !result.error) return;
+  void startWorktreeDependencies(source, workspace.path, (result, { durationMs }) => {
+    // 装好（installedWith）和缺原生程序也记一条：以前 npm ci 装成功不留记录，没法回头看装一次花多久（#502）。
+    if (!result.cloned.length && !result.error && !result.fallbackReason && !result.selectionNote
+      && !result.installedWith && !result.rebuildError) return;
     addActivity(db, {
       itemId: workspace.owner_item_id, actor: "system", kind: "decision",
       payload: {
         decision: "workspace_dependencies", workspaceId: workspace.id, cloned: result.cloned, error: result.error,
         ...(result.installedWith ? { installedWith: result.installedWith } : {}),
+        ...(result.fallbackReason ? { fallbackReason: result.fallbackReason } : {}),
+        ...(result.selectionNote ? { selectionNote: result.selectionNote } : {}),
+        ...(result.rebuildError ? { rebuildError: result.rebuildError } : {}),
+        ...(result.rebuildCommand ? { rebuildCommand: result.rebuildCommand } : {}),
+        durationMs,
       },
     });
-  });
+  }, { reused });
 }
 
 function activeRunCount(db: Db, workspaceId: number): number {
